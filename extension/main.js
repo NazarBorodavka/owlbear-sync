@@ -35,31 +35,30 @@ document.querySelector('#app').innerHTML = `
 let socket = null;
 let isReady = false;
 let tokenMapping = {}; // physicalId -> virtualItemId
+let assignedNames = {}; // physicalId -> virtualName (Used to re-sync across scenes)
 let currentPhysicalTokens = [];
 let virtualTokens = [];
 let blackoutItemId = null;
 let filterItemId = null;
 let isUpdating = false;
 let lastUpdateTime = 0;
-const THROTTLE_MS = 100; // Only update Owlbear every 100ms (10 FPS)
-
-const METADATA_KEY = "com.owlbear.sync/physical_id";
+const THROTTLE_MS = 100; 
 
 OBR.onReady(async () => {
   isReady = true;
   document.getElementById('status').innerText = "Ready. Connect to Tracker.";
   document.getElementById('status').className = "status ready";
   
-  // Sticky Assignments: Rebuild mapping whenever the scene changes
-  OBR.scene.items.onChange(async (items) => {
+  // Name-Based Re-sync: Rebuild mapping whenever the scene changes
+  OBR.scene.items.onChange((items) => {
     virtualTokens = items.filter(item => item.layer === "CHARACTER" || item.layer === "MOUNT");
     
-    // Scan for tokens that have our Physical ID metadata
+    // Look for items that match the names we assigned previously
     const newMapping = {};
-    for (const item of items) {
-      const physicalId = item.metadata[METADATA_KEY];
-      if (physicalId) {
-        newMapping[physicalId] = item.id;
+    for (const [physicalId, name] of Object.entries(assignedNames)) {
+      const match = virtualTokens.find(vt => (vt.text && vt.text.plainText === name) || vt.name === name);
+      if (match) {
+        newMapping[physicalId] = match.id;
       }
     }
     tokenMapping = newMapping;
@@ -188,28 +187,17 @@ function renderMappingUI() {
     }
     
     // Handle changes
-    select.addEventListener('change', async (e) => {
+    select.addEventListener('change', (e) => {
       const virtualId = e.target.value;
+      const selectedToken = virtualTokens.find(vt => vt.id === virtualId);
       
-      // 1. Clear old metadata if this physical token was already assigned to something else
-      if (tokenMapping[pt.id]) {
-        await OBR.scene.items.updateItems([tokenMapping[pt.id]], (items) => {
-          for (let item of items) {
-            delete item.metadata[METADATA_KEY];
-          }
-        });
-      }
-
       if (virtualId === "") {
         delete tokenMapping[pt.id];
+        delete assignedNames[pt.id];
       } else {
         tokenMapping[pt.id] = virtualId;
-        // 2. Tag the new virtual token with our Physical ID
-        await OBR.scene.items.updateItems([virtualId], (items) => {
-          for (let item of items) {
-            item.metadata[METADATA_KEY] = pt.id;
-          }
-        });
+        // Save the name for re-syncing across scenes
+        assignedNames[pt.id] = selectedToken.text && selectedToken.text.plainText ? selectedToken.text.plainText : (selectedToken.name || 'Unnamed Token');
       }
     });
     
