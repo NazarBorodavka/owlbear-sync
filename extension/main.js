@@ -39,6 +39,9 @@ let currentPhysicalTokens = [];
 let virtualTokens = [];
 let blackoutItemId = null;
 let filterItemId = null;
+let isUpdating = false;
+let lastUpdateTime = 0;
+const THROTTLE_MS = 100; // Only update Owlbear every 100ms (10 FPS)
 
 OBR.onReady(async () => {
   isReady = true;
@@ -90,22 +93,36 @@ function connectSocketIO(url) {
     socket.on('tokens_update', async (data) => {
       if (!isReady) return;
       
-      const tokens = data.tokens || [];
-      const blankScreen = data.blank_screen || false;
+      const now = Date.now();
+      if (now - lastUpdateTime < THROTTLE_MS) return; // Throttle to 10 FPS
       
-      console.log(`Received tokens_update: ${tokens.length} tokens, blackout: ${blankScreen}`);
-      
-      // Prioritize blackout for immediate anti-reflection
-      await updateBlackout(blankScreen);
-      await syncTokensWithOwlbear(tokens);
-      
-      // Check if physical tokens changed to avoid unnecessary re-renders
-      const newIds = tokens.map(t => t.id).sort().join(',');
-      const oldIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
-      
-      currentPhysicalTokens = tokens;
-      if (newIds !== oldIds) {
-        renderMappingUI();
+      if (isUpdating) return; // Skip if we're still processing the previous frame
+      isUpdating = true;
+
+      try {
+        const tokens = data.tokens || [];
+        const blankScreen = data.blank_screen || false;
+        
+        // 1. Prioritize blackout (Critical for projector setup)
+        await updateBlackout(blankScreen);
+        
+        // 2. Sync positions
+        await syncTokensWithOwlbear(tokens);
+        
+        // 3. UI Update (Only if tokens list actually changed)
+        const newIds = tokens.map(t => t.id).sort().join(',');
+        const oldIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
+        
+        currentPhysicalTokens = tokens;
+        if (newIds !== oldIds) {
+          renderMappingUI();
+        }
+        
+        lastUpdateTime = Date.now();
+      } catch (err) {
+        console.error("Sync Error:", err);
+      } finally {
+        isUpdating = false;
       }
     });
   } catch (e) {

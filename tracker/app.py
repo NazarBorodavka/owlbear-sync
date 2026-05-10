@@ -9,6 +9,7 @@ import os
 import requests
 from flask_httpauth import HTTPBasicAuth
 import json
+import queue
 try:
     import stag
     # Ensure it's the correct stag library (fiducial markers, not music tagging)
@@ -43,98 +44,45 @@ def verify_password(username, password):
 
 class IPCameraCapture:
     def __init__(self, url):
-        self.original_url = url
         self.url = url
-        self.is_opened = False
-        self.mode = 'mjpeg'
-        self.session = requests.Session()
-        self.mjpeg_stream = None
-        self.bytes = b''
+        self.cap = cv2.VideoCapture(url)
+        # Use a queue of size 1 to ensure we only ever have the LATEST frame
+        self.q = queue.Queue(maxsize=1)
+        self.is_running = True
         
-        # Test if the camera supports the /shot.jpg fast-fetch method
-        test_url = url
-        if test_url.endswith('/'):
-            test_url += 'shot.jpg'
-        elif test_url.count('/') == 2:
-            test_url += '/shot.jpg'
-        elif test_url.endswith('/video'):
-            test_url = test_url.replace('/video', '/shot.jpg')
-            
-        try:
-            resp = self.session.get(test_url, timeout=2)
-            if resp.status_code == 200:
-                self.mode = 'shot'
-                self.url = test_url
-                self.is_opened = True
-                print(f"Camera connected in SHOT mode via {self.url}")
-                return
-        except Exception as e:
-            print(f"SHOT mode not supported or timed out: {e}")
-            
-        # Fallback to reading the raw MJPEG stream continuously
-        self.url = self.original_url
-        try:
-            self.mjpeg_stream = self.session.get(self.url, stream=True, timeout=5)
-            if self.mjpeg_stream.status_code == 200:
-                self.is_opened = True
-                self.mode = 'mjpeg'
-                print(f"Camera connected in STREAM mode via {self.url}")
-            else:
-                self.is_opened = False
-        except Exception as e:
-            print(f"STREAM mode failed: {e}")
-            self.is_opened = False
+        # Tapo/RTSP specific optimizations
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        
+        self.thread = threading.Thread(target=self._reader, daemon=True)
+        self.thread.start()
 
-    def isOpened(self):
-        return self.is_opened
+    def _reader(self):
+        while self.is_running:
+            ret, frame = self.cap.read()
+            if not ret:
+                time.sleep(0.1)
+                continue
+            if not self.q.empty():
+                try:
+                    self.q.get_nowait() # Discard old frame
+                except queue.Empty:
+                    pass
+            self.q.put(frame)
 
     def read(self):
-        if not self.is_opened:
+        try:
+            # Wait a tiny bit for a frame, but don't block forever
+            frame = self.q.get(timeout=0.5)
+            return True, frame
+        except:
             return False, None
-            
-        if self.mode == 'shot':
-            try:
-                resp = self.session.get(self.url, timeout=2)
-                if resp.status_code == 200:
-                    arr = np.frombuffer(resp.content, dtype=np.uint8)
-                    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                    if frame is not None:
-                        return True, frame
-            except Exception:
-                pass
-            return False, None
-            
-        elif self.mode == 'mjpeg':
-            try:
-                for chunk in self.mjpeg_stream.iter_content(chunk_size=8192):
-                    self.bytes += chunk
-                    a = self.bytes.find(b'\xff\xd8')
-                    b = self.bytes.find(b'\xff\xd9')
-                    if a != -1 and b != -1:
-                        if b < a:
-                            self.bytes = self.bytes[a:]
-                            continue
-                        jpg = self.bytes[a:b+2]
-                        self.bytes = self.bytes[b+2:]
-                        frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
-                        if frame is not None:
-                            return True, frame
-            except Exception as e:
-                print(f"Stream error: {e}")
-                # If stream drops, is_opened becomes false to trigger reconnect logic
-                self.is_opened = False
-            return False, None
-            
-        return False, None
+
+    def isOpened(self):
+        return self.cap.isOpened()
 
     def release(self):
-        self.is_opened = False
-        if self.mjpeg_stream:
-            self.mjpeg_stream.close()
-        try:
-            self.session.close()
-        except:
-            pass
+        self.is_running = False
+        self.cap.release()
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
@@ -258,7 +206,7 @@ def get_video_stream():
     fail_count = 0
     
     # 20 FPS target
-    frame_interval = 1.0 / 20.0 
+    frame_interval = 0.1 
     last_marker_ids = set()
     
     while is_running:
@@ -499,6 +447,11 @@ def get_video_stream():
 
             best_id = None
             best_dist = 200 # Increased search radius for lost markers
+        # --- Instant Matching Logic ---
+        matched_ids = set()
+        for (cx, cy, cr) in detected_circles:
+            best_id = None
+            best_dist = 40 
             for t_id, t_data in get_video_stream.tracked_tokens.items():
                 if t_id in matched_ids: continue
                 dist = np.sqrt((cx - t_data["x"])**2 + (cy - t_data["y"])**2)
@@ -508,36 +461,11 @@ def get_video_stream():
             
             if best_id:
                 token = get_video_stream.tracked_tokens[best_id]
-                
-                # Initialize smoothing buffers if not present
-                if "x_buf" not in token:
-                    token["x_buf"] = [cx] * 5
-                    token["y_buf"] = [cy] * 5
-                
-                # Add current detection to buffer
-                token["x_buf"].append(cx)
-                token["y_buf"].append(cy)
-                if len(token["x_buf"]) > 5:
-                    token["x_buf"].pop(0)
-                    token["y_buf"].pop(0)
-                
-                # Calculate smoothed average
-                avg_x = sum(token["x_buf"]) / len(token["x_buf"])
-                avg_y = sum(token["y_buf"]) / len(token["y_buf"])
-                
-                move_dist = np.sqrt((avg_x - token["x"])**2 + (avg_y - token["y"])**2)
-                
-                # Jitter Deadzone + EMA
-                if move_dist > 1.5:
-                    token["x"] = token["x"] * 0.8 + avg_x * 0.2
-                    token["y"] = token["y"] * 0.8 + avg_y * 0.2
-                    token["r"] = token["r"] * 0.8 + cr * 0.2
-                
-                if move_dist < 30: 
-                    token["missed"] = 0
-                else:
-                    token["missed"] = 1
-                
+                # Direct update for zero latency
+                token["x"] = cx
+                token["y"] = cy
+                token["r"] = cr
+                token["missed"] = 0
                 matched_ids.add(best_id)
 
         # Increment missed frames and delete old tokens
