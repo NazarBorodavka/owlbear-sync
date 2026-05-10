@@ -12,14 +12,13 @@ import json
 import queue
 try:
     import stag
-    # Ensure it's the correct stag library (fiducial markers, not music tagging)
     STAG_AVAILABLE = hasattr(stag, 'detectMarkers')
 except ImportError:
     STAG_AVAILABLE = False
 
 print(f"--- STag Detection Support: {'ENABLED' if STAG_AVAILABLE else 'DISABLED (stag-python library not found)'} ---")
 
-# Increase FFMPEG timeout, force TCP, and disable buffering for lowest latency
+# FFMPEG timeout, force TCP, and disable buffering for lowest latency
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;5000000|rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
 # Suppress FFMPEG decoding spam
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
@@ -46,7 +45,7 @@ class IPCameraCapture:
     def __init__(self, url):
         self.url = url
         self.cap = cv2.VideoCapture(url)
-        # Use a queue of size 1 to ensure we only ever have the LATEST frame
+        # Queue of size 1 to ensure we only ever have the LATEST frame
         self.q = queue.Queue(maxsize=1)
         self.is_running = True
         
@@ -87,7 +86,7 @@ class IPCameraCapture:
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # State variables
-camera_url = "" # IP camera URL, e.g. http://192.168.1.5:81/stream
+camera_url = "" # IP camera URL
 cap = None
 is_running = False
 
@@ -325,7 +324,6 @@ def get_video_stream():
                     if show_overlay:
                         cv2.circle(frame, (x, y), r, (0, 255, 255), 2)
 
-        # --- ArUco / AprilTag setup ---
         # --- ArUco setup ---
         aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         aruco_params = cv2.aruco.DetectorParameters()
