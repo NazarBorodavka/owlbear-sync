@@ -1,6 +1,6 @@
 services:
   tracker:
-    build: ./tracker
+    image: ghcr.io/nazarborodavka/owlbear-tracker:latest
     container_name: owlbear-tracker
     ports:
       - "5000:5000"
