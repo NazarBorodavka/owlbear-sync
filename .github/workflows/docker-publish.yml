@@ -22,11 +22,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Lowercase repo owner
+        run: echo "OWNER_LC=${OWNER,,}" >>${GITHUB_ENV}
+        env:
+          OWNER: "${{ github.repository_owner }}"
+
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
-          # Point to the tracker folder where the Dockerfile lives
           context: ./tracker
           push: true
-          # Tags the image with your github username/repo name
-          tags: ghcr.io/${{ github.repository_owner }}/owlbear-tracker:latest
+          tags: ghcr.io/${{ env.OWNER_LC }}/owlbear-tracker:latest
