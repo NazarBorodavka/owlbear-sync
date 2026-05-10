@@ -232,6 +232,7 @@ flip_y = False
 detection_mode = 'aruco' # 'aruco' or 'stag'
 stag_error_correction = 3
 stag_roi_padding = 20
+manual_blank = False
 
 load_config_from_disk()
 
@@ -604,7 +605,7 @@ def get_video_stream():
         # Send data to websocket clients.
         socketio.emit('tokens_update', {
             "tokens": detected_tokens,
-            "blank_screen": any_missed
+            "blank_screen": manual_blank or any_missed
         })
             
         # Draw radius guide and calibration corners
@@ -741,6 +742,7 @@ def update_settings():
     if 'exposure' in data: exposure = float(data['exposure'])
     if 'show_overlay' in data: show_overlay = bool(data['show_overlay'])
     if 'auto_blank' in data: auto_blank = bool(data['auto_blank'])
+    if 'manual_blank' in data: manual_blank = bool(data['manual_blank'])
     if 'flip_x' in data: flip_x = bool(data['flip_x'])
     if 'flip_y' in data: flip_y = bool(data['flip_y'])
     

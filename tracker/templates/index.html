@@ -358,6 +358,11 @@
                         <input type="checkbox" id="auto_blank" onchange="updateSettings()" style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;">
                         <label for="auto_blank" style="margin: 0; cursor: pointer; color: #e2e8f0; font-size: 0.95rem;">Auto-Blank Projector (when tokens lost)</label>
                     </div>
+
+                    <div class="slider-container" style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+                        <input type="checkbox" id="manual_blank" onchange="updateSettings()" style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;">
+                        <label for="manual_blank" style="margin: 0; cursor: pointer; color: #e2e8f0; font-size: 0.95rem; font-weight: 600; color: #f87171;">FORCE BLACKOUT (For Calibration)</label>
+                    </div>
                     
                     <button class="secondary" onclick="resetSettings()" style="margin-top: 10px;">Reset Adjustments</button>
                 </div>
@@ -617,6 +622,7 @@
                 brightness: document.getElementById('brightness').value,
                 show_overlay: document.getElementById('show_overlay').checked,
                 auto_blank: document.getElementById('auto_blank').checked,
+                manual_blank: document.getElementById('manual_blank').checked,
                 detection_mode: window.detection_mode || 'aruco',
                 hough_min_radius: document.getElementById('hough_min_radius').value,
                 hough_max_radius: document.getElementById('hough_max_radius').value,
@@ -700,6 +706,7 @@
                 brightness: document.getElementById('brightness').value,
                 show_overlay: document.getElementById('show_overlay').checked,
                 auto_blank: document.getElementById('auto_blank').checked,
+                manual_blank: document.getElementById('manual_blank').checked,
                 detection_mode: window.detection_mode || 'aruco',
                 hough_min_radius: document.getElementById('hough_min_radius').value,
                 hough_max_radius: document.getElementById('hough_max_radius').value,
@@ -741,6 +748,7 @@
                     if (config.brightness !== undefined) document.getElementById('brightness').value = config.brightness;
                     if (config.show_overlay !== undefined) document.getElementById('show_overlay').checked = config.show_overlay;
                     if (config.auto_blank !== undefined) document.getElementById('auto_blank').checked = config.auto_blank;
+                    if (config.manual_blank !== undefined) document.getElementById('manual_blank').checked = config.manual_blank;
                     
                     if (config.hough_min_radius !== undefined) document.getElementById('hough_min_radius').value = config.hough_min_radius;
                     if (config.hough_max_radius !== undefined) document.getElementById('hough_max_radius').value = config.hough_max_radius;
