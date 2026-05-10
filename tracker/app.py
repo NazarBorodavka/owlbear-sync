@@ -585,10 +585,10 @@ def get_video_stream():
                 "has_base": True
             })
                 
-        # Clean up tokens that have been missing for too long
+        # Clean up tokens that have been missing for too long (e.g. 5 seconds)
         to_remove = []
         for t_id, t_data in get_video_stream.tracked_tokens.items():
-            if t_data["missed"] > 45: # 3 seconds
+            if t_data["missed"] > 100: # ~5 seconds at 20fps
                 to_remove.append(t_id)
         for t_id in to_remove:
             del get_video_stream.tracked_tokens[t_id]
@@ -605,10 +605,14 @@ def get_video_stream():
             missed_ids = [tid for tid, td in get_video_stream.tracked_tokens.items() if td["missed"] > 2]
             print(f"DEBUG: Blackout active! Missing tokens: {missed_ids}")
 
-        # Send data to websocket clients.
+        # --- Final Blackout Decision ---
+        # Blackout if: Manual override is ON OR (Auto-Blank is ON and tokens are missing)
+        blackout_active = manual_blank or (auto_blank and any_missed)
+
+        # Send data to websocket clients
         socketio.emit('tokens_update', {
             "tokens": detected_tokens,
-            "blank_screen": manual_blank or any_missed
+            "blank_screen": blackout_active
         })
             
         # Draw radius guide and calibration corners
