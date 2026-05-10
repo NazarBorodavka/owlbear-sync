@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Owlbear Token Tracker</title>
+    <!-- Modern Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --panel-bg: rgba(30, 41, 59, 0.7);
+            --panel-border: rgba(255, 255, 255, 0.1);
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --success: #10b981;
+            --error: #ef4444;
+            --input-bg: rgba(15, 23, 42, 0.6);
+        }
+
+        * { box-sizing: border-box; }
+
+        body { 
+            font-family: 'Inter', sans-serif; 
+            margin: 0; 
+            padding: 30px 20px; 
+            background: var(--bg-color); 
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(59, 130, 246, 0.15) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(139, 92, 246, 0.15) 0px, transparent 50%);
+            background-attachment: fixed;
+            color: var(--text-main); 
+            min-height: 100vh;
+        }
+
+        .container { 
+            max-width: 1400px; 
+            margin: auto; 
+        }
+
+        h1 { 
+            margin-top: 0; 
+            font-weight: 600; 
+            font-size: 2rem;
+            letter-spacing: -0.02em;
+            margin-bottom: 30px;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+        }
+
+        h2 { font-weight: 500; font-size: 1.2rem; margin-top: 0; margin-bottom: 15px; color: #e2e8f0; }
+        h3 { font-weight: 500; font-size: 1.1rem; margin-top: 0; margin-bottom: 15px; color: #e2e8f0; }
+
+        .grid { 
+            display: flex; 
+            gap: 30px; 
+            align-items: flex-start; /* CRITICAL FOR STICKY TO WORK */
+        }
+
+        /* Glassmorphism Panel Style */
+        .glass-panel {
+            background: var(--panel-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--panel-border);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+        }
+
+        .video-column { 
+            flex: 2; 
+            position: sticky; 
+            top: 30px; /* Sticks to the top of the viewport when scrolling */
+        }
+
+        .settings-column { 
+            flex: 1; 
+            min-width: 340px; 
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        #videoFeed { 
+            width: 100%; 
+            border-radius: 8px; 
+            cursor: crosshair; 
+            display: none; 
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+        }
+
+        #videoPlaceholder { 
+            width: 100%; 
+            aspect-ratio: 16/9; 
+            background: rgba(0,0,0,0.4); 
+            display: flex; 
+            align-items: center; 
+            justify-content: center; 
+            border: 2px dashed #475569; 
+            border-radius: 8px; 
+            color: var(--text-muted); 
+            font-weight: 500;
+        }
+        
+        button, input[type="text"] { 
+            padding: 10px 14px; 
+            font-family: 'Inter', sans-serif;
+            font-size: 0.95rem;
+            border-radius: 8px; 
+            border: 1px solid var(--panel-border); 
+            width: 100%; 
+            box-sizing: border-box; 
+            transition: all 0.2s ease;
+        }
+        
+        input[type="text"] { 
+            background: var(--input-bg); 
+            color: white; 
+            margin-bottom: 10px;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+        }
+
+        button { 
+            cursor: pointer; 
+            background: var(--accent); 
+            color: white; 
+            font-weight: 600; 
+            border: none;
+        }
+
+        button:hover { 
+            background: var(--accent-hover); 
+            transform: translateY(-1px);
+        }
+
+        button.secondary:hover { background: #334155; }
+        
+        .btn-delete {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            padding: 6px 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            width: auto;
+        }
+
+        .btn-delete:hover {
+            background: rgba(239, 68, 68, 0.3);
+            border-color: var(--error);
+        }
+
+        button.secondary.danger {
+            background: rgba(239, 68, 68, 0.1);
+            color: #f87171;
+            border-color: rgba(239, 68, 68, 0.2);
+        }
+        
+        button.secondary.danger:hover {
+            background: rgba(239, 68, 68, 0.2);
+            border-color: var(--error);
+        }
+
+        .token-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 12px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            margin-bottom: 8px;
+        }
+
+        .token-info {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .token-id {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            font-family: monospace;
+        }
+
+        .token-alias {
+            font-weight: 500;
+            font-size: 0.95rem;
+            cursor: pointer;
+            color: var(--accent);
+            text-decoration: underline dotted rgba(59, 130, 246, 0.4);
+        }
+        
+        .token-alias:hover {
+            color: var(--accent-hover);
+        }
+
+        .status { font-size: 0.85rem; margin-top: 8px; font-weight: 500; }
+        .status.success { color: var(--success); }
+        .status.error { color: var(--error); }
+        .status.neutral { color: var(--text-muted); }
+        
+        .info-box { 
+            background: rgba(59, 130, 246, 0.1); 
+            border-left: 4px solid var(--accent); 
+            padding: 12px 16px; 
+            margin: 15px 0; 
+            border-radius: 0 8px 8px 0; 
+            font-size: 0.85rem; 
+            line-height: 1.6; 
+            color: #cbd5e1;
+        }
+        
+        hr { border: 0; height: 1px; background: rgba(255,255,255,0.08); margin: 0; }
+        
+        /* Sliders */
+        .slider-container { margin: 12px 0; }
+        .slider-container label { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 6px; 
+            font-size: 0.85rem; 
+            color: var(--text-muted); 
+            font-weight: 500;
+        }
+        
+        input[type=range] { 
+            width: 100%; 
+            margin: 5px 0; 
+            accent-color: var(--accent);
+        }
+        
+        .val-input { 
+            width: 60px; 
+            background: var(--input-bg); 
+            color: #fff; 
+            border: 1px solid var(--panel-border); 
+            border-radius: 4px; 
+            padding: 4px 6px; 
+            text-align: right; 
+            font-family: monospace;
+            font-size: 0.85rem;
+        }
+        .val-input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .val-input::-webkit-outer-spin-button, .val-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+        /* Tokens List */
+        .token-list { list-style: none; padding: 0; margin: 0; max-height: 250px; overflow-y: auto; }
+        .token-item { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+            background: rgba(0,0,0,0.2); 
+            padding: 10px 14px; 
+            margin-bottom: 8px; 
+            border-radius: 8px; 
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        .token-item .id { font-weight: 600; font-size: 0.85rem; color: #e2e8f0; }
+        .token-item .color-tag { 
+            font-size: 0.75rem; 
+            font-weight: 600;
+            background: var(--accent); 
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+        }
+
+        /* Scrollbar styling */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: rgba(0,0,0,0.1); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Owlbear Rodeo Physical Token Sync</h1>
+        
+        <div class="grid">
+            <div class="video-column glass-panel">
+                <h2>Live Camera Feed</h2>
+                <img id="videoFeed" src="" />
+                <div id="videoPlaceholder">
+                    Camera stream will appear here.
+                </div>
+                <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 15px; margin-bottom: 0;">
+                    Click directly on the video feed to set the 4 calibration corners (Top-Left, Top-Right, Bottom-Right, Bottom-Left).
+                </p>
+            </div>
+            
+            <div class="settings-column">
+                
+                <div class="glass-panel">
+                    <h2>Connection</h2>
+                    <label style="display:block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Camera Source URL</label>
+                    <input type="text" id="cameraUrl" placeholder="rtsp://user:pass@IP:port/stream1" onchange="saveConfig()">
+                    <button onclick="connectCamera()">Connect to Camera</button>
+                    <p id="camStatus" class="status neutral">Disconnected</p>
+                </div>
+                
+                <div class="glass-panel">
+                    <h3>Video Preprocessing</h3>
+                    <div class="slider-container">
+                        <label><span>Fisheye Correction</span> <input type="number" id="val_distortion_k1" value="0.0" step="0.01" class="val-input" onchange="syncSlider(this, 'distortion_k1'); updateSettings()"></label>
+                        <input type="range" id="distortion_k1" min="-1" max="1" step="0.01" value="0.0" oninput="updateSettings()">
+                    </div>
+                    <div class="slider-container">
+                        <label><span>Zoom</span> <input type="number" id="val_zoom" value="1.0" step="0.05" class="val-input" onchange="syncSlider(this, 'zoom'); updateSettings()"></label>
+                        <input type="range" id="zoom" min="0.5" max="3.0" step="0.05" value="1.0" oninput="updateSettings()">
+                    </div>
+                    <div class="slider-container">
+                        <label><span>Pan X</span> <input type="number" id="val_offset_x" value="0.0" step="0.01" class="val-input" onchange="syncSlider(this, 'offset_x'); updateSettings()"></label>
+                        <input type="range" id="offset_x" min="-1" max="1" step="0.01" value="0" oninput="updateSettings()">
+                    </div>
+                    <div class="slider-container">
+                        <label><span>Pan Y</span> <input type="number" id="val_offset_y" value="0.0" step="0.01" class="val-input" onchange="syncSlider(this, 'offset_y'); updateSettings()"></label>
+                        <input type="range" id="offset_y" min="-1" max="1" step="0.01" value="0" oninput="updateSettings()">
+                    </div>
+                    <div class="slider-container">
+                        <label><span>Rotation</span> <input type="number" id="val_rotation" value="0" step="1" class="val-input" onchange="syncSlider(this, 'rotation'); updateSettings()"></label>
+                        <input type="range" id="rotation" min="-180" max="180" step="1" value="0" oninput="updateSettings()">
+                    </div>
+                    <div class="slider-container">
+                        <label><span>Exposure (Gamma)</span> <input type="number" id="val_exposure" value="1.0" step="0.1" class="val-input" onchange="syncSlider(this, 'exposure'); updateSettings()"></label>
+                        <input type="range" id="exposure" min="0.1" max="3.0" step="0.1" value="1.0" oninput="updateSettings()">
+                    </div>
+                    <div class="slider-container">
+                        <label><span>Contrast</span> <input type="number" id="val_contrast" value="1.0" step="0.1" class="val-input" onchange="syncSlider(this, 'contrast'); updateSettings()"></label>
+                        <input type="range" id="contrast" min="0.1" max="3.0" step="0.1" value="1.0" oninput="updateSettings()">
+                    </div>
+                    <div class="slider-container">
+                        <label><span>Brightness</span> <input type="number" id="val_brightness" value="0" step="1" class="val-input" onchange="syncSlider(this, 'brightness'); updateSettings()"></label>
+                        <input type="range" id="brightness" min="-100" max="100" step="1" value="0" oninput="updateSettings()">
+                    </div>
+                    
+                    <div class="slider-container" style="display: flex; align-items: center; gap: 10px; margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--panel-border);">
+                        <input type="checkbox" id="show_overlay" checked onchange="updateSettings()" style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;">
+                        <label for="show_overlay" style="margin: 0; cursor: pointer; color: #e2e8f0; font-size: 0.95rem;">Show tracking overlay on video</label>
+                    </div>
+
+                    <div class="slider-container" style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+                        <input type="checkbox" id="auto_blank" onchange="updateSettings()" style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;">
+                        <label for="auto_blank" style="margin: 0; cursor: pointer; color: #e2e8f0; font-size: 0.95rem;">Auto-Blank Projector (when tokens lost)</label>
+                    </div>
+
+                    <div class="slider-container" style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
+                        <input type="checkbox" id="manual_blank" onchange="updateSettings()" style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;">
+                        <label for="manual_blank" style="margin: 0; cursor: pointer; color: #e2e8f0; font-size: 0.95rem; font-weight: 600; color: #f87171;">FORCE BLACKOUT (For Calibration)</label>
+                    </div>
+                    
+                    <button class="secondary" onclick="resetSettings()" style="margin-top: 10px;">Reset Adjustments</button>
+                </div>
+
+                <div class="glass-panel">
+                    <h3>Disk Detection Settings</h3>
+                    <p class="subtitle">Fine-tune the circular base detection.</p>
+                    <div class="slider-container">
+                        <label><span>Min Radius</span> <input type="number" id="val_hough_min_radius" value="30" step="1" class="val-input" onchange="syncSlider(this, 'hough_min_radius'); updateSettings()"></label>
+                        <input type="range" id="hough_min_radius" min="10" max="100" step="1" value="30" oninput="updateSettings()">
+                    </div>
+                    <div class="slider-container">
+                        <label><span>Max Radius</span> <input type="number" id="val_hough_max_radius" value="40" step="1" class="val-input" onchange="syncSlider(this, 'hough_max_radius'); updateSettings()"></label>
+                        <input type="range" id="hough_max_radius" min="10" max="150" step="1" value="40" oninput="updateSettings()">
+                    </div>
+                    <div class="slider-container">
+                        <label><span>Sensitivity (Param 1)</span> <input type="number" id="val_hough_param1" value="40" step="1" class="val-input" onchange="syncSlider(this, 'hough_param1'); updateSettings()"></label>
+                        <input type="range" id="hough_param1" min="10" max="100" step="1" value="40" oninput="updateSettings()">
+                    </div>
+                    <div class="slider-container">
+                        <label><span>Center Match (Param 2)</span> <input type="number" id="val_hough_param2" value="45" step="1" class="val-input" onchange="syncSlider(this, 'hough_param2'); updateSettings()"></label>
+                        <input type="range" id="hough_param2" min="10" max="100" step="1" value="45" oninput="updateSettings()">
+                    </div>
+                    <button class="secondary" onclick="resetDiskSettings()" style="margin-top: 10px;">Reset Disk Settings</button>
+                </div>
+
+                <div class="glass-panel">
+                    <h3>Marker Detection Mode</h3>
+                    <div style="display: flex; gap: 10px; margin-top: 10px;">
+                        <button id="btn_mode_aruco" onclick="setDetectionMode('aruco')" style="background: var(--accent); flex: 1;">ArUco</button>
+                        <button id="btn_mode_stag" onclick="setDetectionMode('stag')" style="background: rgba(255,255,255,0.05); flex: 1;">STag HD11</button>
+                    </div>
+                    
+                    <div id="settings_aruco" style="margin-top: 20px;">
+                        <h4>ArUco Settings</h4>
+                        <div class="control-group">
+                            <label><span>Min Perimeter Rate</span> <input type="number" id="val_aruco_min_perimeter" value="0.01" step="0.005" class="val-input" onchange="syncSlider(this, 'aruco_min_perimeter'); updateSettings()"></label>
+                            <input type="range" id="aruco_min_perimeter" min="0.001" max="0.1" step="0.001" value="0.01" oninput="updateVal('aruco_min_perimeter')">
+                        </div>
+                        <div class="control-group">
+                            <label><span>Adaptive Threshold Min</span> <input type="number" id="val_aruco_adaptive_thresh_min" value="3" step="1" class="val-input" onchange="syncSlider(this, 'aruco_adaptive_thresh_min'); updateSettings()"></label>
+                            <input type="range" id="aruco_adaptive_thresh_min" min="3" max="23" step="2" value="3" oninput="updateVal('aruco_adaptive_thresh_min')">
+                        </div>
+                        <button class="secondary" onclick="resetArucoSettings()" style="margin-top: 10px; width: 100%;">Reset ArUco</button>
+                    </div>
+
+                    <div id="settings_stag" style="margin-top: 20px; display: none;">
+                        <h4>STag Settings</h4>
+                        <div class="control-group">
+                            <label><span>Error Correction</span> <input type="number" id="val_stag_error_correction" value="3" step="1" class="val-input" onchange="syncSlider(this, 'stag_error_correction'); updateSettings()"></label>
+                            <input type="range" id="stag_error_correction" min="0" max="5" step="1" value="3" oninput="updateVal('stag_error_correction')">
+                            <p class="help-text">Higher = more noise resilient. Max 5 for HD11.</p>
+                        </div>
+                        <div class="control-group">
+                            <label><span>Search Padding (px)</span> <input type="number" id="val_stag_roi_padding" value="20" step="1" class="val-input" onchange="syncSlider(this, 'stag_roi_padding'); updateSettings()"></label>
+                            <input type="range" id="stag_roi_padding" min="5" max="100" step="1" value="20" oninput="updateVal('stag_roi_padding')">
+                            <p class="help-text">Extra area around the token to search for the marker.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="glass-panel">
+                    <h3>Active Physical Tokens</h3>
+                    <div id="token-list" class="token-list">
+                        <p class="empty-msg" style="text-align: center; padding: 20px 0; color: var(--text-muted);">No tokens detected yet.</p>
+                    </div>
+                    <button class="secondary danger" onclick="resetTokens()" style="margin-top: 20px; width: 100%;">Reset All Names & Deletions</button>
+                </div>
+                
+                <div class="glass-panel">
+                    <h3>Calibration</h3>
+                    <p id="calibStatus" class="status neutral">Corners marked: 0/4</p>
+                    <button class="secondary" onclick="resetCalibration()">Reset Corners</button>
+                    
+                    <div class="info-box">
+                        <strong>How to calibrate:</strong><br>
+                        Click the 4 corners of the projected grid on the video. The system needs this to map the physical angle to a flat digital grid.
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Set WebSocket URL helper
+        const wsUrlStr = `ws://${window.location.hostname}:5000`;
+
+        // Setup Socket.IO for token updates
+        const socket = io();
+        socket.on('tokens_update', function(data) {
+            // Data is now {tokens: [], blank_screen: bool, scene_filters: {}}
+            updateTokenListUI(data.tokens);
+            
+            // Optionally update UI to show if blackout is active
+            const calibStatus = document.getElementById('calibStatus');
+            if (data.blank_screen) {
+                calibStatus.innerText = "BLACKOUT ACTIVE (Tokens Missing)";
+                calibStatus.style.color = "var(--error)";
+            } else {
+                calibStatus.innerText = "Tracking Active";
+                calibStatus.style.color = "var(--success)";
+            }
+        });
+
+        function updateTokenListUI(tokens) {
+            const listEl = document.getElementById('token-list');
+            if (!listEl) return;
+            
+            if (!tokens || tokens.length === 0) {
+                listEl.innerHTML = '<p class="empty-msg" style="text-align: center; padding: 20px 0; color: var(--text-muted);">No tokens detected yet.</p>';
+                return;
+            }
+            
+            listEl.innerHTML = '';
+            tokens.forEach(token => {
+                const row = document.createElement('div');
+                row.className = 'token-row';
+                
+                const info = document.createElement('div');
+                info.className = 'token-info';
+                
+                const name = token.alias || token.id;
+                const nameEl = document.createElement('span');
+                nameEl.className = 'token-alias';
+                nameEl.innerText = name;
+                nameEl.title = "Click to rename";
+                nameEl.onclick = () => updateTokenAlias(token.id, token.alias);
+                
+                const idEl = document.createElement('span');
+                idEl.className = 'token-id';
+                idEl.innerText = token.id;
+                
+                info.appendChild(nameEl);
+                info.appendChild(idEl);
+                
+                const actions = document.createElement('div');
+                const delBtn = document.createElement('button');
+                delBtn.className = 'btn-delete';
+                delBtn.innerText = 'Ignore';
+                delBtn.onclick = () => deleteToken(token.id);
+                
+                actions.appendChild(delBtn);
+                row.appendChild(info);
+                row.appendChild(actions);
+                listEl.appendChild(row);
+            });
+        }
+
+        function updateTokenAlias(id, currentAlias) {
+            const newAlias = prompt("Enter a custom name for this token (e.g. 'Goblin', 'Fighter'):", currentAlias || id);
+            if (newAlias !== null && newAlias.trim() !== "") {
+                fetch('/api/token/alias', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({id: id, alias: newAlias.trim()})
+                });
+            }
+        }
+
+        function deleteToken(id) {
+            if (confirm("Are you sure you want to stop tracking this specific disk? It won't reappear until you reset or restart.")) {
+                fetch('/api/token/delete', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({id: id})
+                });
+            }
+        }
+        
+        function resetTokens() {
+            if (confirm("This will clear ALL custom names and bring back all 'ignored' tokens. Continue?")) {
+                fetch('/api/token/reset', { method: 'POST' });
+            }
+        }
+
+        function connectCamera() {
+            const url = document.getElementById('cameraUrl').value;
+            const statusEl = document.getElementById('camStatus');
+            statusEl.innerText = "Connecting...";
+            statusEl.className = "status neutral";
+            
+            fetch('/api/connect', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({url: url})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if(data.success) {
+                    document.getElementById('videoFeed').src = '/video_feed?' + new Date().getTime();
+                    document.getElementById('videoFeed').style.display = 'block';
+                    document.getElementById('videoPlaceholder').style.display = 'none';
+                    statusEl.innerText = "Connected";
+                    statusEl.className = "status success";
+                    saveConfig(); // Save URL on successful connect
+                } else {
+                    statusEl.innerText = "Error: " + data.error;
+                    statusEl.className = "status error";
+                }
+            })
+            .catch(err => {
+                statusEl.innerText = "Error connecting to server.";
+                statusEl.className = "status error";
+            });
+        }
+
+        function resetCalibration() {
+            fetch('/api/calibrate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'reset'})
+            }).then(() => {
+                document.getElementById('calibStatus').innerText = "Corners marked: 0/4";
+                document.getElementById('calibStatus').className = "status neutral";
+            });
+        }
+
+        document.getElementById('videoFeed').addEventListener('click', function(e) {
+            // Get click coordinates relative to the image actual size
+            const rect = this.getBoundingClientRect();
+            const scaleX = this.naturalWidth / rect.width;
+            const scaleY = this.naturalHeight / rect.height;
+            
+            const x = (e.clientX - rect.left) * scaleX;
+            const y = (e.clientY - rect.top) * scaleY;
+            
+            fetch('/api/calibrate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'add_point', x: x, y: y})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if(data.success) {
+                    const statusEl = document.getElementById('calibStatus');
+                    statusEl.innerText = `Corners marked: ${data.corners}/4` + (data.corners == 4 ? " (Calibrated!)" : "");
+                    if (data.corners == 4) statusEl.className = "status success";
+                }
+            });
+        });
+
+        // --- Configuration Persistence & Sliders ---
+        
+        function syncSlider(inputEl, sliderId) {
+            document.getElementById(sliderId).value = inputEl.value;
+        }
+
+        function updateSettings() {
+            const config = {
+                distortion_k1: document.getElementById('distortion_k1').value,
+                zoom: document.getElementById('zoom').value,
+                offset_x: document.getElementById('offset_x').value,
+                offset_y: document.getElementById('offset_y').value,
+                rotation: document.getElementById('rotation').value,
+                exposure: document.getElementById('exposure').value,
+                contrast: document.getElementById('contrast').value,
+                brightness: document.getElementById('brightness').value,
+                show_overlay: document.getElementById('show_overlay').checked,
+                auto_blank: document.getElementById('auto_blank').checked,
+                manual_blank: document.getElementById('manual_blank').checked,
+                detection_mode: window.detection_mode || 'aruco',
+                hough_min_radius: document.getElementById('hough_min_radius').value,
+                hough_max_radius: document.getElementById('hough_max_radius').value,
+                hough_param1: document.getElementById('hough_param1').value,
+                hough_param2: document.getElementById('hough_param2').value,
+                aruco_min_perimeter: document.getElementById('aruco_min_perimeter').value,
+                aruco_adaptive_thresh_min: document.getElementById('aruco_adaptive_thresh_min').value,
+                stag_error_correction: document.getElementById('stag_error_correction').value,
+                stag_roi_padding: document.getElementById('stag_roi_padding').value
+            };
+            
+            // Update UI numeric inputs
+            Object.keys(config).forEach(key => {
+                const el = document.getElementById('val_' + key);
+                if (el) el.value = config[key];
+            });
+            
+            // Send to backend
+            fetch('/api/settings', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            });
+
+            // Save to localStorage
+            saveConfig();
+        }
+
+        function updateSceneFilters() {
+            // Scene filters removed per user request
+        }
+        
+        function resetDiskSettings() {
+            document.getElementById('hough_min_radius').value = "30";
+            document.getElementById('hough_max_radius').value = "40";
+            document.getElementById('hough_param1').value = "40";
+            document.getElementById('hough_param2').value = "45";
+            updateSettings();
+        }
+
+        function setDetectionMode(mode) {
+            window.detection_mode = mode;
+            document.getElementById('btn_mode_aruco').style.background = (mode === 'aruco' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
+            document.getElementById('btn_mode_stag').style.background = (mode === 'stag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
+            
+            // Show/Hide specific settings
+            document.getElementById('settings_aruco').style.display = (mode === 'aruco' ? 'block' : 'none');
+            document.getElementById('settings_stag').style.display = (mode === 'stag' ? 'block' : 'none');
+            
+            updateSettings();
+        }
+
+        function resetArucoSettings() {
+            document.getElementById('aruco_min_perimeter').value = "0.01";
+            document.getElementById('aruco_adaptive_thresh_min').value = "3";
+            updateSettings();
+        }
+        
+        function resetSettings() {
+            document.getElementById('distortion_k1').value = "0.0";
+            document.getElementById('zoom').value = "1.0";
+            document.getElementById('offset_x').value = "0";
+            document.getElementById('offset_y').value = "0";
+            document.getElementById('rotation').value = "0";
+            document.getElementById('exposure').value = "1.0";
+            document.getElementById('contrast').value = "1.0";
+            document.getElementById('brightness').value = "0";
+            updateSettings();
+        }
+
+        function saveConfig() {
+            const config = {
+                cameraUrl: document.getElementById('cameraUrl').value,
+                distortion_k1: document.getElementById('distortion_k1').value,
+                zoom: document.getElementById('zoom').value,
+                offset_x: document.getElementById('offset_x').value,
+                offset_y: document.getElementById('offset_y').value,
+                rotation: document.getElementById('rotation').value,
+                exposure: document.getElementById('exposure').value,
+                contrast: document.getElementById('contrast').value,
+                brightness: document.getElementById('brightness').value,
+                show_overlay: document.getElementById('show_overlay').checked,
+                auto_blank: document.getElementById('auto_blank').checked,
+                manual_blank: document.getElementById('manual_blank').checked,
+                detection_mode: window.detection_mode || 'aruco',
+                hough_min_radius: document.getElementById('hough_min_radius').value,
+                hough_max_radius: document.getElementById('hough_max_radius').value,
+                hough_param1: document.getElementById('hough_param1').value,
+                hough_param2: document.getElementById('hough_param2').value,
+                aruco_min_perimeter: document.getElementById('aruco_min_perimeter').value,
+                aruco_adaptive_thresh_min: document.getElementById('aruco_adaptive_thresh_min').value,
+                stag_error_correction: document.getElementById('stag_error_correction').value,
+                stag_roi_padding: document.getElementById('stag_roi_padding').value
+            };
+            localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
+        }
+
+        function loadConfig() {
+            const saved = localStorage.getItem('owlbearTrackerConfig');
+            if (saved) {
+                try {
+                    const config = JSON.parse(saved);
+                    if (config.cameraUrl) document.getElementById('cameraUrl').value = config.cameraUrl;
+                    if (config.distortion_k1) document.getElementById('distortion_k1').value = config.distortion_k1;
+                    if (config.zoom) document.getElementById('zoom').value = config.zoom;
+                    if (config.offset_x) document.getElementById('offset_x').value = config.offset_x;
+                    if (config.offset_y) document.getElementById('offset_y').value = config.offset_y;
+                    if (config.rotation) document.getElementById('rotation').value = config.rotation;
+                    if (config.stag_error_correction) {
+                        document.getElementById('stag_error_correction').value = config.stag_error_correction;
+                        document.getElementById('val_stag_error_correction').innerText = config.stag_error_correction;
+                    }
+                    if (config.stag_roi_padding) {
+                        document.getElementById('stag_roi_padding').value = config.stag_roi_padding;
+                        document.getElementById('val_stag_roi_padding').innerText = config.stag_roi_padding;
+                    }
+            
+                    if (config.detection_mode) {
+                        setDetectionMode(config.detection_mode);
+                    }
+                    if (config.exposure !== undefined) document.getElementById('exposure').value = config.exposure;
+                    if (config.contrast !== undefined) document.getElementById('contrast').value = config.contrast;
+                    if (config.brightness !== undefined) document.getElementById('brightness').value = config.brightness;
+                    if (config.show_overlay !== undefined) document.getElementById('show_overlay').checked = config.show_overlay;
+                    if (config.auto_blank !== undefined) document.getElementById('auto_blank').checked = config.auto_blank;
+                    if (config.manual_blank !== undefined) document.getElementById('manual_blank').checked = config.manual_blank;
+                    
+                    if (config.hough_min_radius !== undefined) document.getElementById('hough_min_radius').value = config.hough_min_radius;
+                    if (config.hough_max_radius !== undefined) document.getElementById('hough_max_radius').value = config.hough_max_radius;
+                    if (config.hough_param1 !== undefined) document.getElementById('hough_param1').value = config.hough_param1;
+                    if (config.hough_param2 !== undefined) document.getElementById('hough_param2').value = config.hough_param2;
+                    if (config.aruco_min_perimeter !== undefined) document.getElementById('aruco_min_perimeter').value = config.aruco_min_perimeter;
+                    if (config.aruco_adaptive_thresh_min !== undefined) document.getElementById('aruco_adaptive_thresh_min').value = config.aruco_adaptive_thresh_min;
+
+                    // Push loaded settings to backend
+                    updateSettings();
+                } catch(e) {
+                    console.error("Error loading config", e);
+                }
+            }
+        }
+
+        // Load config on page load
+        window.addEventListener('DOMContentLoaded', loadConfig);
+
+    </script>
+</body>
+</html>
