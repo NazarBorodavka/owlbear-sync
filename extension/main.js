@@ -43,14 +43,26 @@ let isUpdating = false;
 let lastUpdateTime = 0;
 const THROTTLE_MS = 100; // Only update Owlbear every 100ms (10 FPS)
 
+const METADATA_KEY = "com.owlbear.sync/physical_id";
+
 OBR.onReady(async () => {
   isReady = true;
   document.getElementById('status').innerText = "Ready. Connect to Tracker.";
   document.getElementById('status').className = "status ready";
   
-  // Listen for changes in the scene items to refresh our virtual token list
-  OBR.scene.items.onChange((items) => {
+  // Sticky Assignments: Rebuild mapping whenever the scene changes
+  OBR.scene.items.onChange(async (items) => {
     virtualTokens = items.filter(item => item.layer === "CHARACTER" || item.layer === "MOUNT");
+    
+    // Scan for tokens that have our Physical ID metadata
+    const newMapping = {};
+    for (const item of items) {
+      const physicalId = item.metadata[METADATA_KEY];
+      if (physicalId) {
+        newMapping[physicalId] = item.id;
+      }
+    }
+    tokenMapping = newMapping;
     renderMappingUI();
   });
   
@@ -176,11 +188,28 @@ function renderMappingUI() {
     }
     
     // Handle changes
-    select.addEventListener('change', (e) => {
-      if (e.target.value === "") {
+    select.addEventListener('change', async (e) => {
+      const virtualId = e.target.value;
+      
+      // 1. Clear old metadata if this physical token was already assigned to something else
+      if (tokenMapping[pt.id]) {
+        await OBR.scene.items.updateItems([tokenMapping[pt.id]], (items) => {
+          for (let item of items) {
+            delete item.metadata[METADATA_KEY];
+          }
+        });
+      }
+
+      if (virtualId === "") {
         delete tokenMapping[pt.id];
       } else {
-        tokenMapping[pt.id] = e.target.value;
+        tokenMapping[pt.id] = virtualId;
+        // 2. Tag the new virtual token with our Physical ID
+        await OBR.scene.items.updateItems([virtualId], (items) => {
+          for (let item of items) {
+            item.metadata[METADATA_KEY] = pt.id;
+          }
+        });
       }
     });
     
