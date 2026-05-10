@@ -5,7 +5,7 @@
   "action": {
     "title": "Token Sync",
     "icon": "/icon.svg",
-    "popover": "/",
+    "popover": "../index.html",
     "width": 350,
     "height": 500
   }
