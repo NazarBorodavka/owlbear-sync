@@ -1,4 +1,4 @@
-import 'style.css'
+import './style.css'
 import OBR, { buildShape } from '@owlbear-rodeo/sdk'
 import { io } from 'socket.io-client'
 
