@@ -245,9 +245,12 @@ homography_matrix = None
 frame_lock = threading.Lock()
 camera_lock = threading.Lock()
 current_frame = None
+undistort_map1 = None
+undistort_map2 = None
+settings_dirty = True
 
 def get_video_stream():
-    global cap, is_running, current_frame, camera_url
+    global cap, is_running, current_frame, camera_url, undistort_map1, undistort_map2, settings_dirty
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, detection_mode
@@ -303,26 +306,24 @@ def get_video_stream():
         # Preprocessing: Apply Distortion Correction, Zoom, Pan, Rotation, Colors
         h, w = frame.shape[:2]
         
-        # 1. Fisheye / Distortion Correction
+        # 1. Faster Distortion Correction via Pre-computed Maps
         if distortion_k1 != 0.0:
-            fx, fy = w, h
-            cx, cy = w / 2, h / 2
-            camera_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-            dist_coeffs = np.array([distortion_k1, 0, 0, 0, 0], dtype=np.float32)
-            frame = cv2.undistort(frame, camera_matrix, dist_coeffs)
+            if settings_dirty or undistort_map1 is None:
+                fx, fy = w, h
+                cx, cy = w / 2, h / 2
+                camera_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+                dist_coeffs = np.array([distortion_k1, 0, 0, 0, 0], dtype=np.float32)
+                new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w, h), 0)
+                undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_camera_matrix, (w, h), cv2.CV_32FC1)
+                settings_dirty = False
+            frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
             
-        # 2. Zoom, Pan, Rotation
+        # 2. Optimized Zoom, Pan, Rotation (Merged into one warp)
         if zoom_level != 1.0 or offset_x != 0.0 or offset_y != 0.0 or rotation != 0.0:
-            center_x, center_y = w / 2, h / 2
-            
-            # Get rotation matrix (which also handles scaling/zoom)
-            M = cv2.getRotationMatrix2D((center_x, center_y), rotation, zoom_level)
-            
-            # Add translation (offset_x and offset_y are now -1.0 to 1.0, relative to frame size)
+            M = cv2.getRotationMatrix2D((w / 2, h / 2), rotation, zoom_level)
             M[0, 2] += offset_x * w
             M[1, 2] += offset_y * h
-            
-            frame = cv2.warpAffine(frame, M, (w, h))
+            frame = cv2.warpAffine(frame, M, (w, h), flags=cv2.INTER_LINEAR)
 
         # 3. Brightness, Contrast, Exposure
         # Apply Brightness and Contrast
@@ -345,22 +346,24 @@ def get_video_stream():
             cv2.fillPoly(mask, [np.int32(src_pts)], 255)
             gray = cv2.bitwise_and(gray, mask)
         
-        # --- Disk Recognition ---
-        # Increase blur slightly to ignore noise on the cardboard texture
-        blurred = cv2.GaussianBlur(gray, (9, 9), 2)
+        # --- Optimized Circle Detection (Downsampled) ---
+        # Resize to 50% for circle search - much faster and reduces noise
+        small_gray = cv2.resize(gray, (w // 2, h // 2))
+        blurred = cv2.GaussianBlur(small_gray, (5, 5), 1.5)
         
-        # Dynamic Hough Circle parameters from UI
-        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=hough_dp, minDist=hough_min_dist,
+        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=hough_dp, minDist=hough_min_dist // 2,
                                    param1=hough_param1, param2=hough_param2, 
-                                   minRadius=hough_min_radius, maxRadius=hough_max_radius)
+                                   minRadius=hough_min_radius // 2, maxRadius=hough_max_radius // 2)
                                    
         detected_circles = []
         if circles is not None:
-            circles = np.round(circles[0, :]).astype("int")
-            # Sort by radius descending to keep the outermost ring of concentric circles
+            circles = circles[0, :]
+            # Sort by radius descending
             sorted_circles = sorted(circles, key=lambda x: x[2], reverse=True)
             
-            for (x, y, r) in sorted_circles:
+            for (sx, sy, sr) in sorted_circles:
+                # Scale coordinates back up
+                x, y, r = int(sx * 2), int(sy * 2), int(sr * 2)
                 # Check if this circle is inside any already accepted circle
                 is_inner = False
                 for (ax, ay, ar) in detected_circles:
@@ -761,6 +764,8 @@ def update_settings():
     if 'auto_blank' in data: auto_blank = bool(data['auto_blank'])
     
     save_config_to_disk()
+    global settings_dirty
+    settings_dirty = True
     return jsonify({"success": True})
 
 @app.route('/api/token/alias', methods=['POST'])
