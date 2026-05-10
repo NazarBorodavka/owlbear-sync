@@ -1,0 +1,12 @@
+{
+  "name": "Physical Token Sync",
+  "version": "1.0.0",
+  "manifest_version": 1,
+  "action": {
+    "title": "Token Sync",
+    "icon": "/icon.svg",
+    "popover": "/",
+    "width": 350,
+    "height": 500
+  }
+}
