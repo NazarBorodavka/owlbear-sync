@@ -2,6 +2,7 @@ opencv-python-headless==4.9.0.80
 opencv-contrib-python-headless==4.9.0.80
 Flask==3.0.2
 Flask-SocketIO==5.3.6
+Flask-HTTPAuth==4.8.0
 requests==2.31.0
 numpy==1.26.4
 stag-python

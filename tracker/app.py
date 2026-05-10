@@ -7,6 +7,7 @@ import time
 import logging
 import os
 import requests
+from flask_httpauth import HTTPBasicAuth
 import json
 try:
     import stag
@@ -26,6 +27,19 @@ app = Flask(__name__)
 # Suppress werkzeug logging for cleaner terminal output
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
+
+auth = HTTPBasicAuth()
+
+# Default credentials (can be changed in UI/config.json)
+USER_DATA = {
+    "admin": "admin"
+}
+
+@auth.verify_password
+def verify_password(username, password):
+    if username in USER_DATA and USER_DATA[username] == password:
+        return username
+    return None
 
 class IPCameraCapture:
     def __init__(self, url):
@@ -145,6 +159,8 @@ def load_config_from_disk():
                 detection_mode = c.get('detection_mode', 'aruco')
                 stag_error_correction = int(c.get('stag_error_correction', 3))
                 stag_roi_padding = int(c.get('stag_roi_padding', 20))
+                if 'password' in c:
+                    USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
                 zoom_level = c.get('zoom_level', 1.0)
                 offset_x = c.get('offset_x', 0.0)
@@ -176,7 +192,8 @@ def save_config_to_disk():
         'detection_mode': detection_mode,
         'stag_error_correction': stag_error_correction,
         'stag_roi_padding': stag_roi_padding,
-        'token_aliases': token_aliases
+        'token_aliases': token_aliases,
+        'password': USER_DATA.get("admin", "admin")
     }
     try:
         with open(CONFIG_FILE, 'w') as f:
@@ -630,10 +647,12 @@ def generate_frames():
         time.sleep(0.03) # Limit framerate to browser to save bandwidth
 
 @app.route('/')
+@auth.login_required
 def index():
     return render_template('index.html')
 
 @app.route('/video_feed')
+@auth.login_required
 def video_feed():
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
@@ -696,6 +715,7 @@ def calibrate():
         return jsonify({"success": True})
 
 @app.route('/api/settings', methods=['POST'])
+@auth.login_required
 def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
