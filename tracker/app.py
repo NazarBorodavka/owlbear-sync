@@ -16,7 +16,24 @@ try:
 except ImportError:
     STAG_AVAILABLE = False
 
-print(f"--- STag Detection Support: {'ENABLED' if STAG_AVAILABLE else 'DISABLED (stag-python library not found)'} ---")
+# DeepTag / RuneTag Support
+import sys
+DEEPTAG_PATH = os.path.join(os.path.dirname(__file__), 'deeptag')
+if os.path.exists(DEEPTAG_PATH):
+    sys.path.append(DEEPTAG_PATH)
+    try:
+        from deeptag_model_setting import load_deeptag_models
+        from marker_dict_setting import load_marker_codebook
+        from stag_decode.detection_engine import DetectionEngine
+        DEEPTAG_AVAILABLE = True
+    except ImportError as e:
+        print(f"DeepTag Import Error: {e}")
+        DEEPTAG_AVAILABLE = False
+else:
+    DEEPTAG_AVAILABLE = False
+
+print(f"--- STag Detection Support: {'ENABLED' if STAG_AVAILABLE else 'DISABLED'} ---")
+print(f"--- RuneTag (DeepTag) Support: {'ENABLED' if DEEPTAG_AVAILABLE else 'DISABLED'} ---")
 
 # FFMPEG timeout, force TCP, and disable buffering for lowest latency
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;5000000|rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
@@ -97,7 +114,7 @@ def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
-    global detection_mode, stag_error_correction, stag_roi_padding
+    global detection_mode, stag_error_correction, stag_roi_padding, runetag_hamming_dist
     
     if os.path.exists(CONFIG_FILE):
         try:
@@ -106,6 +123,7 @@ def load_config_from_disk():
                 detection_mode = c.get('detection_mode', 'aruco')
                 stag_error_correction = int(c.get('stag_error_correction', 3))
                 stag_roi_padding = int(c.get('stag_roi_padding', 20))
+                runetag_hamming_dist = int(c.get('runetag_hamming_dist', 4))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -139,6 +157,7 @@ def save_config_to_disk():
         'detection_mode': detection_mode,
         'stag_error_correction': stag_error_correction,
         'stag_roi_padding': stag_roi_padding,
+        'runetag_hamming_dist': runetag_hamming_dist,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin")
     }
@@ -176,10 +195,14 @@ aruco_poly_approx = 0.05
 auto_blank = False # Toggle for anti-reflection mode
 flip_x = False
 flip_y = False
-detection_mode = 'aruco' # 'aruco' or 'stag'
+detection_mode = 'aruco' # 'aruco', 'stag', or 'runetag'
 stag_error_correction = 3
 stag_roi_padding = 20
+runetag_hamming_dist = 4
 manual_blank = False
+
+# Global Detection Engines
+runetag_engine = None
 
 load_config_from_disk()
 
@@ -353,6 +376,41 @@ def get_video_stream():
                     (corners, ids, rejected) = stag.detectMarkers(roi, 11, stag_error_correction)
                     if ids is None or len(ids) == 0:
                         (corners, ids, rejected) = stag.detectMarkers(roi_enhanced, 11, stag_error_correction)
+                elif detection_mode == 'runetag' and DEEPTAG_AVAILABLE:
+                    global runetag_engine
+                    if runetag_engine is None:
+                        # Initialize on first use
+                        try:
+                            tag_family = 'runetag'
+                            model_detector, model_decoder, device, tag_type, grid_size_cand_list = load_deeptag_models(tag_family, 'cpu')
+                            codebook_filename = os.path.join(DEEPTAG_PATH, 'codebook', tag_family + '_codebook.txt')
+                            codebook = load_marker_codebook(codebook_filename, tag_type)
+                            
+                            runetag_engine = DetectionEngine(model_detector, model_decoder, device, tag_type, grid_size_cand_list, 
+                                        stg2_iter_num=2, min_center_score=0.2, min_corner_score=0.2, 
+                                        batch_size_stg2=4, hamming_dist=runetag_hamming_dist, 
+                                        cameraMatrix=[[600, 0, w/2], [0, 600, h/2], [0, 0, 1]], 
+                                        distCoeffs=[0]*8, codebook=codebook,
+                                        tag_real_size_in_meter_dict={-1: 0.1})
+                        except Exception as e:
+                            print(f"Failed to initialize RuneTag engine: {e}")
+                            DEEPTAG_AVAILABLE = False
+                    
+                    if runetag_engine:
+                        # DeepTag prefers BGR
+                        # We process the ROI
+                        decoded_tags = runetag_engine.process(frame[y1:y2, x1:x2])
+                        ids = []
+                        corners = []
+                        for tag in decoded_tags:
+                            if tag['is_valid']:
+                                ids.append([tag['tag_id']])
+                                # Keypoints in images are relative to ROI if we passed ROI? 
+                                # Actually DetectionEngine.process uses the image passed.
+                                corners.append(tag['keypoints_in_images'])
+                        ids = np.array(ids) if ids else None
+                    else:
+                        ids = None
                 elif detection_mode == 'stag' and not STAG_AVAILABLE:
                     corners, ids, _ = detector.detectMarkers(roi_enhanced)
                 else:
@@ -654,7 +712,7 @@ def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
-    global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank
+    global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist
     
     data = request.json
     if 'camera_url' in data:
@@ -665,6 +723,8 @@ def update_settings():
         stag_error_correction = int(data['stag_error_correction'])
     if 'stag_roi_padding' in data:
         stag_roi_padding = int(data['stag_roi_padding'])
+    if 'runetag_hamming_dist' in data:
+        runetag_hamming_dist = int(data['runetag_hamming_dist'])
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
     if 'zoom' in data: zoom_level = float(data['zoom'])
     if 'offset_x' in data: offset_x = float(data['offset_x'])

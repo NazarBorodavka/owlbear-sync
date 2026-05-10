@@ -393,7 +393,8 @@
                     <h3>Marker Detection Mode</h3>
                     <div style="display: flex; gap: 10px; margin-top: 10px;">
                         <button id="btn_mode_aruco" onclick="setDetectionMode('aruco')" style="background: var(--accent); flex: 1;">ArUco</button>
-                        <button id="btn_mode_stag" onclick="setDetectionMode('stag')" style="background: rgba(255,255,255,0.05); flex: 1;">STag HD11</button>
+                        <button id="btn_mode_stag" onclick="setDetectionMode('stag')" style="background: rgba(255,255,255,0.05); flex: 1;">STag</button>
+                        <button id="btn_mode_runetag" onclick="setDetectionMode('runetag')" style="background: rgba(255,255,255,0.05); flex: 1;">RuneTag</button>
                     </div>
                     
                     <div id="settings_aruco" style="margin-top: 20px;">
@@ -420,6 +421,15 @@
                             <label><span>Search Padding (px)</span> <input type="number" id="val_stag_roi_padding" value="20" step="1" class="val-input" onchange="syncSlider(this, 'stag_roi_padding'); updateSettings()"></label>
                             <input type="range" id="stag_roi_padding" min="5" max="100" step="1" value="20" oninput="updateVal('stag_roi_padding')">
                             <p class="help-text">Extra area around the token to search for the marker.</p>
+                        </div>
+                    </div>
+
+                    <div id="settings_runetag" style="margin-top: 20px; display: none;">
+                        <h4>RuneTag Settings</h4>
+                        <div class="control-group">
+                            <label><span>Max Hamming Distance</span> <input type="number" id="val_runetag_hamming_dist" value="4" step="1" class="val-input" onchange="syncSlider(this, 'runetag_hamming_dist'); updateSettings()"></label>
+                            <input type="range" id="runetag_hamming_dist" min="0" max="8" step="1" value="4" oninput="updateVal('runetag_hamming_dist')">
+                            <p class="help-text">Error tolerance for marker ID decoding.</p>
                         </div>
                     </div>
                 </div>
@@ -631,7 +641,8 @@
                 aruco_min_perimeter: document.getElementById('aruco_min_perimeter').value,
                 aruco_adaptive_thresh_min: document.getElementById('aruco_adaptive_thresh_min').value,
                 stag_error_correction: document.getElementById('stag_error_correction').value,
-                stag_roi_padding: document.getElementById('stag_roi_padding').value
+                stag_roi_padding: document.getElementById('stag_roi_padding').value,
+                runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value
             };
             
             // Update UI numeric inputs
@@ -667,10 +678,12 @@
             window.detection_mode = mode;
             document.getElementById('btn_mode_aruco').style.background = (mode === 'aruco' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
             document.getElementById('btn_mode_stag').style.background = (mode === 'stag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
+            document.getElementById('btn_mode_runetag').style.background = (mode === 'runetag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
             
             // Show/Hide specific settings
             document.getElementById('settings_aruco').style.display = (mode === 'aruco' ? 'block' : 'none');
             document.getElementById('settings_stag').style.display = (mode === 'stag' ? 'block' : 'none');
+            document.getElementById('settings_runetag').style.display = (mode === 'runetag' ? 'block' : 'none');
             
             updateSettings();
         }
@@ -715,7 +728,8 @@
                 aruco_min_perimeter: document.getElementById('aruco_min_perimeter').value,
                 aruco_adaptive_thresh_min: document.getElementById('aruco_adaptive_thresh_min').value,
                 stag_error_correction: document.getElementById('stag_error_correction').value,
-                stag_roi_padding: document.getElementById('stag_roi_padding').value
+                stag_roi_padding: document.getElementById('stag_roi_padding').value,
+                runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -738,6 +752,10 @@
                     if (config.stag_roi_padding) {
                         document.getElementById('stag_roi_padding').value = config.stag_roi_padding;
                         document.getElementById('val_stag_roi_padding').innerText = config.stag_roi_padding;
+                    }
+                    if (config.runetag_hamming_dist) {
+                        document.getElementById('runetag_hamming_dist').value = config.runetag_hamming_dist;
+                        document.getElementById('val_runetag_hamming_dist').innerText = config.runetag_hamming_dist;
                     }
             
                     if (config.detection_mode) {
