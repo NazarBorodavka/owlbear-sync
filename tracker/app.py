@@ -251,7 +251,7 @@ def get_video_stream():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, detection_mode
-    global src_pts, corner_idx, homography_matrix, auto_blank, stag_error_correction, stag_roi_padding
+    global src_pts, corner_idx, homography_matrix, auto_blank, stag_error_correction, stag_roi_padding, manual_blank
     fail_count = 0
     
     # 20 FPS target
@@ -721,7 +721,7 @@ def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
-    global camera_url, detection_mode, stag_error_correction, stag_roi_padding
+    global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank
     
     data = request.json
     if 'camera_url' in data:
