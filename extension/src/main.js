@@ -1,6 +1,6 @@
 import './style.css'
-import OBR, { buildShape } from '@owlbear-rodeo/sdk'
-import { io } from 'socket.io-client'
+import OBR, { buildShape } from 'https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@latest/+esm'
+import { io } from 'https://cdn.jsdelivr.net/npm/socket.io-client@latest/dist/socket.io.esm.min.js'
 
 document.querySelector('#app').innerHTML = `
   <div class="container">
