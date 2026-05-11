@@ -107,6 +107,14 @@ class IPCameraCapture:
     def isOpened(self):
         return self.cap.isOpened()
 
+    def grab(self):
+        # In IPCameraCapture, the background thread already clears the buffer
+        # and keeps only the latest frame in the queue.
+        return True
+
+    def retrieve(self):
+        return self.read()
+
     def release(self):
         self.is_running = False
         self.cap.release()
@@ -439,20 +447,23 @@ def get_video_stream():
                     DEEPTAG_AVAILABLE = False
             
             if runetag_engine:
-                # Run on full frame but with a scale that detects small tags
-                # detect_scale=1.0 is slower but most reliable
-                decoded_tags = runetag_engine.process(frame, detect_scale=0.8)
-                for tag in decoded_tags:
-                    if tag['is_valid']:
-                        mid = int(tag['tag_id'])
-                        kpts = tag['keypoints_in_images']
-                        # Calculate center from keypoints
-                        center_x = int(np.mean(kpts[:, 0]))
-                        center_y = int(np.mean(kpts[:, 1]))
-                        markers[mid] = (center_x, center_y)
-                        if show_overlay:
-                            cv2.polylines(frame, [np.int32(kpts)], True, (255, 0, 255), 2)
-                            cv2.putText(frame, f"ID: {mid}", (center_x, center_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                try:
+                    # Run on full frame but with a scale that detects markers without killing CPU
+                    # 0.5x scale is usually enough for 1080p frames
+                    decoded_tags = runetag_engine.process(frame, detect_scale=0.5)
+                    for tag in decoded_tags:
+                        if tag['is_valid']:
+                            mid = int(tag['tag_id'])
+                            kpts = tag['keypoints_in_images']
+                            # Calculate center from keypoints
+                            center_x = int(np.mean(kpts[:, 0]))
+                            center_y = int(np.mean(kpts[:, 1]))
+                            markers[mid] = (center_x, center_y)
+                            if show_overlay:
+                                cv2.polylines(frame, [np.int32(kpts)], True, (255, 0, 255), 2)
+                                cv2.putText(frame, f"ID: {mid}", (center_x, center_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                except Exception as e:
+                    print(f"RuneTag Detection Error: {e}")
 
         elif detection_mode == 'apriltag' and APRILTAG_AVAILABLE:
             global apriltag_detector
@@ -467,17 +478,20 @@ def get_video_stream():
                         APRILTAG_AVAILABLE = False
             
             if apriltag_detector:
-                results = []
-                if hasattr(apriltag_detector, 'detect'): # pupil_apriltags
-                    results = apriltag_detector.detect(gray)
-                else: # basic apriltag
-                    results = apriltag_detector.detect(gray)
-                
-                for r in results:
-                    markers[r.tag_id] = (int(r.center[0]), int(r.center[1]))
-                    if show_overlay:
-                        cv2.polylines(frame, [np.int32(r.corners)], True, (0, 255, 0), 2)
-                        cv2.putText(frame, f"ID: {r.tag_id}", (int(r.center[0]), int(r.center[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                try:
+                    results = []
+                    if hasattr(apriltag_detector, 'detect'): # pupil_apriltags
+                        results = apriltag_detector.detect(gray)
+                    else: # basic apriltag
+                        results = apriltag_detector.detect(gray)
+                    
+                    for r in results:
+                        markers[r.tag_id] = (int(r.center[0]), int(r.center[1]))
+                        if show_overlay:
+                            cv2.polylines(frame, [np.int32(r.corners)], True, (0, 255, 0), 2)
+                            cv2.putText(frame, f"ID: {r.tag_id}", (int(r.center[0]), int(r.center[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                except Exception as e:
+                    print(f"AprilTag Detection Error: {e}")
 
         # --- Temporal & ArUco Fusion ---
         detected_tokens = []
