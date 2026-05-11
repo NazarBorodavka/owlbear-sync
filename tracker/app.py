@@ -119,6 +119,10 @@ is_running = False
 
 # Global Configuration with Defaults
 CONFIG_FILE = "config.json"
+runetag_min_score = 0.3
+runetag_detect_scale = 0.5
+runetag_invert = False
+runetag_precision = False
 
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
