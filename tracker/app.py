@@ -28,24 +28,15 @@ except ImportError:
     except ImportError:
         APRILTAG_AVAILABLE = False
 
-# DeepTag / RuneTag Support
-import sys
-DEEPTAG_PATH = os.path.join(os.path.dirname(__file__), 'deeptag')
-if os.path.exists(DEEPTAG_PATH):
-    sys.path.append(DEEPTAG_PATH)
-    try:
-        from deeptag_model_setting import load_deeptag_models
-        from marker_dict_setting import load_marker_codebook
-        from stag_decode.detection_engine import DetectionEngine
-        DEEPTAG_AVAILABLE = True
-    except ImportError as e:
-        print(f"DeepTag Import Error: {e}")
-        DEEPTAG_AVAILABLE = False
-else:
-    DEEPTAG_AVAILABLE = False
+# RuneTag Support (Lightweight Custom CV Implementation)
+try:
+    from runetag_cv import RuneTagDetector
+    RUNETAG_AVAILABLE = True
+except ImportError:
+    RUNETAG_AVAILABLE = False
 
 print(f"--- STag Detection Support: {'ENABLED' if STAG_AVAILABLE else 'DISABLED'} ---")
-print(f"--- RuneTag (DeepTag) Support: {'ENABLED' if DEEPTAG_AVAILABLE else 'DISABLED'} ---")
+print(f"--- RuneTag-CV Support: {'ENABLED' if RUNETAG_AVAILABLE else 'DISABLED'} ---")
 
 # FFMPEG timeout, force TCP, and disable buffering for lowest latency
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;5000000|rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
@@ -116,8 +107,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 camera_url = "" # IP camera URL
 cap = None
 is_running = False
-
-# Global Configuration with Defaults
+runetag_engine = None
 CONFIG_FILE = "config.json"
 runetag_min_score = 0.3
 runetag_detect_scale = 1.0
@@ -128,8 +118,6 @@ last_runetag_count = -1
 
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
-    global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
     global detection_mode, stag_error_correction, stag_roi_padding, runetag_hamming_dist, apriltag_family
     global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision, runetag_show_rois
     
@@ -137,9 +125,6 @@ def load_config_from_disk():
         try:
             with open(CONFIG_FILE, 'r') as f:
                 c = json.load(f)
-                detection_mode = c.get('detection_mode', 'aruco')
-                stag_error_correction = int(c.get('stag_error_correction', 3))
-                stag_roi_padding = int(c.get('stag_roi_padding', 20))
                 runetag_hamming_dist = int(c.get('runetag_hamming_dist', 4))
                 runetag_min_score = float(c.get('runetag_min_score', 0.3))
                 runetag_detect_scale = float(c.get('runetag_detect_scale', 0.5))
@@ -471,73 +456,36 @@ def get_video_stream():
             except Exception as e:
                 print(f"STag Detection Error: {e}")
 
-        elif detection_mode == 'runetag' and DEEPTAG_AVAILABLE:
-            global runetag_engine, runetag_load_failed_time
-            if runetag_engine is None and (time.time() - runetag_load_failed_time > 10):
+        elif detection_mode == 'runetag' and RUNETAG_AVAILABLE:
+            global runetag_engine
+            if runetag_engine is None:
                 try:
-                    tag_family = 'runetag'
-                    model_detector, model_decoder, device, tag_type, grid_size_cand_list = load_deeptag_models(tag_family, 'cpu')
-                    codebook_filename = os.path.join(DEEPTAG_PATH, 'codebook', tag_family + '_codebook.txt')
-                    codebook = load_marker_codebook(codebook_filename, tag_type)
-                    # Increased stg2_iter_num for higher decoding precision on dense tags
-                    runetag_engine = DetectionEngine(model_detector, model_decoder, device, tag_type, grid_size_cand_list, 
-                                stg2_iter_num=5, min_center_score=0.1, min_corner_score=0.1, 
-                                batch_size_stg2=8, hamming_dist=runetag_hamming_dist, 
-                                cameraMatrix=[[600, 0, w/2], [0, 600, h/2], [0, 0, 1]], 
-                                distCoeffs=[0]*8, codebook=codebook,
-                                tag_real_size_in_meter_dict={-1: 0.1})
+                    codebook_path = os.path.join(os.path.dirname(__file__), 'codebooks', 'runetag_codebook.txt')
+                    runetag_engine = RuneTagDetector(codebook_path, hamming_dist=runetag_hamming_dist)
                 except Exception as e:
-                    print(f"RuneTag Init Error: {e}")
-                    runetag_load_failed_time = time.time()
-                    DEEPTAG_AVAILABLE = False
+                    print(f"RuneTag-CV Init Error: {e}")
+                    RUNETAG_AVAILABLE = False
             
             if runetag_engine:
                 try:
-                    # Adaptive preparation for RuneTag
-                    rt_frame = frame.copy()
+                    # Run lightweight CV detection
+                    tags = runetag_engine.detect(gray, invert=runetag_invert)
                     
-                    # Apply stronger CLAHE to improve contrast for dot detection
-                    rt_gray = cv2.cvtColor(rt_frame, cv2.COLOR_BGR2GRAY)
-                    clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(4,4))
-                    rt_gray = clahe.apply(rt_gray)
-                    rt_frame = cv2.cvtColor(rt_gray, cv2.COLOR_GRAY2BGR)
-                    
-                    if runetag_invert:
-                        rt_frame = 255 - rt_frame
-                    
-                    # Run detection
-                    decoded_tags = runetag_engine.process(rt_frame, detect_scale=runetag_detect_scale)
-                    
-                    # If precision mode is on and no tags found, try a second scale
-                    if runetag_precision and len([t for t in decoded_tags if t['is_valid']]) == 0:
-                        extra_tags = runetag_engine.process(rt_frame, detect_scale=min(1.0, runetag_detect_scale * 1.5))
-                        decoded_tags.extend(extra_tags)
+                    if runetag_show_rois:
+                        for tag in tags:
+                            pts = np.array(tag['corners'], np.int32).reshape((-1, 1, 2))
+                            cv2.polylines(frame, [pts], True, (0, 255, 255), 2)
 
-                    if len(decoded_tags) >= 0:
-                        global last_runetag_count
-                        valid_ids = [t for t in decoded_tags if t['is_valid']]
-                        if len(decoded_tags) != last_runetag_count:
-                            print(f"RuneTag Update: Stage-1 found {len(decoded_tags)} ROI(s), Stage-2 decoded {len(valid_ids)} ID(s).", flush=True)
-                            last_runetag_count = len(decoded_tags)
-
-                    # The drawing logic has been moved to the end of the loop to ensure visibility
-
-                    for tag in decoded_tags:
-                        if tag['is_valid']:
-                            print(f"RuneTag ROI Found: ID={tag['tag_id']}, Score={tag.get('center_score', 'N/A')}", flush=True)
+                    for tag in tags:
+                        token_id = int(tag['id'])
+                        center_x, center_y = tag['center']
+                        markers[token_id] = (center_x, center_y)
                         
-                        if tag['is_valid'] and tag.get('center_score', 0) > runetag_min_score:
-                            mid = int(tag['tag_id'])
-                            kpts = tag['keypoints_in_images']
-                            # Calculate center from keypoints
-                            center_x = int(np.mean(kpts[:, 0]))
-                            center_y = int(np.mean(kpts[:, 1]))
-                            markers[mid] = (center_x, center_y)
-                            if show_overlay:
-                                cv2.polylines(frame, [np.int32(kpts)], True, (255, 0, 255), 2)
-                                cv2.putText(frame, f"ID: {mid}", (center_x, center_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                        if show_overlay:
+                            cv2.putText(frame, f"ID: {token_id}", (center_x, center_y), 
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
                 except Exception as e:
-                    print(f"RuneTag Detection Error: {e}")
+                    print(f"RuneTag-CV Detection Error: {e}")
 
         elif detection_mode == 'apriltag' and APRILTAG_AVAILABLE:
             global apriltag_detector
@@ -857,7 +805,7 @@ def update_settings():
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
     global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist
-    global DEEPTAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin
+    global RUNETAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin
     global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision, runetag_show_rois
     global apriltag_detector
     
@@ -901,6 +849,11 @@ def update_settings():
     if 'show_overlay' in data: show_overlay = bool(data['show_overlay'])
     if 'auto_blank' in data: auto_blank = bool(data['auto_blank'])
     if 'manual_blank' in data: manual_blank = bool(data['manual_blank'])
+    if 'runetag_invert' in data: runetag_invert = bool(data['runetag_invert'])
+    if 'runetag_precision' in data: runetag_precision = bool(data['runetag_precision'])
+    if 'runetag_show_rois' in data: runetag_show_rois = bool(data['runetag_show_rois'])
+    if 'runetag_min_score' in data: runetag_min_score = float(data['runetag_min_score'])
+    if 'runetag_detect_scale' in data: runetag_detect_scale = float(data['runetag_detect_scale'])
     if 'flip_x' in data: flip_x = bool(data['flip_x'])
     if 'flip_y' in data: flip_y = bool(data['flip_y'])
     
