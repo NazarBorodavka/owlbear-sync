@@ -145,6 +145,7 @@ def load_config_from_disk():
                 runetag_invert = c.get('runetag_invert', False)
                 runetag_precision = c.get('runetag_precision', False)
                 apriltag_family = c.get('apriltag_family', 'tag36h11')
+                last_runetag_hamming_dist = runetag_hamming_dist
                 apriltag_decision_margin = float(c.get('apriltag_decision_margin', 30.0))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
@@ -509,10 +510,11 @@ def get_video_stream():
                         extra_tags = runetag_engine.process(rt_frame, detect_scale=min(1.0, runetag_detect_scale * 1.5))
                         decoded_tags.extend(extra_tags)
 
-                    if len(decoded_tags) > 0:
+                    if len(decoded_tags) >= 0:
                         global last_runetag_count
+                        valid_ids = [t for t in decoded_tags if t['is_valid']]
                         if len(decoded_tags) != last_runetag_count:
-                            print(f"RuneTag Debug: Found {len(decoded_tags)} tags. Invert={runetag_invert}, Precision={runetag_precision}", flush=True)
+                            print(f"RuneTag Update: Stage-1 found {len(decoded_tags)} ROI(s), Stage-2 decoded {len(valid_ids)} ID(s).", flush=True)
                             last_runetag_count = len(decoded_tags)
 
                     for tag in decoded_tags:
@@ -868,7 +870,10 @@ def update_settings():
     if 'stag_roi_padding' in data:
         stag_roi_padding = int(data['stag_roi_padding'])
     if 'runetag_hamming_dist' in data:
-        runetag_hamming_dist = int(data['runetag_hamming_dist'])
+        new_hd = int(data['runetag_hamming_dist'])
+        if new_hd != runetag_hamming_dist:
+            runetag_hamming_dist = new_hd
+            runetag_engine = None # Force re-init with new hamming dist
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
     if 'zoom' in data: zoom_level = float(data['zoom'])
     if 'offset_x' in data: offset_x = float(data['offset_x'])

@@ -99,21 +99,21 @@ class DetectionEngine:
         rois_info = stag_detector.detect_rois(image, detect_scales[0] )
         self.bbox_corner_info = stag_detector.image_res
 
-        # stage-1 print
-        print('%d ROIs'%len(rois_info))
+        # stage-1 print (Silenced)
+        # print('%d ROIs'%len(rois_info))
 
  
-        # stage-2
-        print('>>>>>>>Stage-2<<<<<<<')
+        # stage-2 (Silenced)
+        # print('>>>>>>>Stage-2<<<<<<<')
         rois = [roi_info['ordered_corners'] for roi_info in rois_info]
         self.rois_info = rois_info        
         decoded_tags = stag_decoder.detect_tags(image, rois.copy())
 
-        # stage-2 print
-        print('Valid ROIs:', end=' ')
-        for ii, decoded_tag in enumerate(decoded_tags):
-            if decoded_tag['is_valid']: print('%d'% ii, end=', ')
-        print('')
+        # stage-2 print (Silenced)
+        # print('Valid ROIs:', end=' ')
+        # for ii, decoded_tag in enumerate(decoded_tags):
+        #    if decoded_tag['is_valid']: print('%d'% ii, end=', ')
+        # print('')
 
         # estimate pose
         for ii, decoded_tag in enumerate(decoded_tags):
