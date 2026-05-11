@@ -436,7 +436,20 @@
 
                     <div id="settings_apriltag" style="margin-top: 20px; display: none;">
                         <h4>AprilTag Settings</h4>
-                        <p class="help-text">AprilTag is highly robust and recommended if RuneTag is not working well. Use 'tag36h11' family.</p>
+                        <div class="control-group">
+                            <label><span>Tag Family</span>
+                                <select id="apriltag_family" class="val-input" onchange="updateSettings()" style="width: 100%; margin-top: 5px;">
+                                    <option value="tag36h11">tag36h11 (Standard)</option>
+                                    <option value="tag25h9">tag25h9</option>
+                                    <option value="tag16h5">tag16h5</option>
+                                    <option value="tagCircle21h7">tagCircle21h7 (Circular)</option>
+                                    <option value="tagCircle49h12">tagCircle49h12 (Circular)</option>
+                                    <option value="tagStandard41h12">tagStandard41h12</option>
+                                    <option value="tagStandard52h13">tagStandard52h13</option>
+                                </select>
+                            </label>
+                            <p class="help-text">Select the family that matches your printed markers.</p>
+                        </div>
                     </div>
                 </div>
 
@@ -648,7 +661,8 @@
                 aruco_adaptive_thresh_min: document.getElementById('aruco_adaptive_thresh_min').value,
                 stag_error_correction: document.getElementById('stag_error_correction').value,
                 stag_roi_padding: document.getElementById('stag_roi_padding').value,
-                runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value
+                runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value,
+                apriltag_family: document.getElementById('apriltag_family').value
             };
             
             // Update UI numeric inputs
@@ -737,7 +751,8 @@
                 aruco_adaptive_thresh_min: document.getElementById('aruco_adaptive_thresh_min').value,
                 stag_error_correction: document.getElementById('stag_error_correction').value,
                 stag_roi_padding: document.getElementById('stag_roi_padding').value,
-                runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value
+                runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value,
+                apriltag_family: document.getElementById('apriltag_family').value
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -764,6 +779,9 @@
                     if (config.runetag_hamming_dist) {
                         document.getElementById('runetag_hamming_dist').value = config.runetag_hamming_dist;
                         document.getElementById('val_runetag_hamming_dist').innerText = config.runetag_hamming_dist;
+                    }
+                    if (config.apriltag_family) {
+                        document.getElementById('apriltag_family').value = config.apriltag_family;
                     }
             
                     if (config.detection_mode) {

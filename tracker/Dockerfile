@@ -1,23 +1,16 @@
-FROM python:3.10-slim
+FROM python:3.10
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies for building stag-python and running OpenCV
+# Install runtime dependencies for OpenCV
 RUN apt-get update && apt-get install -y \
-    cmake \
-    g++ \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender-dev \
     libgomp1 \
-    python3-dev \
-    build-essential \
-    liblapack-dev \
-    libopenblas-dev \
-    gfortran \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

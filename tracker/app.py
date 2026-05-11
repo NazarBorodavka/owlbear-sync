@@ -125,7 +125,7 @@ def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
-    global detection_mode, stag_error_correction, stag_roi_padding, runetag_hamming_dist
+    global detection_mode, stag_error_correction, stag_roi_padding, runetag_hamming_dist, apriltag_family
     
     if os.path.exists(CONFIG_FILE):
         try:
@@ -135,6 +135,7 @@ def load_config_from_disk():
                 stag_error_correction = int(c.get('stag_error_correction', 3))
                 stag_roi_padding = int(c.get('stag_roi_padding', 20))
                 runetag_hamming_dist = int(c.get('runetag_hamming_dist', 4))
+                apriltag_family = c.get('apriltag_family', 'tag36h11')
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -169,6 +170,7 @@ def save_config_to_disk():
         'stag_error_correction': stag_error_correction,
         'stag_roi_padding': stag_roi_padding,
         'runetag_hamming_dist': runetag_hamming_dist,
+        'apriltag_family': apriltag_family,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin")
     }
@@ -753,13 +755,17 @@ def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
-    global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist
+    global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist, apriltag_family
+    global apriltag_detector
     
     data = request.json
     if 'camera_url' in data:
         camera_url = data['camera_url']
     if 'detection_mode' in data:
         detection_mode = data['detection_mode']
+    if 'apriltag_family' in data and data['apriltag_family'] != apriltag_family:
+        apriltag_family = data['apriltag_family']
+        apriltag_detector = None # Reset so it re-initializes with new family
     if 'stag_error_correction' in data:
         stag_error_correction = int(data['stag_error_correction'])
     if 'stag_roi_padding' in data:
