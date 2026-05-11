@@ -247,6 +247,7 @@ def get_video_stream():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, detection_mode
+    global DEEPTAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE
     global src_pts, corner_idx, homography_matrix, auto_blank, stag_error_correction, stag_roi_padding, manual_blank
     fail_count = 0
     
@@ -395,7 +396,7 @@ def get_video_stream():
             
             try:
                 # Use original ROI for first pass, enhanced for second
-                elif detection_mode == 'stag' and STAG_AVAILABLE:
+                if detection_mode == 'stag' and STAG_AVAILABLE:
                     # STag is now handled globally below for better reliability
                     pass
                 elif detection_mode == 'runetag' and DEEPTAG_AVAILABLE:
@@ -786,7 +787,8 @@ def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
-    global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist, apriltag_family
+    global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist
+    global DEEPTAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, apriltag_family
     global apriltag_detector
     
     data = request.json
