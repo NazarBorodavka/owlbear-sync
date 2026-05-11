@@ -10,6 +10,7 @@ import requests
 from flask_httpauth import HTTPBasicAuth
 import json
 import queue
+import collections
 try:
     import stag
     STAG_AVAILABLE = hasattr(stag, 'detectMarkers')
@@ -73,8 +74,8 @@ class IPCameraCapture:
     def __init__(self, url):
         self.url = url
         self.cap = cv2.VideoCapture(url)
-        # Queue of size 1 to ensure we only ever have the LATEST frame
-        self.q = queue.Queue(maxsize=1)
+        # Use deque with maxlen=1 for atomic "latest frame" access
+        self.frame_buffer = collections.deque(maxlen=1)
         self.is_running = True
         
         # Tapo/RTSP specific optimizations
@@ -89,27 +90,17 @@ class IPCameraCapture:
             if not ret:
                 time.sleep(0.1)
                 continue
-            if not self.q.empty():
-                try:
-                    self.q.get_nowait() # Discard old frame
-                except queue.Empty:
-                    pass
-            self.q.put(frame)
+            self.frame_buffer.append(frame)
 
     def read(self):
-        try:
-            # Wait a tiny bit for a frame, but don't block forever
-            frame = self.q.get(timeout=0.5)
-            return True, frame
-        except:
+        if not self.frame_buffer:
             return False, None
+        return True, self.frame_buffer[0]
 
     def isOpened(self):
         return self.cap.isOpened()
 
     def grab(self):
-        # In IPCameraCapture, the background thread already clears the buffer
-        # and keeps only the latest frame in the queue.
         return True
 
     def retrieve(self):
@@ -231,6 +222,7 @@ manual_blank = False
 
 # Global Detection Engines
 runetag_engine = None
+runetag_load_failed_time = 0
 apriltag_detector = None
 
 load_config_from_disk()
@@ -453,21 +445,23 @@ def get_video_stream():
                 print(f"STag Detection Error: {e}")
 
         elif detection_mode == 'runetag' and DEEPTAG_AVAILABLE:
-            global runetag_engine
-            if runetag_engine is None:
+            global runetag_engine, runetag_load_failed_time
+            if runetag_engine is None and (time.time() - runetag_load_failed_time > 10):
                 try:
                     tag_family = 'runetag'
                     model_detector, model_decoder, device, tag_type, grid_size_cand_list = load_deeptag_models(tag_family, 'cpu')
                     codebook_filename = os.path.join(DEEPTAG_PATH, 'codebook', tag_family + '_codebook.txt')
                     codebook = load_marker_codebook(codebook_filename, tag_type)
+                    # stg2_iter_num=1 for faster detection
                     runetag_engine = DetectionEngine(model_detector, model_decoder, device, tag_type, grid_size_cand_list, 
-                                stg2_iter_num=2, min_center_score=0.1, min_corner_score=0.1, 
+                                stg2_iter_num=1, min_center_score=0.1, min_corner_score=0.1, 
                                 batch_size_stg2=4, hamming_dist=runetag_hamming_dist, 
                                 cameraMatrix=[[600, 0, w/2], [0, 600, h/2], [0, 0, 1]], 
                                 distCoeffs=[0]*8, codebook=codebook,
                                 tag_real_size_in_meter_dict={-1: 0.1})
                 except Exception as e:
                     print(f"RuneTag Init Error: {e}")
+                    runetag_load_failed_time = time.time()
                     DEEPTAG_AVAILABLE = False
             
             if runetag_engine:
