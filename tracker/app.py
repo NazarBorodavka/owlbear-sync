@@ -472,9 +472,10 @@ def get_video_stream():
                     model_detector, model_decoder, device, tag_type, grid_size_cand_list = load_deeptag_models(tag_family, 'cpu')
                     codebook_filename = os.path.join(DEEPTAG_PATH, 'codebook', tag_family + '_codebook.txt')
                     codebook = load_marker_codebook(codebook_filename, tag_type)
+                    # Increased stg2_iter_num for higher decoding precision on dense tags
                     runetag_engine = DetectionEngine(model_detector, model_decoder, device, tag_type, grid_size_cand_list, 
-                                stg2_iter_num=1, min_center_score=0.1, min_corner_score=0.1, 
-                                batch_size_stg2=4, hamming_dist=runetag_hamming_dist, 
+                                stg2_iter_num=3, min_center_score=0.1, min_corner_score=0.1, 
+                                batch_size_stg2=8, hamming_dist=runetag_hamming_dist, 
                                 cameraMatrix=[[600, 0, w/2], [0, 600, h/2], [0, 0, 1]], 
                                 distCoeffs=[0]*8, codebook=codebook,
                                 tag_real_size_in_meter_dict={-1: 0.1})
@@ -487,6 +488,13 @@ def get_video_stream():
                 try:
                     # Adaptive preparation for RuneTag
                     rt_frame = frame.copy()
+                    
+                    # Apply CLAHE to improve contrast for dot detection (vital for phone screens)
+                    rt_gray = cv2.cvtColor(rt_frame, cv2.COLOR_BGR2GRAY)
+                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                    rt_gray = clahe.apply(rt_gray)
+                    rt_frame = cv2.cvtColor(rt_gray, cv2.COLOR_GRAY2BGR)
+                    
                     if runetag_invert:
                         rt_frame = 255 - rt_frame
                     
