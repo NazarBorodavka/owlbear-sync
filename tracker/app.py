@@ -270,8 +270,8 @@ def get_video_stream():
             
         if not success or frame is None:
             fail_count += 1
-            if fail_count > 10:
-                print("Stream disconnected, attempting to reconnect...")
+            if fail_count > 30: # Wait up to 3 seconds for stream to start
+                print(f"Stream disconnected or slow (url: {camera_url}), attempting to reconnect...", flush=True)
                 with camera_lock:
                     if cap is not None:
                         cap.release()
@@ -281,7 +281,7 @@ def get_video_stream():
                     except (ValueError, TypeError):
                         source = camera_url
                     
-                    if isinstance(source, str) and source.startswith('http'):
+                    if isinstance(source, str) and (source.startswith('http') or source.startswith('rtsp') or source.startswith('rtmp')):
                         cap = IPCameraCapture(source)
                     else:
                         cap = cv2.VideoCapture(source)
@@ -743,7 +743,7 @@ def connect_camera():
         except (ValueError, TypeError):
             source = camera_url
             
-        if isinstance(source, str) and source.startswith('http'):
+        if isinstance(source, str) and (source.startswith('http') or source.startswith('rtsp') or source.startswith('rtmp')):
             cap = IPCameraCapture(source)
         else:
             cap = cv2.VideoCapture(source)
