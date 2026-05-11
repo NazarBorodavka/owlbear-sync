@@ -481,7 +481,7 @@ def get_video_stream():
                     codebook = load_marker_codebook(codebook_filename, tag_type)
                     # Increased stg2_iter_num for higher decoding precision on dense tags
                     runetag_engine = DetectionEngine(model_detector, model_decoder, device, tag_type, grid_size_cand_list, 
-                                stg2_iter_num=3, min_center_score=0.1, min_corner_score=0.1, 
+                                stg2_iter_num=5, min_center_score=0.1, min_corner_score=0.1, 
                                 batch_size_stg2=8, hamming_dist=runetag_hamming_dist, 
                                 cameraMatrix=[[600, 0, w/2], [0, 600, h/2], [0, 0, 1]], 
                                 distCoeffs=[0]*8, codebook=codebook,
@@ -520,11 +520,7 @@ def get_video_stream():
                             print(f"RuneTag Update: Stage-1 found {len(decoded_tags)} ROI(s), Stage-2 decoded {len(valid_ids)} ID(s).", flush=True)
                             last_runetag_count = len(decoded_tags)
 
-                    if runetag_show_rois:
-                        rois_info = getattr(runetag_engine, 'rois_info', [])
-                        for roi_info in rois_info:
-                            pts = np.array(roi_info['ordered_corners'], np.int32).reshape((-1, 1, 2))
-                            cv2.polylines(overlay_frame, [pts], True, (0, 255, 255), 2) # Yellow for ROIs
+                    # The drawing logic has been moved to the end of the loop to ensure visibility
 
                     for tag in decoded_tags:
                         if tag['is_valid']:
@@ -754,8 +750,17 @@ def get_video_stream():
                 if corner_idx == 4 and i == 3:
                     cv2.line(frame, (int(src_pts[3][0]), int(src_pts[3][1])), (int(src_pts[0][0]), int(src_pts[0][1])), (255, 0, 0), 2)
                 
-        with frame_lock:
-            current_frame = frame.copy()
+            if detection_mode == 'runetag' and runetag_show_rois and DEEPTAG_AVAILABLE and runetag_engine is not None:
+                try:
+                    rois_info = getattr(runetag_engine, 'rois_info', [])
+                    for roi_info in rois_info:
+                        pts = np.array(roi_info['ordered_corners'], np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(frame, [pts], True, (0, 255, 255), 2)
+                except:
+                    pass
+
+            with frame_lock:
+                current_frame = frame.copy()
             
         # Throttle loop to maintain ~5 FPS target
         elapsed = time.time() - loop_start
