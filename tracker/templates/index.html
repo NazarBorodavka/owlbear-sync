@@ -395,6 +395,7 @@
                         <button id="btn_mode_aruco" onclick="setDetectionMode('aruco')" style="background: var(--accent); flex: 1;">ArUco</button>
                         <button id="btn_mode_stag" onclick="setDetectionMode('stag')" style="background: rgba(255,255,255,0.05); flex: 1;">STag</button>
                         <button id="btn_mode_runetag" onclick="setDetectionMode('runetag')" style="background: rgba(255,255,255,0.05); flex: 1;">RuneTag</button>
+                        <button id="btn_mode_apriltag" onclick="setDetectionMode('apriltag')" style="background: rgba(255,255,255,0.05); flex: 1;">AprilTag</button>
                     </div>
                     
                     <div id="settings_aruco" style="margin-top: 20px;">
@@ -431,6 +432,11 @@
                             <input type="range" id="runetag_hamming_dist" min="0" max="8" step="1" value="4" oninput="updateVal('runetag_hamming_dist')">
                             <p class="help-text">Error tolerance for marker ID decoding.</p>
                         </div>
+                    </div>
+
+                    <div id="settings_apriltag" style="margin-top: 20px; display: none;">
+                        <h4>AprilTag Settings</h4>
+                        <p class="help-text">AprilTag is highly robust and recommended if RuneTag is not working well. Use 'tag36h11' family.</p>
                     </div>
                 </div>
 
@@ -679,11 +685,13 @@
             document.getElementById('btn_mode_aruco').style.background = (mode === 'aruco' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
             document.getElementById('btn_mode_stag').style.background = (mode === 'stag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
             document.getElementById('btn_mode_runetag').style.background = (mode === 'runetag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
+            document.getElementById('btn_mode_apriltag').style.background = (mode === 'apriltag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
             
             // Show/Hide specific settings
             document.getElementById('settings_aruco').style.display = (mode === 'aruco' ? 'block' : 'none');
             document.getElementById('settings_stag').style.display = (mode === 'stag' ? 'block' : 'none');
             document.getElementById('settings_runetag').style.display = (mode === 'runetag' ? 'block' : 'none');
+            document.getElementById('settings_apriltag').style.display = (mode === 'apriltag' ? 'block' : 'none');
             
             updateSettings();
         }

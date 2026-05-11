@@ -16,6 +16,17 @@ try:
 except ImportError:
     STAG_AVAILABLE = False
 
+# AprilTag Support
+try:
+    import apriltag
+    APRILTAG_AVAILABLE = True
+except ImportError:
+    try:
+        from pupil_apriltags import Detector as AprilTagDetector
+        APRILTAG_AVAILABLE = True
+    except ImportError:
+        APRILTAG_AVAILABLE = False
+
 # DeepTag / RuneTag Support
 import sys
 DEEPTAG_PATH = os.path.join(os.path.dirname(__file__), 'deeptag')
@@ -199,10 +210,12 @@ detection_mode = 'aruco' # 'aruco', 'stag', or 'runetag'
 stag_error_correction = 3
 stag_roi_padding = 20
 runetag_hamming_dist = 4
+apriltag_family = 'tag36h11'
 manual_blank = False
 
 # Global Detection Engines
 runetag_engine = None
+apriltag_detector = None
 
 load_config_from_disk()
 
@@ -377,40 +390,8 @@ def get_video_stream():
                     if ids is None or len(ids) == 0:
                         (corners, ids, rejected) = stag.detectMarkers(roi_enhanced, 11, stag_error_correction)
                 elif detection_mode == 'runetag' and DEEPTAG_AVAILABLE:
-                    global runetag_engine
-                    if runetag_engine is None:
-                        # Initialize on first use
-                        try:
-                            tag_family = 'runetag'
-                            model_detector, model_decoder, device, tag_type, grid_size_cand_list = load_deeptag_models(tag_family, 'cpu')
-                            codebook_filename = os.path.join(DEEPTAG_PATH, 'codebook', tag_family + '_codebook.txt')
-                            codebook = load_marker_codebook(codebook_filename, tag_type)
-                            
-                            runetag_engine = DetectionEngine(model_detector, model_decoder, device, tag_type, grid_size_cand_list, 
-                                        stg2_iter_num=2, min_center_score=0.2, min_corner_score=0.2, 
-                                        batch_size_stg2=4, hamming_dist=runetag_hamming_dist, 
-                                        cameraMatrix=[[600, 0, w/2], [0, 600, h/2], [0, 0, 1]], 
-                                        distCoeffs=[0]*8, codebook=codebook,
-                                        tag_real_size_in_meter_dict={-1: 0.1})
-                        except Exception as e:
-                            print(f"Failed to initialize RuneTag engine: {e}")
-                            DEEPTAG_AVAILABLE = False
-                    
-                    if runetag_engine:
-                        # DeepTag prefers BGR
-                        # We process the ROI
-                        decoded_tags = runetag_engine.process(frame[y1:y2, x1:x2])
-                        ids = []
-                        corners = []
-                        for tag in decoded_tags:
-                            if tag['is_valid']:
-                                ids.append([tag['tag_id']])
-                                # Keypoints in images are relative to ROI if we passed ROI? 
-                                # Actually DetectionEngine.process uses the image passed.
-                                corners.append(tag['keypoints_in_images'])
-                        ids = np.array(ids) if ids else None
-                    else:
-                        ids = None
+                    # RuneTag is now handled globally below for better reliability
+                    pass
                 elif detection_mode == 'stag' and not STAG_AVAILABLE:
                     corners, ids, _ = detector.detectMarkers(roi_enhanced)
                 else:
@@ -435,6 +416,66 @@ def get_video_stream():
                         break 
             except Exception as e:
                 continue
+
+        # --- Global Detection Passes (for modes that don't rely on Hough Circles) ---
+        if detection_mode == 'runetag' and DEEPTAG_AVAILABLE:
+            global runetag_engine
+            if runetag_engine is None:
+                try:
+                    tag_family = 'runetag'
+                    model_detector, model_decoder, device, tag_type, grid_size_cand_list = load_deeptag_models(tag_family, 'cpu')
+                    codebook_filename = os.path.join(DEEPTAG_PATH, 'codebook', tag_family + '_codebook.txt')
+                    codebook = load_marker_codebook(codebook_filename, tag_type)
+                    runetag_engine = DetectionEngine(model_detector, model_decoder, device, tag_type, grid_size_cand_list, 
+                                stg2_iter_num=2, min_center_score=0.1, min_corner_score=0.1, 
+                                batch_size_stg2=4, hamming_dist=runetag_hamming_dist, 
+                                cameraMatrix=[[600, 0, w/2], [0, 600, h/2], [0, 0, 1]], 
+                                distCoeffs=[0]*8, codebook=codebook,
+                                tag_real_size_in_meter_dict={-1: 0.1})
+                except Exception as e:
+                    print(f"RuneTag Init Error: {e}")
+                    DEEPTAG_AVAILABLE = False
+            
+            if runetag_engine:
+                # Run on full frame but with a scale that detects small tags
+                # detect_scale=1.0 is slower but most reliable
+                decoded_tags = runetag_engine.process(frame, detect_scale=0.8)
+                for tag in decoded_tags:
+                    if tag['is_valid']:
+                        mid = int(tag['tag_id'])
+                        kpts = tag['keypoints_in_images']
+                        # Calculate center from keypoints
+                        center_x = int(np.mean(kpts[:, 0]))
+                        center_y = int(np.mean(kpts[:, 1]))
+                        markers[mid] = (center_x, center_y)
+                        if show_overlay:
+                            cv2.polylines(frame, [np.int32(kpts)], True, (255, 0, 255), 2)
+                            cv2.putText(frame, f"ID: {mid}", (center_x, center_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+
+        elif detection_mode == 'apriltag' and APRILTAG_AVAILABLE:
+            global apriltag_detector
+            if apriltag_detector is None:
+                try:
+                    # Try pupil_apriltags first as it's faster
+                    apriltag_detector = AprilTagDetector(families=apriltag_family)
+                except:
+                    try:
+                        apriltag_detector = apriltag.Detector(apriltag.DetectorOptions(families=apriltag_family))
+                    except:
+                        APRILTAG_AVAILABLE = False
+            
+            if apriltag_detector:
+                results = []
+                if hasattr(apriltag_detector, 'detect'): # pupil_apriltags
+                    results = apriltag_detector.detect(gray)
+                else: # basic apriltag
+                    results = apriltag_detector.detect(gray)
+                
+                for r in results:
+                    markers[r.tag_id] = (int(r.center[0]), int(r.center[1]))
+                    if show_overlay:
+                        cv2.polylines(frame, [np.int32(r.corners)], True, (0, 255, 0), 2)
+                        cv2.putText(frame, f"ID: {r.tag_id}", (int(r.center[0]), int(r.center[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
         # --- Temporal & ArUco Fusion ---
         detected_tokens = []

@@ -9,3 +9,4 @@ stag-python
 torch
 torchvision
 scipy
+pupil-apriltag
