@@ -123,6 +123,7 @@ runetag_min_score = 0.3
 runetag_detect_scale = 1.0
 runetag_invert = False
 runetag_precision = False
+runetag_show_rois = False
 last_runetag_count = -1
 
 def load_config_from_disk():
@@ -130,7 +131,7 @@ def load_config_from_disk():
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
     global detection_mode, stag_error_correction, stag_roi_padding, runetag_hamming_dist, apriltag_family
-    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision
+    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision, runetag_show_rois
     
     if os.path.exists(CONFIG_FILE):
         try:
@@ -144,6 +145,7 @@ def load_config_from_disk():
                 runetag_detect_scale = float(c.get('runetag_detect_scale', 0.5))
                 runetag_invert = c.get('runetag_invert', False)
                 runetag_precision = c.get('runetag_precision', False)
+                runetag_show_rois = c.get('runetag_show_rois', False)
                 apriltag_family = c.get('apriltag_family', 'tag36h11')
                 last_runetag_hamming_dist = runetag_hamming_dist
                 apriltag_decision_margin = float(c.get('apriltag_decision_margin', 30.0))
@@ -170,7 +172,7 @@ def load_config_from_disk():
             print(f"Error loading config: {e}")
 
 def save_config_to_disk():
-    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision
+    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision, runetag_show_rois
     c = {
         'distortion_k1': distortion_k1, 'zoom_level': zoom_level, 'offset_x': offset_x, 'offset_y': offset_y,
         'rotation': rotation, 'brightness': brightness, 'contrast': contrast, 'exposure': exposure,
@@ -186,6 +188,7 @@ def save_config_to_disk():
         'runetag_detect_scale': runetag_detect_scale,
         'runetag_invert': runetag_invert,
         'runetag_precision': runetag_precision,
+        'runetag_show_rois': runetag_show_rois,
         'apriltag_family': apriltag_family,
         'apriltag_decision_margin': apriltag_decision_margin,
         'token_aliases': token_aliases,
@@ -517,6 +520,12 @@ def get_video_stream():
                             print(f"RuneTag Update: Stage-1 found {len(decoded_tags)} ROI(s), Stage-2 decoded {len(valid_ids)} ID(s).", flush=True)
                             last_runetag_count = len(decoded_tags)
 
+                    if runetag_show_rois:
+                        rois_info = getattr(runetag_engine, 'rois_info', [])
+                        for roi_info in rois_info:
+                            pts = np.array(roi_info['ordered_corners'], np.int32).reshape((-1, 1, 2))
+                            cv2.polylines(overlay_frame, [pts], True, (0, 255, 255), 2) # Yellow for ROIs
+
                     for tag in decoded_tags:
                         if tag['is_valid']:
                             print(f"RuneTag ROI Found: ID={tag['tag_id']}, Score={tag.get('center_score', 'N/A')}", flush=True)
@@ -844,7 +853,7 @@ def update_settings():
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
     global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist
     global DEEPTAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin
-    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision
+    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision, runetag_show_rois
     global apriltag_detector
     
     data = request.json
@@ -862,6 +871,8 @@ def update_settings():
         runetag_invert = bool(data['runetag_invert'])
     if 'runetag_precision' in data:
         runetag_precision = bool(data['runetag_precision'])
+    if 'runetag_show_rois' in data:
+        runetag_show_rois = bool(data['runetag_show_rois'])
     if 'apriltag_family' in data and data['apriltag_family'] != apriltag_family:
         apriltag_family = data['apriltag_family']
         apriltag_detector = None # Reset so it re-initializes with new family

@@ -441,9 +441,10 @@
                             <label><span>Hamming Dist</span> <input type="number" id="val_runetag_hamming_dist" value="4" step="1" class="val-input" onchange="syncSlider(this, 'runetag_hamming_dist'); updateSettings()"></label>
                             <input type="range" id="runetag_hamming_dist" min="0" max="8" step="1" value="4" oninput="updateVal('runetag_hamming_dist')">
                         </div>
-                        <div class="control-group" style="display: flex; gap: 10px;">
-                            <label style="flex: 1;"><input type="checkbox" id="runetag_invert" onchange="updateSettings()"> Invert Marker</label>
-                            <label style="flex: 1;"><input type="checkbox" id="runetag_precision" onchange="updateSettings()"> Precision Mode</label>
+                        <div class="control-group" style="display: flex; flex-wrap: wrap; gap: 10px;">
+                            <label style="flex: 1; min-width: 120px;"><input type="checkbox" id="runetag_invert" onchange="updateSettings()"> Invert Marker</label>
+                            <label style="flex: 1; min-width: 120px;"><input type="checkbox" id="runetag_precision" onchange="updateSettings()"> Precision Mode</label>
+                            <label style="flex: 1; min-width: 120px;"><input type="checkbox" id="runetag_show_rois" onchange="updateSettings()"> Show ROI Boxes</label>
                         </div>
                         <p class="help-text">Invert for phone screens. Precision for small markers (slower).</p>
                     </div>
