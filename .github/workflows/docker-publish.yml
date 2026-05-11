@@ -23,13 +23,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Lowercase repo owner
-        run: echo "OWNER_LC=${OWNER,,}" >>${GITHUB_ENV}
+        run: |
+          echo "OWNER_LC=${OWNER,,}" >>${GITHUB_ENV}
+          echo "BRANCH_LC=${BRANCH,,}" >>${GITHUB_ENV}
         env:
           OWNER: "${{ github.repository_owner }}"
+          BRANCH: "${{ github.ref_name }}"
 
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: ./tracker
           push: true
-          tags: ghcr.io/${{ env.OWNER_LC }}/owlbear-tracker:latest
+          tags: ghcr.io/${{ env.OWNER_LC }}/owlbear-tracker:${{ env.BRANCH_LC }}
