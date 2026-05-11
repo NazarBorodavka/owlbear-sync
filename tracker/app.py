@@ -143,7 +143,10 @@ def load_config_from_disk():
                 stag_error_correction = int(c.get('stag_error_correction', 3))
                 stag_roi_padding = int(c.get('stag_roi_padding', 20))
                 runetag_hamming_dist = int(c.get('runetag_hamming_dist', 4))
+                runetag_min_score = float(c.get('runetag_min_score', 0.3))
+                runetag_detect_scale = float(c.get('runetag_detect_scale', 0.5))
                 apriltag_family = c.get('apriltag_family', 'tag36h11')
+                apriltag_decision_margin = float(c.get('apriltag_decision_margin', 30.0))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -178,7 +181,10 @@ def save_config_to_disk():
         'stag_error_correction': stag_error_correction,
         'stag_roi_padding': stag_roi_padding,
         'runetag_hamming_dist': runetag_hamming_dist,
+        'runetag_min_score': runetag_min_score,
+        'runetag_detect_scale': runetag_detect_scale,
         'apriltag_family': apriltag_family,
+        'apriltag_decision_margin': apriltag_decision_margin,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin")
     }
@@ -467,10 +473,9 @@ def get_video_stream():
             if runetag_engine:
                 try:
                     # Run on full frame but with a scale that detects markers without killing CPU
-                    # 0.5x scale is usually enough for 1080p frames
-                    decoded_tags = runetag_engine.process(frame, detect_scale=0.5)
+                    decoded_tags = runetag_engine.process(frame, detect_scale=runetag_detect_scale)
                     for tag in decoded_tags:
-                        if tag['is_valid']:
+                        if tag['is_valid'] and tag.get('center_score', 0) > runetag_min_score:
                             mid = int(tag['tag_id'])
                             kpts = tag['keypoints_in_images']
                             # Calculate center from keypoints
@@ -504,6 +509,10 @@ def get_video_stream():
                         results = apriltag_detector.detect(gray)
                     
                     for r in results:
+                        # Filter by decision margin to reduce false positives
+                        if hasattr(r, 'decision_margin') and r.decision_margin < apriltag_decision_margin:
+                            continue
+                        
                         markers[r.tag_id] = (int(r.center[0]), int(r.center[1]))
                         if show_overlay:
                             cv2.polylines(frame, [np.int32(r.corners)], True, (0, 255, 0), 2)
@@ -788,7 +797,8 @@ def update_settings():
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
     global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist
-    global DEEPTAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, apriltag_family
+    global DEEPTAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin
+    global runetag_min_score, runetag_detect_scale
     global apriltag_detector
     
     data = request.json
@@ -796,6 +806,12 @@ def update_settings():
         camera_url = data['camera_url']
     if 'detection_mode' in data:
         detection_mode = data['detection_mode']
+    if 'apriltag_decision_margin' in data:
+        apriltag_decision_margin = float(data['apriltag_decision_margin'])
+    if 'runetag_min_score' in data:
+        runetag_min_score = float(data['runetag_min_score'])
+    if 'runetag_detect_scale' in data:
+        runetag_detect_scale = float(data['runetag_detect_scale'])
     if 'apriltag_family' in data and data['apriltag_family'] != apriltag_family:
         apriltag_family = data['apriltag_family']
         apriltag_detector = None # Reset so it re-initializes with new family

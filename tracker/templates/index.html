@@ -428,14 +428,32 @@
                     <div id="settings_runetag" style="margin-top: 20px; display: none;">
                         <h4>RuneTag Settings</h4>
                         <div class="control-group">
-                            <label><span>Max Hamming Distance</span> <input type="number" id="val_runetag_hamming_dist" value="4" step="1" class="val-input" onchange="syncSlider(this, 'runetag_hamming_dist'); updateSettings()"></label>
-                            <input type="range" id="runetag_hamming_dist" min="0" max="8" step="1" value="4" oninput="updateVal('runetag_hamming_dist')">
-                            <p class="help-text">Error tolerance for marker ID decoding.</p>
+                            <label><span>Min Score: <strong id="val_runetag_min_score">0.3</strong></span>
+                                <input type="range" id="runetag_min_score" min="0.05" max="0.95" step="0.05" value="0.3" oninput="syncSlider(this, 'val_runetag_min_score'); updateSettings()">
+                            </label>
+                            <p class="help-text">Higher means less noise but harder to detect.</p>
+                        </div>
+                        <div class="control-group">
+                            <label><span>Detection Scale: <strong id="val_runetag_detect_scale">0.5</strong></span>
+                                <input type="range" id="runetag_detect_scale" min="0.1" max="1.0" step="0.1" value="0.5" oninput="syncSlider(this, 'val_runetag_detect_scale'); updateSettings()">
+                            </label>
+                            <p class="help-text">Higher scale improves detection at distance but uses more CPU.</p>
+                        </div>
+                        <div class="control-group">
+                            <label><span>Hamming Dist: <strong id="val_runetag_hamming_dist">4</strong></span>
+                                <input type="range" id="runetag_hamming_dist" min="0" max="8" step="1" value="4" oninput="syncSlider(this, 'val_runetag_hamming_dist'); updateSettings()">
+                            </label>
                         </div>
                     </div>
 
                     <div id="settings_apriltag" style="margin-top: 20px; display: none;">
                         <h4>AprilTag Settings</h4>
+                        <div class="control-group">
+                            <label><span>Decision Margin: <strong id="val_apriltag_decision_margin">30</strong></span>
+                                <input type="range" id="apriltag_decision_margin" min="0" max="150" step="5" value="30" oninput="syncSlider(this, 'val_apriltag_decision_margin'); updateSettings()">
+                            </label>
+                            <p class="help-text">Increase this to eliminate false positives (especially for tag16h5).</p>
+                        </div>
                         <div class="control-group">
                             <label><span>Tag Family</span>
                                 <select id="apriltag_family" class="val-input" onchange="updateSettings()" style="width: 100%; margin-top: 5px;">
@@ -662,7 +680,10 @@
                 stag_error_correction: document.getElementById('stag_error_correction').value,
                 stag_roi_padding: document.getElementById('stag_roi_padding').value,
                 runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value,
-                apriltag_family: document.getElementById('apriltag_family').value
+                runetag_min_score: document.getElementById('runetag_min_score').value,
+                runetag_detect_scale: document.getElementById('runetag_detect_scale').value,
+                apriltag_family: document.getElementById('apriltag_family').value,
+                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value
             };
             
             // Update UI numeric inputs
@@ -752,7 +773,10 @@
                 stag_error_correction: document.getElementById('stag_error_correction').value,
                 stag_roi_padding: document.getElementById('stag_roi_padding').value,
                 runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value,
-                apriltag_family: document.getElementById('apriltag_family').value
+                runetag_min_score: document.getElementById('runetag_min_score').value,
+                runetag_detect_scale: document.getElementById('runetag_detect_scale').value,
+                apriltag_family: document.getElementById('apriltag_family').value,
+                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -779,6 +803,18 @@
                     if (config.runetag_hamming_dist) {
                         document.getElementById('runetag_hamming_dist').value = config.runetag_hamming_dist;
                         document.getElementById('val_runetag_hamming_dist').innerText = config.runetag_hamming_dist;
+                    }
+                    if (config.runetag_min_score) {
+                        document.getElementById('runetag_min_score').value = config.runetag_min_score;
+                        document.getElementById('val_runetag_min_score').innerText = config.runetag_min_score;
+                    }
+                    if (config.runetag_detect_scale) {
+                        document.getElementById('runetag_detect_scale').value = config.runetag_detect_scale;
+                        document.getElementById('val_runetag_detect_scale').innerText = config.runetag_detect_scale;
+                    }
+                    if (config.apriltag_decision_margin) {
+                        document.getElementById('apriltag_decision_margin').value = config.apriltag_decision_margin;
+                        document.getElementById('val_apriltag_decision_margin').innerText = config.apriltag_decision_margin;
                     }
                     if (config.apriltag_family) {
                         document.getElementById('apriltag_family').value = config.apriltag_family;
