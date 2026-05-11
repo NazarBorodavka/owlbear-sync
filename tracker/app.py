@@ -120,7 +120,7 @@ is_running = False
 # Global Configuration with Defaults
 CONFIG_FILE = "config.json"
 runetag_min_score = 0.3
-runetag_detect_scale = 0.5
+runetag_detect_scale = 1.0
 runetag_invert = False
 runetag_precision = False
 
@@ -498,7 +498,13 @@ def get_video_stream():
                         extra_tags = runetag_engine.process(rt_frame, detect_scale=min(1.0, runetag_detect_scale * 1.5))
                         decoded_tags.extend(extra_tags)
 
+                    if len(decoded_tags) > 0:
+                        print(f"RuneTag Debug: Found {len(decoded_tags)} tags. Invert={runetag_invert}, Precision={runetag_precision}", flush=True)
+
                     for tag in decoded_tags:
+                        if tag['is_valid']:
+                            print(f"RuneTag ROI Found: ID={tag['tag_id']}, Score={tag.get('center_score', 'N/A')}", flush=True)
+                        
                         if tag['is_valid'] and tag.get('center_score', 0) > runetag_min_score:
                             mid = int(tag['tag_id'])
                             kpts = tag['keypoints_in_images']
@@ -822,7 +828,7 @@ def update_settings():
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
     global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist
     global DEEPTAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin
-    global runetag_min_score, runetag_detect_scale
+    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision
     global apriltag_detector
     
     data = request.json
