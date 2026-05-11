@@ -395,10 +395,9 @@ def get_video_stream():
             
             try:
                 # Use original ROI for first pass, enhanced for second
-                if detection_mode == 'stag' and STAG_AVAILABLE:
-                    (corners, ids, rejected) = stag.detectMarkers(roi, 11, stag_error_correction)
-                    if ids is None or len(ids) == 0:
-                        (corners, ids, rejected) = stag.detectMarkers(roi_enhanced, 11, stag_error_correction)
+                elif detection_mode == 'stag' and STAG_AVAILABLE:
+                    # STag is now handled globally below for better reliability
+                    pass
                 elif detection_mode == 'runetag' and DEEPTAG_AVAILABLE:
                     # RuneTag is now handled globally below for better reliability
                     pass
@@ -428,7 +427,25 @@ def get_video_stream():
                 continue
 
         # --- Global Detection Passes (for modes that don't rely on Hough Circles) ---
-        if detection_mode == 'runetag' and DEEPTAG_AVAILABLE:
+        if detection_mode == 'stag' and STAG_AVAILABLE:
+            try:
+                # STag is natively circular and very fast, so we can run it on the whole frame
+                (corners, ids, rejected) = stag.detectMarkers(gray, 11, stag_error_correction)
+                if ids is not None and len(ids) > 0:
+                    for i, m_id in enumerate(ids.flatten()):
+                        mid = int(m_id)
+                        c = corners[i]
+                        if c.ndim == 3: c = c[0]
+                        center_x = int(np.mean(c[:, 0]))
+                        center_y = int(np.mean(c[:, 1]))
+                        markers[mid] = (center_x, center_y)
+                        if show_overlay:
+                            cv2.polylines(frame, [np.int32(c)], True, (0, 255, 255), 2)
+                            cv2.putText(frame, f"ID: {mid}", (center_x, center_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            except Exception as e:
+                print(f"STag Detection Error: {e}")
+
+        elif detection_mode == 'runetag' and DEEPTAG_AVAILABLE:
             global runetag_engine
             if runetag_engine is None:
                 try:
