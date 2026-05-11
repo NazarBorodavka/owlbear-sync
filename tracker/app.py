@@ -249,8 +249,8 @@ def get_video_stream():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, detection_mode
-    global DEEPTAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, runetag_invert, runetag_precision
-    global src_pts, corner_idx, homography_matrix, auto_blank, stag_error_correction, stag_roi_padding, manual_blank
+    global RUNETAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, runetag_invert, runetag_precision, runetag_engine
+    global src_pts, corner_idx, homography_matrix, auto_blank, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist, runetag_show_rois
     fail_count = 0
     
     # 20 FPS target
