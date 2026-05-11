@@ -285,8 +285,10 @@ def get_video_stream():
             
         if not success or frame is None:
             fail_count += 1
-            if fail_count > 30: # Wait up to 3 seconds for stream to start
-                print(f"Stream disconnected or slow (url: {camera_url}), attempting to reconnect...", flush=True)
+            if fail_count % 30 == 0:
+                print(f"Waiting for stream... (attempt {fail_count}/150)", flush=True)
+            if fail_count > 150: # Wait up to 15 seconds for stream to start
+                print(f"Stream connection timed out (url: {camera_url}), attempting full reconnect...", flush=True)
                 with camera_lock:
                     if cap is not None:
                         cap.release()
