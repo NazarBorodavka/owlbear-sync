@@ -20,6 +20,9 @@ RUN pip install --no-cache-dir -r requirements.txt --extra-index-url https://dow
 
 COPY . .
 
+# DeepTag expects models in a 'models/' directory relative to the CWD
+RUN ln -s deeptag/models models
+
 # Expose the Flask web server port
 EXPOSE 5000
 

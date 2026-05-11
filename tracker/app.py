@@ -125,6 +125,7 @@ def load_config_from_disk():
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
     global detection_mode, stag_error_correction, stag_roi_padding, runetag_hamming_dist, apriltag_family
+    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision
     
     if os.path.exists(CONFIG_FILE):
         try:
@@ -163,6 +164,7 @@ def load_config_from_disk():
             print(f"Error loading config: {e}")
 
 def save_config_to_disk():
+    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision
     c = {
         'distortion_k1': distortion_k1, 'zoom_level': zoom_level, 'offset_x': offset_x, 'offset_y': offset_y,
         'rotation': rotation, 'brightness': brightness, 'contrast': contrast, 'exposure': exposure,
