@@ -493,9 +493,9 @@ def get_video_stream():
                     # Adaptive preparation for RuneTag
                     rt_frame = frame.copy()
                     
-                    # Apply CLAHE to improve contrast for dot detection (vital for phone screens)
+                    # Apply stronger CLAHE to improve contrast for dot detection
                     rt_gray = cv2.cvtColor(rt_frame, cv2.COLOR_BGR2GRAY)
-                    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+                    clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(4,4))
                     rt_gray = clahe.apply(rt_gray)
                     rt_frame = cv2.cvtColor(rt_gray, cv2.COLOR_GRAY2BGR)
                     

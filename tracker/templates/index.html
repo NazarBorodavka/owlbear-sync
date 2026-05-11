@@ -428,21 +428,18 @@
                     <div id="settings_runetag" style="margin-top: 20px; display: none;">
                         <h4>RuneTag Settings</h4>
                         <div class="control-group">
-                            <label><span>Min Score: <strong id="val_runetag_min_score">0.3</strong></span>
-                                <input type="range" id="runetag_min_score" min="0.05" max="0.95" step="0.05" value="0.3" oninput="syncSlider(this, 'val_runetag_min_score'); updateSettings()">
-                            </label>
+                            <label><span>Min Score</span> <input type="number" id="val_runetag_min_score" value="0.3" step="0.05" class="val-input" onchange="syncSlider(this, 'runetag_min_score'); updateSettings()"></label>
+                            <input type="range" id="runetag_min_score" min="0.05" max="0.95" step="0.05" value="0.3" oninput="updateVal('runetag_min_score')">
                             <p class="help-text">Higher means less noise but harder to detect.</p>
                         </div>
                         <div class="control-group">
-                            <label><span>Detection Scale: <strong id="val_runetag_detect_scale">0.5</strong></span>
-                                <input type="range" id="runetag_detect_scale" min="0.1" max="1.0" step="0.1" value="0.5" oninput="syncSlider(this, 'val_runetag_detect_scale'); updateSettings()">
-                            </label>
+                            <label><span>Detection Scale</span> <input type="number" id="val_runetag_detect_scale" value="0.5" step="0.1" class="val-input" onchange="syncSlider(this, 'runetag_detect_scale'); updateSettings()"></label>
+                            <input type="range" id="runetag_detect_scale" min="0.1" max="1.0" step="0.1" value="0.5" oninput="updateVal('runetag_detect_scale')">
                             <p class="help-text">Higher scale improves detection at distance but uses more CPU.</p>
                         </div>
                         <div class="control-group">
-                            <label><span>Hamming Dist: <strong id="val_runetag_hamming_dist">4</strong></span>
-                                <input type="range" id="runetag_hamming_dist" min="0" max="8" step="1" value="4" oninput="syncSlider(this, 'val_runetag_hamming_dist'); updateSettings()">
-                            </label>
+                            <label><span>Hamming Dist</span> <input type="number" id="val_runetag_hamming_dist" value="4" step="1" class="val-input" onchange="syncSlider(this, 'runetag_hamming_dist'); updateSettings()"></label>
+                            <input type="range" id="runetag_hamming_dist" min="0" max="8" step="1" value="4" oninput="updateVal('runetag_hamming_dist')">
                         </div>
                         <div class="control-group" style="display: flex; gap: 10px;">
                             <label style="flex: 1;"><input type="checkbox" id="runetag_invert" onchange="updateSettings()"> Invert Marker</label>
