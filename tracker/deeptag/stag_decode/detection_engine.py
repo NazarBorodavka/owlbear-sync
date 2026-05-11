@@ -95,7 +95,7 @@ class DetectionEngine:
 
         # stage-1
         self.image = image
-        print('>>>>>>>Stage-1<<<<<<<')
+        # Silenced: print('>>>>>>>Stage-1<<<<<<<')
         rois_info = stag_detector.detect_rois(image, detect_scales[0] )
         self.bbox_corner_info = stag_detector.image_res
 

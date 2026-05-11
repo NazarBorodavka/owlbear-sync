@@ -42,7 +42,7 @@ class StagDecoder:
 
             
 
-            print('>iter #%d'% iter_i) 
+            # Silenced: print('>iter #%d'% iter_i) 
             crops, H_list, valid_ids = rectify_crops(image, rois_curr, self.roi_in_crop, self.image_rect_size)
 
             # # visualize crops

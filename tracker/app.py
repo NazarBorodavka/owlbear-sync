@@ -123,6 +123,7 @@ runetag_min_score = 0.3
 runetag_detect_scale = 1.0
 runetag_invert = False
 runetag_precision = False
+last_runetag_count = -1
 
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
@@ -507,7 +508,10 @@ def get_video_stream():
                         decoded_tags.extend(extra_tags)
 
                     if len(decoded_tags) > 0:
-                        print(f"RuneTag Debug: Found {len(decoded_tags)} tags. Invert={runetag_invert}, Precision={runetag_precision}", flush=True)
+                        global last_runetag_count
+                        if len(decoded_tags) != last_runetag_count:
+                            print(f"RuneTag Debug: Found {len(decoded_tags)} tags. Invert={runetag_invert}, Precision={runetag_precision}", flush=True)
+                            last_runetag_count = len(decoded_tags)
 
                     for tag in decoded_tags:
                         if tag['is_valid']:
