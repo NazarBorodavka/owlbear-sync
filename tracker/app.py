@@ -136,6 +136,8 @@ def load_config_from_disk():
                 runetag_hamming_dist = int(c.get('runetag_hamming_dist', 4))
                 runetag_min_score = float(c.get('runetag_min_score', 0.3))
                 runetag_detect_scale = float(c.get('runetag_detect_scale', 0.5))
+                runetag_invert = c.get('runetag_invert', False)
+                runetag_precision = c.get('runetag_precision', False)
                 apriltag_family = c.get('apriltag_family', 'tag36h11')
                 apriltag_decision_margin = float(c.get('apriltag_decision_margin', 30.0))
                 if 'password' in c:
@@ -174,6 +176,8 @@ def save_config_to_disk():
         'runetag_hamming_dist': runetag_hamming_dist,
         'runetag_min_score': runetag_min_score,
         'runetag_detect_scale': runetag_detect_scale,
+        'runetag_invert': runetag_invert,
+        'runetag_precision': runetag_precision,
         'apriltag_family': apriltag_family,
         'apriltag_decision_margin': apriltag_decision_margin,
         'token_aliases': token_aliases,
@@ -227,6 +231,10 @@ apriltag_detector = None
 
 load_config_from_disk()
 
+# Performance optimization: Cache for software exposure table
+exposure_table = None
+last_exposure = -1.0
+
 # Calibration corners
 src_pts = np.zeros((4, 2), dtype=np.float32)
 corner_idx = 0
@@ -245,7 +253,7 @@ def get_video_stream():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, detection_mode
-    global DEEPTAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE
+    global DEEPTAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, runetag_invert, runetag_precision
     global src_pts, corner_idx, homography_matrix, auto_blank, stag_error_correction, stag_roi_padding, manual_blank
     fail_count = 0
     
@@ -324,9 +332,12 @@ def get_video_stream():
             
         # Apply software Exposure (Gamma correction)
         if exposure != 1.0 and exposure > 0:
-            invGamma = 1.0 / exposure
-            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-            frame = cv2.LUT(frame, table)
+            global exposure_table, last_exposure
+            if exposure != last_exposure or exposure_table is None:
+                invGamma = 1.0 / exposure
+                exposure_table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+                last_exposure = exposure
+            frame = cv2.LUT(frame, exposure_table)
 
         # Process frame
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -339,14 +350,17 @@ def get_video_stream():
             gray = cv2.bitwise_and(gray, mask)
         
         # --- Optimized Circle Detection (Downsampled) ---
-        # Resize to 50% for circle search - much faster and reduces noise
-        small_gray = cv2.resize(gray, (w // 2, h // 2))
-        blurred = cv2.GaussianBlur(small_gray, (5, 5), 1.5)
-        
-        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=hough_dp, minDist=hough_min_dist // 2,
-                                   param1=hough_param1, param2=hough_param2, 
-                                   minRadius=hough_min_radius // 2, maxRadius=hough_max_radius // 2)
-                                   
+        # Skip HoughCircles for global detection modes to save significant CPU
+        circles = None
+        if detection_mode not in ['runetag', 'apriltag', 'stag']:
+            # Resize to 50% for circle search - much faster and reduces noise
+            small_gray = cv2.resize(gray, (w // 2, h // 2))
+            blurred = cv2.GaussianBlur(small_gray, (5, 5), 1.5)
+            
+            circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=hough_dp, minDist=hough_min_dist // 2,
+                                    param1=hough_param1, param2=hough_param2, 
+                                    minRadius=hough_min_radius // 2, maxRadius=hough_max_radius // 2)
+                                    
         detected_circles = []
         if circles is not None:
             circles = circles[0, :]
@@ -452,7 +466,6 @@ def get_video_stream():
                     model_detector, model_decoder, device, tag_type, grid_size_cand_list = load_deeptag_models(tag_family, 'cpu')
                     codebook_filename = os.path.join(DEEPTAG_PATH, 'codebook', tag_family + '_codebook.txt')
                     codebook = load_marker_codebook(codebook_filename, tag_type)
-                    # stg2_iter_num=1 for faster detection
                     runetag_engine = DetectionEngine(model_detector, model_decoder, device, tag_type, grid_size_cand_list, 
                                 stg2_iter_num=1, min_center_score=0.1, min_corner_score=0.1, 
                                 batch_size_stg2=4, hamming_dist=runetag_hamming_dist, 
@@ -466,8 +479,19 @@ def get_video_stream():
             
             if runetag_engine:
                 try:
-                    # Run on full frame but with a scale that detects markers without killing CPU
-                    decoded_tags = runetag_engine.process(frame, detect_scale=runetag_detect_scale)
+                    # Adaptive preparation for RuneTag
+                    rt_frame = frame.copy()
+                    if runetag_invert:
+                        rt_frame = 255 - rt_frame
+                    
+                    # Run detection
+                    decoded_tags = runetag_engine.process(rt_frame, detect_scale=runetag_detect_scale)
+                    
+                    # If precision mode is on and no tags found, try a second scale
+                    if runetag_precision and len([t for t in decoded_tags if t['is_valid']]) == 0:
+                        extra_tags = runetag_engine.process(rt_frame, detect_scale=min(1.0, runetag_detect_scale * 1.5))
+                        decoded_tags.extend(extra_tags)
+
                     for tag in decoded_tags:
                         if tag['is_valid'] and tag.get('center_score', 0) > runetag_min_score:
                             mid = int(tag['tag_id'])
@@ -806,6 +830,10 @@ def update_settings():
         runetag_min_score = float(data['runetag_min_score'])
     if 'runetag_detect_scale' in data:
         runetag_detect_scale = float(data['runetag_detect_scale'])
+    if 'runetag_invert' in data:
+        runetag_invert = bool(data['runetag_invert'])
+    if 'runetag_precision' in data:
+        runetag_precision = bool(data['runetag_precision'])
     if 'apriltag_family' in data and data['apriltag_family'] != apriltag_family:
         apriltag_family = data['apriltag_family']
         apriltag_detector = None # Reset so it re-initializes with new family

@@ -444,6 +444,11 @@
                                 <input type="range" id="runetag_hamming_dist" min="0" max="8" step="1" value="4" oninput="syncSlider(this, 'val_runetag_hamming_dist'); updateSettings()">
                             </label>
                         </div>
+                        <div class="control-group" style="display: flex; gap: 10px;">
+                            <label style="flex: 1;"><input type="checkbox" id="runetag_invert" onchange="updateSettings()"> Invert Marker</label>
+                            <label style="flex: 1;"><input type="checkbox" id="runetag_precision" onchange="updateSettings()"> Precision Mode</label>
+                        </div>
+                        <p class="help-text">Invert for phone screens. Precision for small markers (slower).</p>
                     </div>
 
                     <div id="settings_apriltag" style="margin-top: 20px; display: none;">
@@ -682,6 +687,8 @@
                 runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value,
                 runetag_min_score: document.getElementById('runetag_min_score').value,
                 runetag_detect_scale: document.getElementById('runetag_detect_scale').value,
+                runetag_invert: document.getElementById('runetag_invert').checked,
+                runetag_precision: document.getElementById('runetag_precision').checked,
                 apriltag_family: document.getElementById('apriltag_family').value,
                 apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value
             };
@@ -775,6 +782,8 @@
                 runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value,
                 runetag_min_score: document.getElementById('runetag_min_score').value,
                 runetag_detect_scale: document.getElementById('runetag_detect_scale').value,
+                runetag_invert: document.getElementById('runetag_invert').checked,
+                runetag_precision: document.getElementById('runetag_precision').checked,
                 apriltag_family: document.getElementById('apriltag_family').value,
                 apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value
             };
@@ -811,6 +820,12 @@
                     if (config.runetag_detect_scale) {
                         document.getElementById('runetag_detect_scale').value = config.runetag_detect_scale;
                         document.getElementById('val_runetag_detect_scale').innerText = config.runetag_detect_scale;
+                    }
+                    if (config.runetag_invert !== undefined) {
+                        document.getElementById('runetag_invert').checked = config.runetag_invert;
+                    }
+                    if (config.runetag_precision !== undefined) {
+                        document.getElementById('runetag_precision').checked = config.runetag_precision;
                     }
                     if (config.apriltag_decision_margin) {
                         document.getElementById('apriltag_decision_margin').value = config.apriltag_decision_margin;
