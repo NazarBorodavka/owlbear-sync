@@ -251,6 +251,7 @@ def get_video_stream():
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, detection_mode
     global RUNETAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, runetag_invert, runetag_precision, runetag_engine
     global src_pts, corner_idx, homography_matrix, auto_blank, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist, runetag_show_rois
+    
     fail_count = 0
     
     # 20 FPS target

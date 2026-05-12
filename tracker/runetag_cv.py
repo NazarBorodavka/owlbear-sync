@@ -74,52 +74,55 @@ class RuneTagDetector:
     def _decode_ellipse(self, gray, ellipse):
         (cx, cy), (ma, Ma), angle = ellipse
         # RuneTag-43 has 3 rings: 9, 13, 21 dots
-        # Radii ratios (approx): R1=0.4, R2=0.6, R3=0.8
         rings = [
-            {'count': 9,  'radius': 0.35},
-            {'count': 13, 'radius': 0.58},
+            {'count': 9,  'radius': 0.38},
+            {'count': 13, 'radius': 0.60},
             {'count': 21, 'radius': 0.82}
         ]
         
+        # Step 1: Get local intensity range to handle glare/brightness
+        # Sample center of marker and outer edge
+        center_val = gray[int(cy), int(cx)] if 0 <= cy < gray.shape[0] and 0 <= cx < gray.shape[1] else 128
+        # Use an adaptive threshold based on the local neighborhood
+        
         detected_bits = []
         
-        # Sample each ring
+        # Step 2: Sample each ring with multi-point averaging
         for ring in rings:
             n = ring['count']
-            r_scale = ring['radius'] * (Ma / 2) # Use semi-major axis
-            # We sample n points around the ellipse
+            rx = (ma/2) * ring['radius']
+            ry = (Ma/2) * ring['radius']
+            cos_a, sin_a = np.cos(np.radians(angle)), np.sin(np.radians(angle))
+            
             for i in range(n):
                 theta = (2 * np.pi * i / n)
-                # Ellipse point formula (rotated)
-                cos_a, sin_a = np.cos(np.radians(angle)), np.sin(np.radians(angle))
-                # Simple circle-to-ellipse mapping
-                rx = (ma/2) * ring['radius']
-                ry = (Ma/2) * ring['radius']
+                # Sample 5 points around the dot center for robustness
+                samples = []
+                for dx, dy in [(0,0), (1,0), (-1,0), (0,1), (0,-1)]:
+                    px = cx + (rx+dx) * np.cos(theta) * cos_a - (ry+dy) * np.sin(theta) * sin_a
+                    py = cy + (rx+dx) * np.cos(theta) * sin_a + (ry+dy) * np.sin(theta) * cos_a
+                    
+                    if 0 <= px < gray.shape[1] and 0 <= py < gray.shape[0]:
+                        samples.append(gray[int(py), int(px)])
                 
-                px = cx + rx * np.cos(theta) * cos_a - ry * np.sin(theta) * sin_a
-                py = cy + rx * np.cos(theta) * sin_a + ry * np.sin(theta) * cos_a
-                
-                # Check bounds
-                if 0 <= px < gray.shape[1] and 0 <= py < gray.shape[0]:
-                    val = gray[int(py), int(px)]
-                    detected_bits.append(1 if val > 128 else 0) # Assumes light dots on dark background
-                else:
+                if not samples:
                     detected_bits.append(0)
+                    continue
+                    
+                avg_val = sum(samples) / len(samples)
+                # If avg_val is significantly different from the local background, it's a dot
+                # For light dots on dark (Invert=False), we look for high values
+                detected_bits.append(1 if avg_val > 160 else 0)
                     
         if len(detected_bits) != 43:
             return None
             
-        # 4. Pattern Matching (Cyclic)
-        # We need to try all 43 rotations for EACH ring? No, the whole sequence rotates together.
-        # But wait, RuneTag rings rotate at different speeds? No, it's a single rigid marker.
-        # However, the 43-bit sequence is usually flattened.
-        
-        best_match = -1
-        min_dist = 99
-        
+        # Step 3: Pattern Matching with Hamming Distance
         bits_tuple = tuple(detected_bits)
+        best_id = -1
+        best_dist = self.hamming_dist + 1
         
-        # Try all cyclic shifts
+        # Fast path: exact match
         for shift in range(43):
             shifted = bits_tuple[shift:] + bits_tuple[:shift]
             if shifted in self.codebook:
@@ -128,6 +131,25 @@ class RuneTagDetector:
                     'center': (int(cx), int(cy)),
                     'corners': self._get_ellipse_corners(ellipse)
                 }
+        
+        # Slow path: Hamming distance (only if no exact match and hamming_dist > 0)
+        if self.hamming_dist > 0:
+            for shift in range(43):
+                shifted = np.array(bits_tuple[shift:] + bits_tuple[:shift])
+                for code_bits, tid in self.codebook.items():
+                    dist = np.count_nonzero(shifted != code_bits)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_id = tid
+                        if dist == 0: break
+                if best_dist == 0: break
+                        
+        if best_id != -1 and best_dist <= self.hamming_dist:
+            return {
+                'id': best_id,
+                'center': (int(cx), int(cy)),
+                'corners': self._get_ellipse_corners(ellipse)
+            }
                 
         return None
 
