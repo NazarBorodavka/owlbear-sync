@@ -470,7 +470,9 @@ def get_video_stream():
             if runetag_engine:
                 try:
                     # Run lightweight CV detection
-                    tags = runetag_engine.detect(gray, invert=runetag_invert)
+                    tags = runetag_engine.detect(gray, invert=runetag_invert, 
+                                                min_score=runetag_min_score, 
+                                                detect_scale=runetag_detect_scale)
                     
                     if runetag_show_rois:
                         for tag in tags:

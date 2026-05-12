@@ -32,42 +32,66 @@ class RuneTagDetector:
         except Exception as e:
             print(f"RuneTag-CV: Error loading codebook: {e}")
 
-    def detect(self, gray, invert=False):
+    def detect(self, gray, invert=False, min_score=0.3, detect_scale=1.0):
         results = []
         if invert: gray = 255 - gray
             
-        # Use Canny + Morphological closing to join dots into a solid marker shape
-        # This is critical for markers without a solid outer ring
-        edges = cv2.Canny(gray, 50, 150)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-        closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        # 1. Find potential dots (blobs)
+        # detect_scale affects the blockSize of adaptive threshold
+        block_size = int(21 * detect_scale)
+        if block_size % 2 == 0: block_size += 1
+        block_size = max(3, block_size)
         
-        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                       cv2.THRESH_BINARY_INV, block_size, 5)
         
-        # Filter and process
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        dots = []
         for cnt in contours:
-            if len(cnt) < 10: continue
             area = cv2.contourArea(cnt)
-            if area < 400: continue 
+            # Dot size scales with detection scale
+            if 3 < area < (500 * detect_scale): 
+                peri = cv2.arcLength(cnt, True)
+                if peri == 0: continue
+                circ = 4 * np.pi * area / (peri * peri)
+                if circ > 0.5:
+                    M = cv2.moments(cnt)
+                    if M["m00"] != 0:
+                        dots.append((int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])))
+        
+        if len(dots) < 5: return results
+        
+        # 2. Cluster dots into potential markers
+        from sklearn.cluster import DBSCAN
+        import numpy as np
+        
+        dots_np = np.array(dots)
+        # min_samples is derived from min_score (lower score = fewer dots needed)
+        # RUNE-129 has 43 slots. If score=0.3, we need ~13 dots.
+        min_dots = max(5, int(43 * min_score))
+        
+        # eps is the max distance between dots. Scales with detect_scale.
+        eps = 40 * detect_scale
+        
+        clustering = DBSCAN(eps=eps, min_samples=min_dots).fit(dots_np)
+        
+        for label in set(clustering.labels_):
+            if label == -1: continue 
             
-            # Fit ellipse to the merged blob
-            ellipse = cv2.fitEllipse(cnt)
-            (cx, cy), (ma, Ma), angle = ellipse
-            
-            # Rough filter to avoid noise
-            if Ma == 0 or ma/Ma < 0.4: continue
-            
-            tag_data = self._decode_ellipse(gray, ellipse)
-            if tag_data:
-                results.append(tag_data)
-            elif area > 1000: 
-                # Return a 'debug' entry if it's a likely marker but failed to decode
-                # This ensures the user sees a yellow box in 'Show ROI Boxes' mode
-                results.append({
-                    'id': -1, 
-                    'center': (int(cx), int(cy)), 
-                    'corners': self._get_ellipse_corners(ellipse)
-                })
+            cluster_dots = dots_np[clustering.labels_ == label]
+            if len(cluster_dots) >= 5:
+                # 3. Fit ellipse
+                ellipse = cv2.fitEllipse(cluster_dots.astype(np.float32))
+                tag_data = self._decode_ellipse(gray, ellipse)
+                if tag_data:
+                    results.append(tag_data)
+                else:
+                    results.append({
+                        'id': -1,
+                        'center': (int(ellipse[0][0]), int(ellipse[0][1])),
+                        'corners': self._get_ellipse_corners(ellipse)
+                    })
                 
         return results
 
