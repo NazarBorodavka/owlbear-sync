@@ -470,7 +470,7 @@ def get_video_stream():
             if runetag_engine:
                 try:
                     # Run lightweight CV detection on the RAW frame for better accuracy
-                    raw_gray = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2GRAY)
+                    raw_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     tags = runetag_engine.detect(raw_gray, invert=runetag_invert, 
                                                 min_score=runetag_min_score, 
                                                 detect_scale=runetag_detect_scale)
