@@ -8,7 +8,7 @@ def test_static_image(image_path):
     
     # Initialize detector
     codebook_path = "codebooks/runetag_codebook.txt"
-    detector = RuneTagDetector(codebook_path=codebook_path, hamming_dist=8)
+    detector = RuneTagDetector(codebook_path=codebook_path, hamming_dist=15)
     
     # Load image
     img = cv2.imread(image_path)

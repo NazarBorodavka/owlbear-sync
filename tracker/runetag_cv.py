@@ -124,13 +124,18 @@ class RuneTagDetector:
                 shifted = np.roll(current_pattern, -shift)
                 mismatches = np.sum(self.codes_matrix != shifted, axis=1)
                 best_idx = np.argmin(mismatches)
+                min_dist = mismatches[best_idx]
                 
-                if mismatches[best_idx] <= self.hamming_dist:
+                if min_dist <= self.hamming_dist:
                     return {
                         'id': int(self.ids_vector[best_idx]),
                         'center': (int(cx), int(cy)),
                         'corners': self._get_ellipse_corners(master_ellipse)
                     }
+                
+                # Diagnostic: log if we are somewhat close
+                if min_dist < 15:
+                    print(f"  [CLOSE MATCH] ID {self.ids_vector[best_idx]} dist {min_dist} (Priority: {priority}, Shift: {shift})")
         return None
 
     def _get_ellipse_corners(self, ellipse):
