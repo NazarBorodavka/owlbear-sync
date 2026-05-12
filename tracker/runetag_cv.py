@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import os
-from skimage.feature import blob_log
 
 class RuneTagDetector:
     def __init__(self, codebook_path=None, hamming_dist=4):
@@ -11,10 +10,17 @@ class RuneTagDetector:
         self.exact_codebook = {}
         self.hamming_dist = hamming_dist
         
+        # Official RUNEtag constants (from first-party C++ source)
+        self.NUM_SLOTS = 43
+        self.NUM_LAYERS = 3
+        # Radii ratios: r = (n + layer + 1) / (2n) where n=3
+        self.RADII = [4/6, 5/6, 6/6] # [0.666, 0.833, 1.0]
+        
         if codebook_path:
             self.load_codebook(codebook_path)
 
     def load_codebook(self, path):
+        """Loads the codebook as Z7 symbols (0-6)."""
         try:
             with open(path, 'r') as f:
                 lines = f.readlines()
@@ -25,12 +31,12 @@ class RuneTagDetector:
                     parts = [int(p) for p in line.strip().replace(',', ' ').split()]
                     if len(parts) >= 44:
                         temp_ids.append(parts[0])
-                        temp_codes.append(parts[2:45])
+                        temp_codes.append(parts[2:45]) # The 43 Z7 symbols
                 
                 self.codes_matrix = np.array(temp_codes, dtype=np.int8)
                 self.ids_vector = np.array(temp_ids, dtype=np.int32)
                 self.exact_codebook = {tuple(c): i for c, i in zip(temp_codes, temp_ids)}
-            print(f"RuneTag-CV (Blob-Pro): Loaded {len(self.ids_vector)} codes.")
+            print(f"RuneTag-CV (Official Port): Loaded {len(self.ids_vector)} codes.")
         except Exception as e:
             print(f"RuneTag-CV Error: {e}")
 
@@ -38,88 +44,113 @@ class RuneTagDetector:
         results = []
         if invert: gray = 255 - gray
             
-        # 1. Professional Blob Detection (Laplacian of Gaussian)
-        # This is very robust to glare and handles different dot sizes
-        # min_sigma/max_sigma are dot sizes in pixels
-        blobs = blob_log(gray, min_sigma=1*detect_scale, max_sigma=5*detect_scale, num_sigma=5, threshold=0.1)
+        # 1. Official Preprocessing (Adaptive Thresholding)
+        # C++ uses blockSize=31, C=3
+        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                       cv2.THRESH_BINARY_INV, 31, 3)
         
-        if len(blobs) < 10: return results
+        # 2. Official Dot Extraction
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # blobs is (y, x, sigma)
-        dots = blobs[:, :2][:, ::-1] # Convert to (x, y)
+        dots = []
+        for cnt in contours:
+            if len(cnt) < 10: continue
+            area = cv2.contourArea(cnt)
+            # Official area range [10.0, 10000.0]
+            if 10 < area < 10000:
+                # Check Roundness (4*pi*A/P^2) - Official uses 0.3
+                peri = cv2.arcLength(cnt, True)
+                if peri == 0: continue
+                circ = 4 * np.pi * area / (peri * peri)
+                if circ > 0.3:
+                    ellipse = cv2.fitEllipse(cnt)
+                    dots.append(ellipse) # Store the ellipse objects (dots)
+
+        if len(dots) < 10: return results
         
-        # 2. Cluster and Fit
-        # We look for clusters of dots that form an ellipse
+        # 3. Geometric Consensus Grouping
+        # We group dots that appear to be concentric
+        # (Simplified for Python performance, using centroid clustering first)
+        centroids = np.array([d[0] for d in dots])
         from sklearn.cluster import DBSCAN
-        clustering = DBSCAN(eps=50*detect_scale, min_samples=max(8, int(43 * min_score))).fit(dots)
+        clustering = DBSCAN(eps=60*detect_scale, min_samples=max(10, int(43 * min_score))).fit(centroids)
         
         for label in set(clustering.labels_):
             if label == -1: continue
-            cluster_dots = dots[clustering.labels_ == label]
+            cluster_indices = np.where(clustering.labels_ == label)[0]
+            cluster_dots = [dots[i] for i in cluster_indices]
             
-            if len(cluster_dots) >= 10:
-                # Fit ellipse using standard library fitEllipse
-                ellipse = cv2.fitEllipse(cluster_dots.astype(np.float32))
-                
-                tag_data = self._decode_ellipse(gray, ellipse)
-                if tag_data:
-                    results.append(tag_data)
-                elif min_score < 0.2:
-                    # Debug box for potential markers
-                    results.append({
-                        'id': -1,
-                        'center': (int(ellipse[0][0]), int(ellipse[0][1])),
-                        'corners': self._get_ellipse_corners(ellipse)
-                    })
+            # Fit a master ellipse to all dot centroids in the cluster
+            points = np.array([d[0] for d in cluster_dots], dtype=np.float32)
+            master_ellipse = cv2.fitEllipse(points)
+            
+            tag_data = self._decode_official(gray, master_ellipse, cluster_dots)
+            if tag_data:
+                results.append(tag_data)
+        
         return results
 
-    def _decode_ellipse(self, gray, ellipse):
-        (cx, cy), (ma, Ma), angle = ellipse
-        rings = [0.38, 0.60, 0.82] 
-        num_sectors = 43
-        sectors_symbols = []
+    def _decode_official(self, gray, master_ellipse, cluster_dots):
+        (cx, cy), (ma, Ma), angle = master_ellipse
+        num_slots = self.NUM_SLOTS
         
+        # Create a polar map of the dots relative to the master ellipse
+        # We project each dot into (slot_index, ring_index)
+        
+        # Transformation matrix to "unwarp" the ellipse into a unit circle
+        # (Simplified version of the official projective unwarping)
         cos_a, sin_a = np.cos(np.radians(angle)), np.sin(np.radians(angle))
         
-        # Local threshold for the marker area
-        try:
-            x, y, w, h = cv2.boundingRect(np.array(self._get_ellipse_corners(ellipse), dtype=np.int32))
-            roi = gray[max(0,y):y+h, max(0,x):x+w]
-            local_thresh = np.mean(roi) if roi.size > 0 else 127
-        except:
-            local_thresh = 127
+        slot_data = np.zeros((num_slots, 3), dtype=int)
+        
+        for dot in cluster_dots:
+            dx, dy = dot[0][0] - cx, dot[0][1] - cy
+            # Rotate back
+            rx = dx * cos_a + dy * sin_a
+            ry = -dx * sin_a + dy * cos_a
             
-        for s in range(num_sectors):
-            theta = (2 * np.pi * s / num_sectors)
-            val = 0
-            for i, r_scale in enumerate(rings):
-                rx, ry = (ma/2) * r_scale, (Ma/2) * r_scale
-                local_x, local_y = rx * np.cos(theta), ry * np.sin(theta)
-                px, py = int(cx + local_x * cos_a - local_y * sin_a), int(cy + local_x * sin_a + local_y * cos_a)
-                
-                if 0 <= px < gray.shape[1] and 0 <= py < gray.shape[0]:
-                    # Sub-pixel sampling using 3x3 patch
-                    patch = gray[max(0, py-1):py+2, max(0, px-1):px+2]
-                    if np.mean(patch) > local_thresh:
-                        val += (2**i)
+            # Scale to unit circle
+            nx, ny = rx / (ma/2), ry / (Ma/2)
+            dist = np.sqrt(nx*nx + ny*ny)
             
-            sectors_symbols.append(val - 1 if val > 0 else -1)
+            # Identify Ring
+            # Official radii: [0.66, 0.83, 1.0]
+            ring_idx = -1
+            if 0.55 < dist < 0.75: ring_idx = 0 # Inner
+            elif 0.75 < dist < 0.92: ring_idx = 1 # Middle
+            elif 0.92 < dist < 1.15: ring_idx = 2 # Outer
+            
+            if ring_idx != -1:
+                # Identify Slot
+                angle_deg = np.degrees(np.arctan2(ny, nx)) % 360
+                slot_idx = int((angle_deg / 360.0) * num_slots + 0.5) % num_slots
+                slot_data[slot_idx, ring_idx] = 1
+
+        # Convert 3-bit rings to Z7 symbol (Inner=Bit 2, Middle=Bit 1, Outer=Bit 0)
+        # DeepTag Convention: Z7 = 4*Inner + 2*Middle + 1*Outer
+        # (Actually, Z7 = [0..6], where 0 is 'no dots')
+        detected_symbols = []
+        for s in range(num_slots):
+            # Official Z7 mapping
+            val = 4*slot_data[s,0] + 2*slot_data[s,1] + 1*slot_data[s,2]
+            detected_symbols.append(val - 1 if val > 0 else -1)
+            
+        if len([s for s in detected_symbols if s != -1]) < 8: return None
         
-        if len([s for s in sectors_symbols if s != -1]) < 8: return None
+        current_pattern = np.array(detected_symbols, dtype=np.int8)
         
-        current_pattern = np.array(sectors_symbols, dtype=np.int8)
-        
-        # Fast Vectorized Matching
-        for shift in range(num_sectors):
+        # Cyclic Matching (Official Logic)
+        for shift in range(num_slots):
             shifted = np.roll(current_pattern, -shift)
             shifted_tuple = tuple(shifted.tolist())
+            
             if shifted_tuple in self.exact_codebook:
                 return {
                     'id': self.exact_codebook[shifted_tuple],
                     'center': (int(cx), int(cy)),
-                    'corners': self._get_ellipse_corners(ellipse)
+                    'corners': self._get_ellipse_corners(master_ellipse)
                 }
-            
+                
             if self.hamming_dist > 0:
                 mismatches = np.sum(self.codes_matrix != shifted, axis=1)
                 best_idx = np.argmin(mismatches)
@@ -127,14 +158,13 @@ class RuneTagDetector:
                     return {
                         'id': int(self.ids_vector[best_idx]),
                         'center': (int(cx), int(cy)),
-                        'corners': self._get_ellipse_corners(ellipse)
+                        'corners': self._get_ellipse_corners(master_ellipse)
                     }
         return None
 
     def _get_ellipse_corners(self, ellipse):
         (cx, cy), (ma, Ma), angle = ellipse
         cos_a, sin_a = np.cos(np.radians(angle)), np.sin(np.radians(angle))
-        # Approximate 4 corners of the bounding box of the ellipse
         pts = []
         for dx, dy in [(-1,-1), (1,-1), (1,1), (-1,1)]:
             rx, ry = dx * (ma/2), dy * (Ma/2)
