@@ -114,12 +114,12 @@ class RuneTagDetector:
             nx, ny = rx / (ma/2), ry / (Ma/2)
             dist = np.sqrt(nx*nx + ny*ny)
             
-            # Identify Ring
+            # Identify Ring (Widened for robustness)
             # Official radii: [0.66, 0.83, 1.0]
             ring_idx = -1
-            if 0.55 < dist < 0.75: ring_idx = 0 # Inner
-            elif 0.75 < dist < 0.92: ring_idx = 1 # Middle
-            elif 0.92 < dist < 1.15: ring_idx = 2 # Outer
+            if 0.50 < dist < 0.75: ring_idx = 0 # Inner
+            elif 0.75 < dist < 0.90: ring_idx = 1 # Middle
+            elif 0.90 < dist < 1.25: ring_idx = 2 # Outer
             
             if ring_idx != -1:
                 # Identify Slot
@@ -127,17 +127,22 @@ class RuneTagDetector:
                 slot_idx = int((angle_deg / 360.0) * num_slots + 0.5) % num_slots
                 slot_data[slot_idx, ring_idx] = 1
 
-        # Convert 3-bit rings to Z7 symbol (Inner=Bit 2, Middle=Bit 1, Outer=Bit 0)
+        # Convert 3-bit rings to Z7 symbol (Inner, Middle, Outer)
         detected_symbols = []
         for s in range(num_slots):
+            # Z7 symbol mapping based on codebook analysis:
+            # 1 (Outer) -> 0, 2 (Mid) -> 1, 3 (Mid+Out) -> 2, 4 (In) -> 3...
             val = 4*slot_data[s,0] + 2*slot_data[s,1] + 1*slot_data[s,2]
-            detected_symbols.append(val - 1 if val > 0 else -1)
             
-        valid_symbols = [s for s in detected_symbols if s != -1]
-        if len(valid_symbols) < 5: return None
+            # Map val (1-7) to symbol (0-6). 0 (Empty) is treated as -1 (Mismatch)
+            symbol = val - 1 if val > 0 else -1
+            detected_symbols.append(symbol)
+            
+        valid_dots = np.sum(slot_data)
+        if valid_dots < 10: return None
         
         # DEBUG: Print the raw pattern found
-        print(f"  [DEBUG] Found {len(valid_symbols)} dots. Raw Pattern: {' '.join(str(s) for s in detected_symbols[:10])}...")
+        print(f"  [DEBUG] Found {int(valid_dots)} dots. Pattern (0-6): {' '.join(str(s) for s in detected_symbols[:15])}...")
         
         current_pattern = np.array(detected_symbols, dtype=np.int8)
         

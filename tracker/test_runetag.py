@@ -33,5 +33,5 @@ def test_static_image(image_path):
                     print(" (Marker found but ID not decoded/recognized)")
 
 if __name__ == "__main__":
-    # Path relative to tracker/
-    test_static_image("../R129-0-new.bmp")
+    # Path inside Docker /app/
+    test_static_image("R129-0-new.bmp")
