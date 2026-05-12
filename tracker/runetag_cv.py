@@ -66,7 +66,34 @@ class RuneTagDetector:
         
         cos_a, sin_a = np.cos(np.radians(angle)), np.sin(np.radians(angle))
         
-        # Optimized sampling
+        # Step 1: Calculate local adaptive threshold for this specific marker
+        # Sample the central area and the outer area to find the "White" and "Black" levels
+        try:
+            # Create a small mask for the marker area to get intensity statistics
+            # This is faster than masking the whole image
+            rect = cv2.boundingRect(np.array([
+                [cx-Ma/2, cy-Ma/2], [cx+Ma/2, cy-Ma/2], 
+                [cx+Ma/2, cy+Ma/2], [cx-Ma/2, cy+Ma/2]
+            ], dtype=np.int32))
+            x, y, w, h = rect
+            # Bounds check
+            x, y = max(0, x), max(0, y)
+            w, h = min(gray.shape[1]-x, w), min(gray.shape[0]-y, h)
+            
+            roi = gray[y:y+h, x:x+w]
+            if roi.size < 100: return None
+            
+            # Use percentiles to find the local black/white levels (ignoring outliers)
+            local_low = np.percentile(roi, 15)
+            local_high = np.percentile(roi, 85)
+            if local_high - local_low < 30: return None # Low contrast marker
+            
+            # The threshold is the midpoint
+            local_thresh = (local_low + local_high) / 2
+        except:
+            local_thresh = 127 # Fallback
+            
+        # Step 2: Sample all dots
         for s in range(num_sectors):
             theta = (2 * np.pi * s / num_sectors)
             val = 0
@@ -76,12 +103,14 @@ class RuneTagDetector:
                 px, py = int(cx + local_x * cos_a - local_y * sin_a), int(cy + local_x * sin_a + local_y * cos_a)
                 
                 if 0 <= px < gray.shape[1] and 0 <= py < gray.shape[0]:
-                    if gray[py, px] > 160:
-                        val += (2**i) # b0 + 2*b1 + 4*b2
+                    # Sample a 3x3 neighborhood for robustness
+                    patch = gray[max(0, py-1):py+2, max(0, px-1):px+2]
+                    if np.mean(patch) > local_thresh:
+                        val += (2**i)
             
             sectors_symbols.append(val - 1 if val > 0 else -1)
         
-        if len([s for s in sectors_symbols if s != -1]) < 10: return None
+        if len([s for s in sectors_symbols if s != -1]) < 8: return None
             
         current_pattern = np.array(sectors_symbols, dtype=np.int8)
         
