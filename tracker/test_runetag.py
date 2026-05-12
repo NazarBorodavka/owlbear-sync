@@ -34,4 +34,4 @@ def test_static_image(image_path):
 
 if __name__ == "__main__":
     # Path inside Docker /app/
-    test_static_image("R129-0-new.bmp")
+    for img in ["R129-0-new.bmp", "R129-6.bmp"]: test_static_image(img)

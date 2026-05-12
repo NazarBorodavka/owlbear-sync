@@ -119,6 +119,10 @@ class RuneTagDetector:
                 # Z7 symbol mapping
                 detected_symbols.append(val - 1 if val > 0 else -1)
             
+            # Log the read code before matching
+            code_str = " ".join(map(str, [s if s != -1 else 0 for s in detected_symbols]))
+            print(f"  [READ CODE] ? 43 {code_str} (Priority: {priority})")
+            
             current_pattern = np.array(detected_symbols, dtype=np.int8)
             for shift in range(num_slots):
                 shifted = np.roll(current_pattern, -shift)
