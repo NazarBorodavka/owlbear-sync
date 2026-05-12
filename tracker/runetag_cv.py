@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import os
+from sklearn.cluster import DBSCAN
 
 class RuneTagDetector:
     def __init__(self, codebook_path=None, hamming_dist=4):
@@ -63,9 +64,6 @@ class RuneTagDetector:
         if len(dots) < 5: return results
         
         # 2. Cluster dots into potential markers
-        from sklearn.cluster import DBSCAN
-        import numpy as np
-        
         dots_np = np.array(dots)
         # min_samples is derived from min_score (lower score = fewer dots needed)
         # RUNE-129 has 43 slots. If score=0.3, we need ~13 dots.
