@@ -36,25 +36,38 @@ class RuneTagDetector:
         results = []
         if invert: gray = 255 - gray
             
-        # Efficient thresholding
-        thresh = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Use Canny + Morphological closing to join dots into a solid marker shape
+        # This is critical for markers without a solid outer ring
+        edges = cv2.Canny(gray, 50, 150)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
         
-        # Limit processing to top 50 most likely contours to prevent freezes
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:50]
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
+        # Filter and process
         for cnt in contours:
-            if len(cnt) < 20: continue # Need enough points for a good ellipse
+            if len(cnt) < 10: continue
             area = cv2.contourArea(cnt)
-            if area < 500: continue 
+            if area < 400: continue 
             
-            # Stricter circularity/ellipse check
+            # Fit ellipse to the merged blob
             ellipse = cv2.fitEllipse(cnt)
             (cx, cy), (ma, Ma), angle = ellipse
-            if Ma == 0 or ma/Ma < 0.5: continue # Too elongated
+            
+            # Rough filter to avoid noise
+            if Ma == 0 or ma/Ma < 0.4: continue
             
             tag_data = self._decode_ellipse(gray, ellipse)
-            if tag_data: results.append(tag_data)
+            if tag_data:
+                results.append(tag_data)
+            elif area > 1000: 
+                # Return a 'debug' entry if it's a likely marker but failed to decode
+                # This ensures the user sees a yellow box in 'Show ROI Boxes' mode
+                results.append({
+                    'id': -1, 
+                    'center': (int(cx), int(cy)), 
+                    'corners': self._get_ellipse_corners(ellipse)
+                })
                 
         return results
 
