@@ -9,3 +9,4 @@ stag-python
 scipy
 pupil-apriltags
 scikit-learn
+scikit-image
