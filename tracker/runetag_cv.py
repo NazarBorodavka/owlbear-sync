@@ -1,154 +1,149 @@
 import cv2
 import numpy as np
-import os
+from sklearn.cluster import DBSCAN
+from runetag_coding import RuneTagCoding
 
 class RuneTagDetector:
     def __init__(self, codebook_path=None, hamming_dist=4):
-        self.codebook = {}
-        self.codes_matrix = None
-        self.ids_vector = None
-        self.exact_codebook = {}
+        self.coder = RuneTagCoding()
         self.hamming_dist = hamming_dist
-        
-        self.NUM_SLOTS = 43
-        self.NUM_LAYERS = 3
-        # Official RUNEtag radii ratios
-        self.RADII = [4/6, 5/6, 6/6] # [0.666, 0.833, 1.0]
-        
-        if codebook_path:
-            self.load_codebook(codebook_path)
+        self.radii_normalized = [0.65, 0.82, 1.00]
+        self.num_slots = 43
 
-    def load_codebook(self, path):
-        try:
-            with open(path, 'r') as f:
-                lines = f.readlines()
-                start = 1 if lines[0].strip().isdigit() else 0
-                temp_codes = []
-                temp_ids = []
-                for line in lines[start:]:
-                    parts = [int(p) for p in line.strip().replace(',', ' ').split()]
-                    if len(parts) >= 44:
-                        temp_ids.append(parts[0])
-                        temp_codes.append(parts[2:45])
-                
-                self.codes_matrix = np.array(temp_codes, dtype=np.int8)
-                self.ids_vector = np.array(temp_ids, dtype=np.int32)
-                self.exact_codebook = {tuple(c): i for c, i in zip(temp_codes, temp_ids)}
-            print(f"RuneTag-CV (Official Port): Loaded {len(self.ids_vector)} codes.")
-        except Exception as e:
-            print(f"RuneTag-CV Error: {e}")
-
-    def detect(self, gray, invert=False, min_score=0.3, detect_scale=1.0):
+    def detect(self, img, invert=False, min_score=0.3, detect_scale=1.0, 
+               adaptive_block=31, adaptive_C=3, min_dots=15):
+        """
+        Detects multiple RuneTags in an image.
+        """
         results = []
-        if invert: gray = 255 - gray
-            
-        # 1. Preprocessing
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                       cv2.THRESH_BINARY_INV, 31, 3)
+        if img is None: return results
         
-        # 2. Dot Extraction
+        # 1. Resize for performance if requested
+        if detect_scale != 1.0:
+            h, w = img.shape[:2]
+            proc_img = cv2.resize(img, (int(w * detect_scale), int(h * detect_scale)))
+        else:
+            proc_img = img
+            
+        if len(proc_img.shape) == 3:
+            gray = cv2.cvtColor(proc_img, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = proc_img
+            
+        if invert:
+            gray = 255 - gray
+            
+        # 2. Adaptive Thresholding
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                       cv2.THRESH_BINARY_INV, adaptive_block, adaptive_C)
+        
+        # 3. Contour detection and filtering
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
         dots = []
         for cnt in contours:
             if len(cnt) < 5: continue
             area = cv2.contourArea(cnt)
-            if 2 < area < 10000:
-                peri = cv2.arcLength(cnt, True)
-                if peri == 0: continue
-                circ = 4 * np.pi * area / (peri * peri)
-                if circ > 0.2:
-                    ellipse = cv2.fitEllipse(cnt)
-                    dots.append(ellipse)
-
-        if len(dots) < 10: return results
+            if area < 5: continue
+            
+            ellipse = cv2.fitEllipse(cnt)
+            (x, y), (ma, mi), angle = ellipse
+            if ma == 0: continue
+            ratio = mi / ma
+            if ratio < 0.3: continue # Allow for perspective tilt
+            
+            dots.append((x, y))
+            
+        if len(dots) < min_dots:
+            return results
         
-        # 3. Geometric Consensus Grouping
-        centroids = np.array([d[0] for d in dots])
-        from sklearn.cluster import DBSCAN
-        clustering = DBSCAN(eps=60*detect_scale, min_samples=max(10, int(43 * min_score))).fit(centroids)
+        # 4. Clustering (DBSCAN to group dots into markers)
+        dots_pos = np.array(dots)
+        # eps should scale with dot size/density. Approx 150 pixels for 1024 frame.
+        clustering = DBSCAN(eps=80, min_samples=min_dots).fit(dots_pos)
         
         for label in set(clustering.labels_):
-            if label == -1: continue
+            if label == -1: continue # Noise
+            
             cluster_indices = np.where(clustering.labels_ == label)[0]
-            cluster_dots = [dots[i] for i in cluster_indices]
+            cluster_dots = dots_pos[cluster_indices]
             
-            points = np.array([d[0] for d in cluster_dots], dtype=np.float32)
-            master_ellipse = cv2.fitEllipse(points)
+            if len(cluster_dots) < min_dots: continue
             
-            tag_data = self._decode_official(gray, master_ellipse, cluster_dots)
+            # 5. Process each cluster
+            tag_data = self._process_cluster(gray, cluster_dots)
             if tag_data:
+                # Scale coordinates back to original size
+                if detect_scale != 1.0:
+                    tag_data['center'] = (tag_data['center'][0] / detect_scale, tag_data['center'][1] / detect_scale)
+                    tag_data['corners'] = [[c[0] / detect_scale, c[1] / detect_scale] for c in tag_data['corners']]
                 results.append(tag_data)
-        
+                
         return results
 
-    def _decode_official(self, gray, master_ellipse, cluster_dots):
-        (cx, cy), (ma, Ma), angle = master_ellipse
-        num_slots = self.NUM_SLOTS
-        cos_a, sin_a = np.cos(np.radians(angle)), np.sin(np.radians(angle))
+    def _process_cluster(self, gray, cluster_dots):
+        center = np.mean(cluster_dots, axis=0)
+        dists = np.linalg.norm(cluster_dots - center, axis=1)
         
-        # DEBUG: Dot count
-        print(f"  [DEBUG] Processing candidate with {len(cluster_dots)} dots.")
+        # Fit outer ellipse for initial homography
+        max_dist = np.max(dists)
+        outer_dots = cluster_dots[dists > 0.8 * max_dist]
+        if len(outer_dots) < 5: return None
         
-        slot_data = np.zeros((num_slots, 3), dtype=int)
-        for dot in cluster_dots:
-            dx, dy = dot[0][0] - cx, dot[0][1] - cy
-            rx = dx * cos_a + dy * sin_a
-            ry = -dx * sin_a + dy * cos_a
-            nx, ny = rx / (ma/2), ry / (Ma/2)
-            dist = np.sqrt(nx*nx + ny*ny)
-            
-            ring_idx = -1
-            if 0.50 < dist < 0.75: ring_idx = 0 # Inner
-            elif 0.75 < dist < 0.90: ring_idx = 1 # Middle
-            elif 0.90 < dist < 1.30: ring_idx = 2 # Outer
-            
-            if ring_idx != -1:
-                angle_deg = np.degrees(np.arctan2(ny, nx)) % 360
-                slot_idx = int((angle_deg / 360.0) * num_slots + 0.5) % num_slots
-                slot_data[slot_idx, ring_idx] = 1
+        try:
+            outer_ellipse = cv2.fitEllipse(outer_dots.astype(np.float32))
+        except: return None
+        
+        # Homography to unit circle
+        def get_ellipse_point(ellipse, ang_deg):
+            (x, y), (ma, mi), ang = ellipse
+            a, b = ma / 2.0, mi / 2.0
+            rad = np.radians(ang_deg)
+            px, py = a * np.cos(rad), b * np.sin(rad)
+            s, c = np.sin(np.radians(ang)), np.cos(np.radians(ang))
+            return [x + px*c - py*s, y + px*s + py*c]
 
-        # DUAL PASS: Try both bit-priority orderings
-        for priority in ['standard', 'flipped']:
-            detected_symbols = []
-            for s in range(num_slots):
-                if priority == 'standard':
-                    val = 4*slot_data[s,0] + 2*slot_data[s,1] + 1*slot_data[s,2]
-                else:
-                    val = 1*slot_data[s,0] + 2*slot_data[s,1] + 4*slot_data[s,2]
-                
-                # Z7 symbol mapping
-                detected_symbols.append(val - 1 if val > 0 else -1)
+        src_pts = np.array([get_ellipse_point(outer_ellipse, a) for a in [0, 90, 180, 270, 45]], dtype=np.float32)
+        dst_pts = np.array([[1, 0], [0, 1], [-1, 0], [0, -1], [0.707, 0.707]], dtype=np.float32)
+        H, _ = cv2.findHomography(src_pts, dst_pts)
+        
+        # Transform cluster dots to normalized space
+        dots_homo = np.hstack([cluster_dots, np.ones((len(cluster_dots), 1))])
+        dots_norm = (H @ dots_homo.T).T
+        dots_norm = dots_norm[:, :2] / dots_norm[:, 2:3]
+        
+        dots_r = np.linalg.norm(dots_norm, axis=1)
+        dots_theta = np.arctan2(dots_norm[:, 1], dots_norm[:, 0]) % (2 * np.pi)
+        
+        # Try rotations to find valid code
+        for rotation_offset in np.linspace(0, 2 * np.pi / 43, 8):
+            bit_grid = np.zeros((43, 3), dtype=int)
+            for r, theta in zip(dots_r, dots_theta):
+                slot_idx = int(((theta - rotation_offset) % (2 * np.pi)) / (2 * np.pi / 43))
+                ring_idx = np.argmin([abs(r - dr) for dr in self.radii_normalized])
+                if abs(r - self.radii_normalized[ring_idx]) < 0.15:
+                    bit_grid[slot_idx % 43, ring_idx] = 1
             
-            # Log the read code before matching
-            code_str = " ".join(map(str, [s if s != -1 else 0 for s in detected_symbols]))
-            print(f"  [READ CODE] ? 43 {code_str} (Priority: {priority})")
-            
-            current_pattern = np.array(detected_symbols, dtype=np.int8)
-            for shift in range(num_slots):
-                shifted = np.roll(current_pattern, -shift)
-                mismatches = np.sum(self.codes_matrix != shifted, axis=1)
-                best_idx = np.argmin(mismatches)
-                min_dist = mismatches[best_idx]
-                
-                if min_dist <= self.hamming_dist:
-                    return {
-                        'id': int(self.ids_vector[best_idx]),
-                        'center': (int(cx), int(cy)),
-                        'corners': self._get_ellipse_corners(master_ellipse)
-                    }
-                
-                # Diagnostic: log if we are somewhat close
-                if min_dist < 15:
-                    print(f"  [CLOSE MATCH] ID {self.ids_vector[best_idx]} dist {min_dist} (Priority: {priority}, Shift: {shift})")
+            bitcode = bit_grid.flatten().tolist()
+            try:
+                code = self.coder.pack(bitcode)
+                # Note: We use the algorithmic decoder which is much better than a codebook
+                if self.coder.decode(code) == 0:
+                    aligned_code, tid, rotation = self.coder.align(code)
+                    if tid >= 0:
+                        # Success!
+                        # We don't return full debug drawing here, just tag info
+                        return {
+                            'id': tid,
+                            'center': (int(center[0]), int(center[1])),
+                            'corners': self._get_corners(outer_ellipse)
+                        }
+            except: pass
         return None
 
-    def _get_ellipse_corners(self, ellipse):
+    def _get_corners(self, ellipse):
+        # Return a bounding box representing the tag
         (cx, cy), (ma, Ma), angle = ellipse
-        cos_a, sin_a = np.cos(np.radians(angle)), np.sin(np.radians(angle))
-        pts = []
-        for dx, dy in [(-1,-1), (1,-1), (1,1), (-1,1)]:
-            rx, ry = dx * (ma/2), dy * (Ma/2)
-            px = cx + rx * cos_a - ry * sin_a
-            py = cy + rx * sin_a + ry * cos_a
-            pts.append([int(px), int(py)])
-        return pts
+        pts = cv2.boxPoints(ellipse)
+        return pts.astype(int).tolist()

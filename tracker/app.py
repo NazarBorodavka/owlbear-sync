@@ -114,12 +114,14 @@ runetag_detect_scale = 1.0
 runetag_invert = False
 runetag_precision = False
 runetag_show_rois = False
+runetag_adaptive_block = 31
+runetag_adaptive_C = 3
+runetag_min_dots = 15
 last_runetag_count = -1
 
 def load_config_from_disk():
-    global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
-    global detection_mode, stag_error_correction, stag_roi_padding, runetag_hamming_dist, apriltag_family
     global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision, runetag_show_rois
+    global runetag_adaptive_block, runetag_adaptive_C, runetag_min_dots
     
     if os.path.exists(CONFIG_FILE):
         try:
@@ -131,6 +133,9 @@ def load_config_from_disk():
                 runetag_invert = c.get('runetag_invert', False)
                 runetag_precision = c.get('runetag_precision', False)
                 runetag_show_rois = c.get('runetag_show_rois', False)
+                runetag_adaptive_block = int(c.get('runetag_adaptive_block', 31))
+                runetag_adaptive_C = int(c.get('runetag_adaptive_C', 3))
+                runetag_min_dots = int(c.get('runetag_min_dots', 15))
                 apriltag_family = c.get('apriltag_family', 'tag36h11')
                 last_runetag_hamming_dist = runetag_hamming_dist
                 apriltag_decision_margin = float(c.get('apriltag_decision_margin', 30.0))
@@ -174,6 +179,9 @@ def save_config_to_disk():
         'runetag_invert': runetag_invert,
         'runetag_precision': runetag_precision,
         'runetag_show_rois': runetag_show_rois,
+        'runetag_adaptive_block': runetag_adaptive_block,
+        'runetag_adaptive_C': runetag_adaptive_C,
+        'runetag_min_dots': runetag_min_dots,
         'apriltag_family': apriltag_family,
         'apriltag_decision_margin': apriltag_decision_margin,
         'token_aliases': token_aliases,
@@ -473,7 +481,10 @@ def get_video_stream():
                     raw_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                     tags = runetag_engine.detect(raw_gray, invert=runetag_invert, 
                                                 min_score=runetag_min_score, 
-                                                detect_scale=runetag_detect_scale)
+                                                detect_scale=runetag_detect_scale,
+                                                adaptive_block=runetag_adaptive_block,
+                                                adaptive_C=runetag_adaptive_C,
+                                                min_dots=runetag_min_dots)
                     
                     if runetag_show_rois:
                         for tag in tags:
@@ -702,12 +713,10 @@ def get_video_stream():
                 if corner_idx == 4 and i == 3:
                     cv2.line(frame, (int(src_pts[3][0]), int(src_pts[3][1])), (int(src_pts[0][0]), int(src_pts[0][1])), (255, 0, 0), 2)
                 
-            if detection_mode == 'runetag' and runetag_show_rois and DEEPTAG_AVAILABLE and runetag_engine is not None:
+            if detection_mode == 'runetag' and runetag_show_rois and RUNETAG_AVAILABLE and runetag_engine is not None:
                 try:
-                    rois_info = getattr(runetag_engine, 'rois_info', [])
-                    for roi_info in rois_info:
-                        pts = np.array(roi_info['ordered_corners'], np.int32).reshape((-1, 1, 2))
-                        cv2.polylines(frame, [pts], True, (0, 255, 255), 2)
+                    # Drawing logic for RuneTag ROIs is handled by the detected tags' corners
+                    pass
                 except:
                     pass
 
