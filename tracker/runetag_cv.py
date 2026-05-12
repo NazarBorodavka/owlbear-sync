@@ -103,32 +103,7 @@ class RuneTagDetector:
         
         cos_a, sin_a = np.cos(np.radians(angle)), np.sin(np.radians(angle))
         
-        # Step 1: Calculate local adaptive threshold for this specific marker
-        # Sample the central area and the outer area to find the "White" and "Black" levels
-        try:
-            # Create a small mask for the marker area to get intensity statistics
-            # This is faster than masking the whole image
-            rect = cv2.boundingRect(np.array([
-                [cx-Ma/2, cy-Ma/2], [cx+Ma/2, cy-Ma/2], 
-                [cx+Ma/2, cy+Ma/2], [cx-Ma/2, cy+Ma/2]
-            ], dtype=np.int32))
-            x, y, w, h = rect
-            # Bounds check
-            x, y = max(0, x), max(0, y)
-            w, h = min(gray.shape[1]-x, w), min(gray.shape[0]-y, h)
-            
-            roi = gray[y:y+h, x:x+w]
-            if roi.size < 100: return None
-            
-            # Use percentiles to find the local black/white levels (ignoring outliers)
-            local_low = np.percentile(roi, 15)
-            local_high = np.percentile(roi, 85)
-            if local_high - local_low < 30: return None # Low contrast marker
-            
-            # The threshold is the midpoint
-            local_thresh = (local_low + local_high) / 2
-        except:
-            local_thresh = 127 # Fallback
+        local_thresh = 127 # Standard midpoint for raw camera feed
             
         # Step 2: Sample all dots
         for s in range(num_sectors):
