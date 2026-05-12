@@ -42,10 +42,11 @@ class RuneTagDetector:
 
     def detect(self, gray, invert=False, min_score=0.3, detect_scale=1.0):
         results = []
+        # If user inverted (e.g. phone screen), we flip it back to black-on-white 
+        # so our "look for dark dots" logic always works.
         if invert: gray = 255 - gray
             
-        # 1. Official Preprocessing (Adaptive Thresholding)
-        # C++ uses blockSize=31, C=3
+        # Official C++ uses BINARY_INV to turn BLACK dots into WHITE blobs for findContours
         thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                                        cv2.THRESH_BINARY_INV, 31, 3)
         
@@ -127,15 +128,16 @@ class RuneTagDetector:
                 slot_data[slot_idx, ring_idx] = 1
 
         # Convert 3-bit rings to Z7 symbol (Inner=Bit 2, Middle=Bit 1, Outer=Bit 0)
-        # DeepTag Convention: Z7 = 4*Inner + 2*Middle + 1*Outer
-        # (Actually, Z7 = [0..6], where 0 is 'no dots')
         detected_symbols = []
         for s in range(num_slots):
-            # Official Z7 mapping
             val = 4*slot_data[s,0] + 2*slot_data[s,1] + 1*slot_data[s,2]
             detected_symbols.append(val - 1 if val > 0 else -1)
             
-        if len([s for s in detected_symbols if s != -1]) < 8: return None
+        valid_symbols = [s for s in detected_symbols if s != -1]
+        if len(valid_symbols) < 5: return None
+        
+        # DEBUG: Print the raw pattern found
+        print(f"  [DEBUG] Found {len(valid_symbols)} dots. Raw Pattern: {' '.join(str(s) for s in detected_symbols[:10])}...")
         
         current_pattern = np.array(detected_symbols, dtype=np.int8)
         
