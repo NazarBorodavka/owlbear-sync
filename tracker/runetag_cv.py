@@ -10,147 +10,106 @@ class RuneTagDetector:
             self.load_codebook(codebook_path)
             
     def load_codebook(self, path):
-        """Loads the standard RuneTag-43 codebook."""
+        """Loads the standard RuneTag-43 codebook with Z7 (0-6) values."""
         try:
             with open(path, 'r') as f:
                 lines = f.readlines()
-                # Skip first line if it's the count
                 start = 1 if lines[0].strip().isdigit() else 0
+                temp_codes = []
+                temp_ids = []
                 for line in lines[start:]:
                     parts = [int(p) for p in line.strip().replace(',', ' ').split()]
                     if len(parts) >= 44:
-                        tag_id = parts[0]
-                        # The codebook in deeptag seems to have 0..6 values?
-                        # Standard RuneTag is binary. Let's convert > 0 to 1
-                        bits = tuple(1 if b > 0 else 0 for b in parts[2:45])
-                        self.codebook[bits] = tag_id
-            print(f"RuneTag-CV: Loaded {len(self.codebook)} codes from {path}")
+                        temp_ids.append(parts[0])
+                        temp_codes.append(parts[2:45])
+                
+                self.codes_matrix = np.array(temp_codes, dtype=np.int8)
+                self.ids_vector = np.array(temp_ids, dtype=np.int32)
+                # For fast exact lookup
+                self.exact_codebook = {tuple(c): i for c, i in zip(temp_codes, temp_ids)}
+                
+            print(f"RuneTag-CV: Loaded {len(self.ids_vector)} codes (Vectorized) from {path}")
         except Exception as e:
             print(f"RuneTag-CV: Error loading codebook: {e}")
 
     def detect(self, gray, invert=False):
-        """
-        Detects RuneTags in a grayscale image.
-        Returns a list of decoded tags: [{'id': 1, 'center': (x,y), 'corners': [...]}]
-        """
         results = []
-        
-        # 1. Pre-process
-        if invert:
-            gray = 255 - gray
+        if invert: gray = 255 - gray
             
-        # Adaptive threshold to find the rings
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                       cv2.THRESH_BINARY_INV, 51, 10)
-        
-        # 2. Find Ellipses
+        # Efficient thresholding
+        thresh = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
+        # Limit processing to top 50 most likely contours to prevent freezes
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)[:50]
+        
         for cnt in contours:
-            if len(cnt) < 5: continue
-            
+            if len(cnt) < 20: continue # Need enough points for a good ellipse
             area = cv2.contourArea(cnt)
-            if area < 400: continue # Too small
+            if area < 500: continue 
             
-            # Filter for circularity
-            perimeter = cv2.arcLength(cnt, True)
-            if perimeter == 0: continue
-            circularity = 4 * np.pi * (area / (perimeter * perimeter))
-            if circularity < 0.5: continue
-            
-            # Fit ellipse
+            # Stricter circularity/ellipse check
             ellipse = cv2.fitEllipse(cnt)
-            (center, axes, angle) = ellipse
+            (cx, cy), (ma, Ma), angle = ellipse
+            if Ma == 0 or ma/Ma < 0.5: continue # Too elongated
             
-            # 3. Unwarp and Sample
-            # For simplicity in this lightweight version, we'll sample the rings directly
-            # using the elliptical geometry
             tag_data = self._decode_ellipse(gray, ellipse)
-            if tag_data:
-                results.append(tag_data)
+            if tag_data: results.append(tag_data)
                 
         return results
 
     def _decode_ellipse(self, gray, ellipse):
         (cx, cy), (ma, Ma), angle = ellipse
-        # RuneTag-43 has 3 rings: 9, 13, 21 dots
-        rings = [
-            {'count': 9,  'radius': 0.38},
-            {'count': 13, 'radius': 0.60},
-            {'count': 21, 'radius': 0.82}
-        ]
+        rings = [0.38, 0.60, 0.82] 
+        num_sectors = 43
+        sectors_symbols = []
         
-        # Step 1: Get local intensity range to handle glare/brightness
-        # Sample center of marker and outer edge
-        center_val = gray[int(cy), int(cx)] if 0 <= cy < gray.shape[0] and 0 <= cx < gray.shape[1] else 128
-        # Use an adaptive threshold based on the local neighborhood
+        cos_a, sin_a = np.cos(np.radians(angle)), np.sin(np.radians(angle))
         
-        detected_bits = []
-        
-        # Step 2: Sample each ring with multi-point averaging
-        for ring in rings:
-            n = ring['count']
-            rx = (ma/2) * ring['radius']
-            ry = (Ma/2) * ring['radius']
-            cos_a, sin_a = np.cos(np.radians(angle)), np.sin(np.radians(angle))
-            
-            for i in range(n):
-                theta = (2 * np.pi * i / n)
-                # Sample 5 points around the dot center for robustness
-                samples = []
-                for dx, dy in [(0,0), (1,0), (-1,0), (0,1), (0,-1)]:
-                    px = cx + (rx+dx) * np.cos(theta) * cos_a - (ry+dy) * np.sin(theta) * sin_a
-                    py = cy + (rx+dx) * np.cos(theta) * sin_a + (ry+dy) * np.sin(theta) * cos_a
-                    
-                    if 0 <= px < gray.shape[1] and 0 <= py < gray.shape[0]:
-                        samples.append(gray[int(py), int(px)])
+        # Optimized sampling
+        for s in range(num_sectors):
+            theta = (2 * np.pi * s / num_sectors)
+            val = 0
+            for i, r_scale in enumerate(rings):
+                rx, ry = (ma/2) * r_scale, (Ma/2) * r_scale
+                local_x, local_y = rx * np.cos(theta), ry * np.sin(theta)
+                px, py = int(cx + local_x * cos_a - local_y * sin_a), int(cy + local_x * sin_a + local_y * cos_a)
                 
-                if not samples:
-                    detected_bits.append(0)
-                    continue
-                    
-                avg_val = sum(samples) / len(samples)
-                # If avg_val is significantly different from the local background, it's a dot
-                # For light dots on dark (Invert=False), we look for high values
-                detected_bits.append(1 if avg_val > 160 else 0)
-                    
-        if len(detected_bits) != 43:
-            return None
+                if 0 <= px < gray.shape[1] and 0 <= py < gray.shape[0]:
+                    if gray[py, px] > 160:
+                        val += (2**i) # b0 + 2*b1 + 4*b2
             
-        # Step 3: Pattern Matching with Hamming Distance
-        bits_tuple = tuple(detected_bits)
-        best_id = -1
-        best_dist = self.hamming_dist + 1
+            sectors_symbols.append(val - 1 if val > 0 else -1)
         
-        # Fast path: exact match
-        for shift in range(43):
-            shifted = bits_tuple[shift:] + bits_tuple[:shift]
-            if shifted in self.codebook:
+        if len([s for s in sectors_symbols if s != -1]) < 10: return None
+            
+        current_pattern = np.array(sectors_symbols, dtype=np.int8)
+        
+        # Fast Vectorized Matching
+        for shift in range(num_sectors):
+            shifted = np.roll(current_pattern, -shift)
+            
+            # Exact match (Dict lookup is O(1))
+            shifted_tuple = tuple(shifted.tolist())
+            if shifted_tuple in self.exact_codebook:
                 return {
-                    'id': self.codebook[shifted],
+                    'id': self.exact_codebook[shifted_tuple],
                     'center': (int(cx), int(cy)),
                     'corners': self._get_ellipse_corners(ellipse)
                 }
-        
-        # Slow path: Hamming distance (only if no exact match and hamming_dist > 0)
-        if self.hamming_dist > 0:
-            for shift in range(43):
-                shifted = np.array(bits_tuple[shift:] + bits_tuple[:shift])
-                for code_bits, tid in self.codebook.items():
-                    dist = np.count_nonzero(shifted != code_bits)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_id = tid
-                        if dist == 0: break
-                if best_dist == 0: break
-                        
-        if best_id != -1 and best_dist <= self.hamming_dist:
-            return {
-                'id': best_id,
-                'center': (int(cx), int(cy)),
-                'corners': self._get_ellipse_corners(ellipse)
-            }
-                
+            
+            # Fuzzy match (Vectorized NumPy is O(N))
+            if self.hamming_dist > 0:
+                # Hamming distance: count where elements are NOT equal
+                # Only check if shifted has no -1s for speed, or handle -1s
+                mismatches = np.sum(self.codes_matrix != shifted, axis=1)
+                best_match_idx = np.argmin(mismatches)
+                if mismatches[best_match_idx] <= self.hamming_dist:
+                    return {
+                        'id': int(self.ids_vector[best_match_idx]),
+                        'center': (int(cx), int(cy)),
+                        'corners': self._get_ellipse_corners(ellipse)
+                    }
         return None
 
     def _get_ellipse_corners(self, ellipse):
