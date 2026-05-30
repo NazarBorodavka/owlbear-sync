@@ -11,55 +11,133 @@ from flask_httpauth import HTTPBasicAuth
 import json
 import queue
 import collections
-try:
+import importlib
+import multiprocessing as mp
+
+# STag Support
+if importlib.util.find_spec("stag") is not None:
     import stag
-    STAG_AVAILABLE = hasattr(stag, 'detectMarkers')
-except ImportError:
+    STAG_AVAILABLE = True
+else:
     STAG_AVAILABLE = False
 
-# AprilTag Support
+# AprilTag Support: prefer pupil_apriltags if available, otherwise try the 'apriltag' package
+APRILTAG_AVAILABLE = False
+APRILTAG_BACKEND = None
 try:
-    import apriltag
+    # pupil_apriltags provides an AprilTagDetector class
+    from pupil_apriltags import Detector as AprilTagDetector
     APRILTAG_AVAILABLE = True
-except ImportError:
+    APRILTAG_BACKEND = "pupil_apriltags"
+except Exception:
     try:
-        from pupil_apriltags import Detector as AprilTagDetector
+        import apriltag as apriltag_lib
         APRILTAG_AVAILABLE = True
-    except ImportError:
+        APRILTAG_BACKEND = "apriltag"
+    except Exception:
         APRILTAG_AVAILABLE = False
+        APRILTAG_BACKEND = None
 
-# RuneTag Support (Lightweight Custom CV Implementation)
-try:
-    from runetag_cv import RuneTagDetector
-    RUNETAG_AVAILABLE = True
-except ImportError:
-    RUNETAG_AVAILABLE = False
+# Multiprocessing-based Apriltag worker to isolate native crashes in C-extensions
+apriltag_task_queue = None
+apriltag_result_queue = None
+apriltag_proc = None
 
-print(f"--- STag Detection Support: {'ENABLED' if STAG_AVAILABLE else 'DISABLED'} ---")
-print(f"--- RuneTag-CV Support: {'ENABLED' if RUNETAG_AVAILABLE else 'DISABLED'} ---")
+def apriltag_worker_main(task_q, result_q, backend, family):
+    """Worker process entrypoint: constructs its own detector and processes frames."""
+    try:
+        if backend == "pupil_apriltags":
+            from pupil_apriltags import Detector as AprilTagDetector
+            detector = AprilTagDetector(families=family)
+        else:
+            import apriltag as apriltag_lib
+            detector = apriltag_lib.Detector(apriltag_lib.DetectorOptions(families=family))
+    except Exception as e:
+        result_q.put({'error': f'worker_init_error: {e}'})
+        return
 
-# FFMPEG timeout, force TCP, and disable buffering for lowest latency
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;5000000|rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
-# Suppress FFMPEG decoding spam
-os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
+    while True:
+        try:
+            img = task_q.get()
+            if img is None:
+                break
+            # Ensure contiguous uint8
+            import numpy as _np
+            try:
+                img = _np.ascontiguousarray(img, dtype=_np.uint8)
+            except Exception:
+                img = _np.array(img, dtype=_np.uint8)
+            try:
+                results = detector.detect(img)
+                out = []
+                for r in results:
+                    rid = int(getattr(r, 'tag_id', getattr(r, 'id', -1)))
+                    center = [float(r.center[0]), float(r.center[1])] if hasattr(r, 'center') else [0.0, 0.0]
+                    corners = []
+                    if hasattr(r, 'corners'):
+                        for c in r.corners:
+                            corners.append([float(c[0]), float(c[1])])
+                    out.append({'id': rid, 'center': center, 'corners': corners, 'decision_margin': getattr(r, 'decision_margin', None)})
+                result_q.put({'results': out})
+            except Exception as e:
+                result_q.put({'error': str(e)})
+        except EOFError:
+            break
+        except Exception:
+            # Protect worker from crashing silently
+            import traceback
+            result_q.put({'error': 'worker_crash'})
+            traceback.print_exc()
+            break
 
-app = Flask(__name__)
-# Suppress werkzeug logging for cleaner terminal output
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
+def start_apriltag_worker():
+    global apriltag_task_queue, apriltag_result_queue, apriltag_proc
+    if apriltag_proc is not None and apriltag_proc.is_alive():
+        return True
+    ctx = mp.get_context('spawn')
+    apriltag_task_queue = ctx.Queue(maxsize=2)
+    apriltag_result_queue = ctx.Queue(maxsize=2)
+    apriltag_proc = ctx.Process(target=apriltag_worker_main, args=(apriltag_task_queue, apriltag_result_queue, APRILTAG_BACKEND, apriltag_family), daemon=True)
+    apriltag_proc.start()
+    return True
 
-auth = HTTPBasicAuth()
+def stop_apriltag_worker():
+    global apriltag_task_queue, apriltag_result_queue, apriltag_proc
+    try:
+        if apriltag_task_queue is not None:
+            try:
+                apriltag_task_queue.put_nowait(None)
+            except Exception:
+                pass
+        if apriltag_proc is not None:
+            apriltag_proc.terminate()
+            apriltag_proc.join(timeout=1)
+    finally:
+        apriltag_task_queue = None
+        apriltag_result_queue = None
+        apriltag_proc = None
 
-# Default credentials (can be changed in UI/config.json)
-USER_DATA = {
-    "admin": "admin"
-}
-
-@auth.verify_password
-def verify_password(username, password):
-    if username in USER_DATA and USER_DATA[username] == password:
-        return username
-    return None
+def detect_apriltags_via_worker(img, timeout=0.5):
+    """Send image to worker and wait for results. Returns list of dicts or raises Exception."""
+    global apriltag_task_queue, apriltag_result_queue
+    if apriltag_proc is None or (apriltag_proc is not None and not apriltag_proc.is_alive()):
+        started = start_apriltag_worker()
+        if not started:
+            raise RuntimeError('could not start apriltag worker')
+    try:
+        # Put the image (pickleable numpy array)
+        apriltag_task_queue.put(img, timeout=0.2)
+        res = apriltag_result_queue.get(timeout=timeout)
+        if 'error' in res:
+            raise RuntimeError(res['error'])
+        return res.get('results', [])
+    except Exception as e:
+        # If anything goes wrong, stop the worker to avoid repeated faults
+        try:
+            stop_apriltag_worker()
+        except Exception:
+            pass
+        raise
 
 class IPCameraCapture:
     def __init__(self, url):
@@ -101,44 +179,53 @@ class IPCameraCapture:
         self.is_running = False
         self.cap.release()
 
+# Initialize Flask app
+app = Flask(__name__, template_folder='templates', static_folder=None)
+app.config['JSON_SORT_KEYS'] = False
+
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# Simple HTTP Basic Auth (used by route decorators)
+auth = HTTPBasicAuth()
+# Default user store (can be overridden by config.json on disk)
+USER_DATA = {"admin": "admin"}
+
+
+@auth.verify_password
+def verify_password(username, password):
+    """Verify username/password against USER_DATA.
+
+    Returns True when credentials match, False otherwise.
+    The stored passwords are plain-text here for simplicity; consider
+    switching to hashed passwords for production.
+    """
+    if not username or not password:
+        return False
+    expected = USER_DATA.get(username)
+    return expected is not None and expected == password
 
 # State variables
 camera_url = "" # IP camera URL
 cap = None
 is_running = False
-runetag_engine = None
 CONFIG_FILE = "config.json"
-runetag_min_score = 0.3
-runetag_detect_scale = 1.0
-runetag_invert = False
-runetag_precision = False
-runetag_show_rois = False
-runetag_adaptive_block = 31
-runetag_adaptive_C = 3
-runetag_min_dots = 15
-last_runetag_count = -1
+
 
 def load_config_from_disk():
-    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision, runetag_show_rois
-    global runetag_adaptive_block, runetag_adaptive_C, runetag_min_dots
-    
+    global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
+    global hough_param1, hough_param2, hough_min_radius, hough_max_radius
+    global aruco_min_perimeter, aruco_adaptive_thresh_min, auto_blank, detection_mode
+    global apriltag_family, apriltag_decision_margin, stag_error_correction, stag_roi_padding
+    global token_aliases, manual_blank
+
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:
                 c = json.load(f)
-                runetag_hamming_dist = int(c.get('runetag_hamming_dist', 4))
-                runetag_min_score = float(c.get('runetag_min_score', 0.3))
-                runetag_detect_scale = float(c.get('runetag_detect_scale', 0.5))
-                runetag_invert = c.get('runetag_invert', False)
-                runetag_precision = c.get('runetag_precision', False)
-                runetag_show_rois = c.get('runetag_show_rois', False)
-                runetag_adaptive_block = int(c.get('runetag_adaptive_block', 31))
-                runetag_adaptive_C = int(c.get('runetag_adaptive_C', 3))
-                runetag_min_dots = int(c.get('runetag_min_dots', 15))
-                apriltag_family = c.get('apriltag_family', 'tag36h11')
-                last_runetag_hamming_dist = runetag_hamming_dist
+                apriltag_family = 'tag16h5'
                 apriltag_decision_margin = float(c.get('apriltag_decision_margin', 30.0))
+                stag_error_correction = int(c.get('stag_error_correction', 5))
+                stag_roi_padding = int(c.get('stag_roi_padding', 40))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -162,7 +249,6 @@ def load_config_from_disk():
             print(f"Error loading config: {e}")
 
 def save_config_to_disk():
-    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision, runetag_show_rois
     c = {
         'distortion_k1': distortion_k1, 'zoom_level': zoom_level, 'offset_x': offset_x, 'offset_y': offset_y,
         'rotation': rotation, 'brightness': brightness, 'contrast': contrast, 'exposure': exposure,
@@ -171,19 +257,10 @@ def save_config_to_disk():
         'aruco_min_perimeter': aruco_min_perimeter, 'aruco_adaptive_thresh_min': aruco_adaptive_thresh_min,
         'auto_blank': auto_blank,
         'detection_mode': detection_mode,
-        'stag_error_correction': stag_error_correction,
-        'stag_roi_padding': stag_roi_padding,
-        'runetag_hamming_dist': runetag_hamming_dist,
-        'runetag_min_score': runetag_min_score,
-        'runetag_detect_scale': runetag_detect_scale,
-        'runetag_invert': runetag_invert,
-        'runetag_precision': runetag_precision,
-        'runetag_show_rois': runetag_show_rois,
-        'runetag_adaptive_block': runetag_adaptive_block,
-        'runetag_adaptive_C': runetag_adaptive_C,
-        'runetag_min_dots': runetag_min_dots,
         'apriltag_family': apriltag_family,
         'apriltag_decision_margin': apriltag_decision_margin,
+        'stag_error_correction': stag_error_correction,
+        'stag_roi_padding': stag_roi_padding,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin")
     }
@@ -221,16 +298,14 @@ aruco_poly_approx = 0.05
 auto_blank = False # Toggle for anti-reflection mode
 flip_x = False
 flip_y = False
-detection_mode = 'aruco' # 'aruco', 'stag', or 'runetag'
-stag_error_correction = 3
-stag_roi_padding = 20
-runetag_hamming_dist = 4
-apriltag_family = 'tag36h11'
+detection_mode = 'aruco' # 'aruco', 'apriltag', or 'stag'
+
+apriltag_family = 'tag16h5'
 manual_blank = False
+stag_error_correction = 5
+stag_roi_padding = 40
 
 # Global Detection Engines
-runetag_engine = None
-runetag_load_failed_time = 0
 apriltag_detector = None
 
 load_config_from_disk()
@@ -257,9 +332,10 @@ def get_video_stream():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, detection_mode
-    global RUNETAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, runetag_invert, runetag_precision, runetag_engine
-    global src_pts, corner_idx, homography_matrix, auto_blank, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist, runetag_show_rois
-    
+    global STAG_AVAILABLE, APRILTAG_AVAILABLE
+    global src_pts, corner_idx, homography_matrix, auto_blank, manual_blank
+    global stag_error_correction, stag_roi_padding, apriltag_family, apriltag_decision_margin
+
     fail_count = 0
     
     # 20 FPS target
@@ -357,16 +433,15 @@ def get_video_stream():
             gray = cv2.bitwise_and(gray, mask)
         
         # --- Optimized Circle Detection (Downsampled) ---
-        # Skip HoughCircles for global detection modes to save significant CPU
+        # Always run disk detection so AprilTag mode can be constrained to disks.
         circles = None
-        if detection_mode not in ['runetag', 'apriltag', 'stag']:
-            # Resize to 50% for circle search - much faster and reduces noise
-            small_gray = cv2.resize(gray, (w // 2, h // 2))
-            blurred = cv2.GaussianBlur(small_gray, (5, 5), 1.5)
-            
-            circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=hough_dp, minDist=hough_min_dist // 2,
-                                    param1=hough_param1, param2=hough_param2, 
-                                    minRadius=hough_min_radius // 2, maxRadius=hough_max_radius // 2)
+        # Resize to 50% for circle search - much faster and reduces noise
+        small_gray = cv2.resize(gray, (w // 2, h // 2))
+        blurred = cv2.GaussianBlur(small_gray, (5, 5), 1.5)
+
+        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=hough_dp, minDist=hough_min_dist // 2,
+                                param1=hough_param1, param2=hough_param2,
+                                minRadius=hough_min_radius // 2, maxRadius=hough_max_radius // 2)
                                     
         detected_circles = []
         if circles is not None:
@@ -390,149 +465,131 @@ def get_video_stream():
                     if show_overlay:
                         cv2.circle(frame, (x, y), r, (0, 255, 255), 2)
 
+        # Collect AprilTag detections per disk, then resolve to a single token per tag id.
+        apriltag_candidates = {} if detection_mode == 'apriltag' else None
+
         # --- ArUco setup ---
-        aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        aruco_params = cv2.aruco.DetectorParameters()
-        aruco_params.adaptiveThreshWinSizeMin = int(aruco_adaptive_thresh_min)
-        aruco_params.minMarkerPerimeterRate = float(aruco_min_perimeter)
-        
-        detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
+        detector = None
+        if detection_mode == 'aruco':
+            aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+            aruco_params = cv2.aruco.DetectorParameters()
+            aruco_params.adaptiveThreshWinSizeMin = int(aruco_adaptive_thresh_min)
+            aruco_params.minMarkerPerimeterRate = float(aruco_min_perimeter)
+            detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
         
         markers = {}
         # We now look for markers ONLY inside detected circles to avoid map noise
         for (circ_x, circ_y, circ_r) in detected_circles:
             # Crop a small area around the disk
-            # STag/ArUco context padding
-            pad = stag_roi_padding if detection_mode == 'stag' else 10
+            # Increase padding for STag to avoid clipping the marker border
+            pad = stag_roi_padding if detection_mode == 'stag' else 40
             y1, y2 = max(0, circ_y - circ_r - pad), min(h, circ_y + circ_r + pad)
             x1, x2 = max(0, circ_x - circ_r - pad), min(w, circ_x + circ_r + pad)
-            
+
             roi = gray[y1:y2, x1:x2]
-            if roi.size < 100: continue # Too small to process
-            
+            if roi.size < 100:
+                continue  # Too small to process
+
             # Use enhanced ROI for all modes for consistency
             roi_enhanced = cv2.equalizeHist(roi)
-            
+
             try:
-                # Use original ROI for first pass, enhanced for second
-                if detection_mode == 'stag' and STAG_AVAILABLE:
-                    # STag is now handled globally below for better reliability
-                    pass
-                elif detection_mode == 'runetag' and DEEPTAG_AVAILABLE:
-                    # RuneTag is now handled globally below for better reliability
-                    pass
-                elif detection_mode == 'stag' and not STAG_AVAILABLE:
-                    corners, ids, _ = detector.detectMarkers(roi_enhanced)
+                if detection_mode == 'apriltag':
+                    # Restrict AprilTag detection to the disk ROI and keep the token centered on the disk center.
+                    if not APRILTAG_AVAILABLE:
+                        continue
+                    try:
+                        img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
+                        results = detect_apriltags_via_worker(img, timeout=0.35)
+                    except Exception as e:
+                        print(f"AprilTag worker error: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        APRILTAG_AVAILABLE = False
+                        results = []
+
+                    if results:
+                        # Pick the most confident detection in this disk.
+                        def _score(r):
+                            dm = r.get('decision_margin')
+                            return float(dm) if dm is not None else -1.0
+
+                        best = max(results, key=_score)
+                        best_dm = best.get('decision_margin', None)
+                        if best_dm is None or best_dm >= apriltag_decision_margin:
+                            rid = int(best.get('id', -1))
+                            if rid >= 0:
+                                apriltag_candidates.setdefault(rid, []).append({
+                                    "center": (circ_x, circ_y),
+                                    "decision_margin": float(best_dm) if best_dm is not None else -1.0,
+                                })
                 else:
+                    if detector is None:
+                        continue
                     corners, ids, _ = detector.detectMarkers(roi_enhanced)
-                
-                if ids is not None and len(ids) > 0:
-                    for i, m_id in enumerate(ids.flatten()):
-                        mid_int = int(m_id)
-                        markers[mid_int] = (circ_x, circ_y)
-                        
-                        if show_overlay and corners is not None and i < len(corners):
-                            try:
-                                c = corners[i]
-                                if isinstance(c, np.ndarray) and c.size > 0:
-                                    if c.ndim == 3: c = c[0]
-                                    if c.ndim == 2 and c.shape[0] == 4:
-                                        c = c.copy()
-                                        c[:, 0] += x1
-                                        c[:, 1] += y1
-                                        cv2.polylines(frame, [np.int32(c)], True, (255, 0, 255), 2)
-                            except: pass 
-                        break 
+
+                    if ids is not None and len(ids) > 0:
+                        for i, m_id in enumerate(ids.flatten()):
+                            mid_int = int(m_id)
+                            markers[mid_int] = (circ_x, circ_y)
+
+                            if show_overlay and corners is not None and i < len(corners):
+                                try:
+                                    c = corners[i]
+                                    if isinstance(c, np.ndarray) and c.size > 0:
+                                        if c.ndim == 3:
+                                            c = c[0]
+                                        if c.ndim == 2 and c.shape[0] == 4:
+                                            c = c.copy()
+                                            c[:, 0] += x1
+                                            c[:, 1] += y1
+                                            cv2.polylines(frame, [np.int32(c)], True, (255, 0, 255), 2)
+                                except Exception:
+                                    pass
+                            break
             except Exception as e:
+                print(f"ERROR inside circle loop: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
 
-        # --- Global Detection Passes (for modes that don't rely on Hough Circles) ---
+        if detection_mode == 'apriltag' and apriltag_candidates:
+            if not hasattr(get_video_stream, "tracked_tokens"):
+                get_video_stream.tracked_tokens = {}
+
+            for rid, candidates in apriltag_candidates.items():
+                prev = get_video_stream.tracked_tokens.get(f"Marker_{rid}")
+
+                def _cand_score(c):
+                    dm = c.get('decision_margin', -1.0)
+                    if prev is None:
+                        return dm
+                    cx, cy = c['center']
+                    dist = float(np.hypot(prev["x"] - cx, prev["y"] - cy))
+                    # Prefer confidence, but bias toward prior position to avoid jitter when multiple disks are nearby.
+                    return dm - (dist * 0.01)
+
+                best = max(candidates, key=_cand_score)
+                markers[rid] = best['center']
+
         if detection_mode == 'stag' and STAG_AVAILABLE:
             try:
-                # STag is natively circular and very fast, so we can run it on the whole frame
-                (corners, ids, rejected) = stag.detectMarkers(gray, 11, stag_error_correction)
-                if ids is not None and len(ids) > 0:
+                try:
+                    (corners, ids, rejected_corners) = stag.detectMarkers(gray, 21, errorCorrection=stag_error_correction)
+                except TypeError:
+                    (corners, ids, rejected_corners) = stag.detectMarkers(gray, 21)
+                
+                if ids is not None:
                     for i, m_id in enumerate(ids.flatten()):
-                        mid = int(m_id)
                         c = corners[i]
                         if c.ndim == 3: c = c[0]
-                        center_x = int(np.mean(c[:, 0]))
-                        center_y = int(np.mean(c[:, 1]))
-                        markers[mid] = (center_x, center_y)
+                        cx = int(np.mean(c[:, 0]))
+                        cy = int(np.mean(c[:, 1]))
+                        markers[int(m_id)] = (cx, cy)
                         if show_overlay:
-                            cv2.polylines(frame, [np.int32(c)], True, (0, 255, 255), 2)
-                            cv2.putText(frame, f"ID: {mid}", (center_x, center_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                            cv2.polylines(frame, [np.int32(c)], True, (255, 165, 0), 2)
             except Exception as e:
                 print(f"STag Detection Error: {e}")
-
-        elif detection_mode == 'runetag' and RUNETAG_AVAILABLE:
-            global runetag_engine
-            if runetag_engine is None:
-                try:
-                    codebook_path = os.path.join(os.path.dirname(__file__), 'codebooks', 'runetag_codebook.txt')
-                    runetag_engine = RuneTagDetector(codebook_path, hamming_dist=runetag_hamming_dist)
-                except Exception as e:
-                    print(f"RuneTag-CV Init Error: {e}")
-                    RUNETAG_AVAILABLE = False
-            
-            if runetag_engine:
-                try:
-                    # Run lightweight CV detection on the RAW frame for better accuracy
-                    raw_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    tags = runetag_engine.detect(raw_gray, invert=runetag_invert, 
-                                                min_score=runetag_min_score, 
-                                                detect_scale=runetag_detect_scale,
-                                                adaptive_block=runetag_adaptive_block,
-                                                adaptive_C=runetag_adaptive_C,
-                                                min_dots=runetag_min_dots)
-                    
-                    if runetag_show_rois:
-                        for tag in tags:
-                            pts = np.array(tag['corners'], np.int32).reshape((-1, 1, 2))
-                            cv2.polylines(frame, [pts], True, (0, 255, 255), 2)
-
-                    for tag in tags:
-                        token_id = int(tag['id'])
-                        center_x, center_y = tag['center']
-                        markers[token_id] = (center_x, center_y)
-                        
-                        if show_overlay:
-                            cv2.putText(frame, f"ID: {token_id}", (center_x, center_y), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
-                except Exception as e:
-                    print(f"RuneTag-CV Detection Error: {e}")
-
-        elif detection_mode == 'apriltag' and APRILTAG_AVAILABLE:
-            global apriltag_detector
-            if apriltag_detector is None:
-                try:
-                    # Try pupil_apriltags first as it's faster
-                    apriltag_detector = AprilTagDetector(families=apriltag_family)
-                except:
-                    try:
-                        apriltag_detector = apriltag.Detector(apriltag.DetectorOptions(families=apriltag_family))
-                    except:
-                        APRILTAG_AVAILABLE = False
-            
-            if apriltag_detector:
-                try:
-                    results = []
-                    if hasattr(apriltag_detector, 'detect'): # pupil_apriltags
-                        results = apriltag_detector.detect(gray)
-                    else: # basic apriltag
-                        results = apriltag_detector.detect(gray)
-                    
-                    for r in results:
-                        # Filter by decision margin to reduce false positives
-                        if hasattr(r, 'decision_margin') and r.decision_margin < apriltag_decision_margin:
-                            continue
-                        
-                        markers[r.tag_id] = (int(r.center[0]), int(r.center[1]))
-                        if show_overlay:
-                            cv2.polylines(frame, [np.int32(r.corners)], True, (0, 255, 0), 2)
-                            cv2.putText(frame, f"ID: {r.tag_id}", (int(r.center[0]), int(r.center[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                except Exception as e:
-                    print(f"AprilTag Detection Error: {e}")
 
         # --- Temporal & ArUco Fusion ---
         detected_tokens = []
@@ -713,13 +770,6 @@ def get_video_stream():
                 if corner_idx == 4 and i == 3:
                     cv2.line(frame, (int(src_pts[3][0]), int(src_pts[3][1])), (int(src_pts[0][0]), int(src_pts[0][1])), (255, 0, 0), 2)
                 
-            if detection_mode == 'runetag' and runetag_show_rois and RUNETAG_AVAILABLE and runetag_engine is not None:
-                try:
-                    # Drawing logic for RuneTag ROIs is handled by the detected tags' corners
-                    pass
-                except:
-                    pass
-
             with frame_lock:
                 current_frame = frame.copy()
             
@@ -817,40 +867,32 @@ def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
-    global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank, runetag_hamming_dist
-    global RUNETAG_AVAILABLE, STAG_AVAILABLE, APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin
-    global runetag_min_score, runetag_detect_scale, runetag_invert, runetag_precision, runetag_show_rois
-    global apriltag_detector
-    
+    global camera_url, detection_mode, manual_blank, flip_x, flip_y
+    global STAG_AVAILABLE, APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin
+    global apriltag_detector, stag_error_correction, stag_roi_padding
+
     data = request.json
     if 'camera_url' in data:
         camera_url = data['camera_url']
     if 'detection_mode' in data:
+        old_mode = detection_mode
         detection_mode = data['detection_mode']
+        if old_mode != detection_mode:
+            print(f"[API] Switching detection mode: {old_mode} -> {detection_mode}")
     if 'apriltag_decision_margin' in data:
-        apriltag_decision_margin = float(data['apriltag_decision_margin'])
-    if 'runetag_min_score' in data:
-        runetag_min_score = float(data['runetag_min_score'])
-    if 'runetag_detect_scale' in data:
-        runetag_detect_scale = float(data['runetag_detect_scale'])
-    if 'runetag_invert' in data:
-        runetag_invert = bool(data['runetag_invert'])
-    if 'runetag_precision' in data:
-        runetag_precision = bool(data['runetag_precision'])
-    if 'runetag_show_rois' in data:
-        runetag_show_rois = bool(data['runetag_show_rois'])
-    if 'apriltag_family' in data and data['apriltag_family'] != apriltag_family:
-        apriltag_family = data['apriltag_family']
-        apriltag_detector = None # Reset so it re-initializes with new family
+        try:
+            val = float(data['apriltag_decision_margin'])
+        except Exception:
+            val = apriltag_decision_margin
+        # Clamp to reasonable range to avoid pathological values that may destabilize native detectors
+        apriltag_decision_margin = max(0.0, min(100.0, val))
+    if 'apriltag_family' in data:
+        apriltag_family = 'tag16h5'
+        apriltag_detector = None
     if 'stag_error_correction' in data:
         stag_error_correction = int(data['stag_error_correction'])
     if 'stag_roi_padding' in data:
         stag_roi_padding = int(data['stag_roi_padding'])
-    if 'runetag_hamming_dist' in data:
-        new_hd = int(data['runetag_hamming_dist'])
-        if new_hd != runetag_hamming_dist:
-            runetag_hamming_dist = new_hd
-            runetag_engine = None # Force re-init with new hamming dist
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
     if 'zoom' in data: zoom_level = float(data['zoom'])
     if 'offset_x' in data: offset_x = float(data['offset_x'])
@@ -862,11 +904,6 @@ def update_settings():
     if 'show_overlay' in data: show_overlay = bool(data['show_overlay'])
     if 'auto_blank' in data: auto_blank = bool(data['auto_blank'])
     if 'manual_blank' in data: manual_blank = bool(data['manual_blank'])
-    if 'runetag_invert' in data: runetag_invert = bool(data['runetag_invert'])
-    if 'runetag_precision' in data: runetag_precision = bool(data['runetag_precision'])
-    if 'runetag_show_rois' in data: runetag_show_rois = bool(data['runetag_show_rois'])
-    if 'runetag_min_score' in data: runetag_min_score = float(data['runetag_min_score'])
-    if 'runetag_detect_scale' in data: runetag_detect_scale = float(data['runetag_detect_scale'])
     if 'flip_x' in data: flip_x = bool(data['flip_x'])
     if 'flip_y' in data: flip_y = bool(data['flip_y'])
     
@@ -884,10 +921,12 @@ def update_settings():
     if 'aruco_poly_approx' in data: aruco_poly_approx = float(data['aruco_poly_approx'])
     if 'auto_blank' in data: auto_blank = bool(data['auto_blank'])
     
+
     save_config_to_disk()
     global settings_dirty
     settings_dirty = True
     return jsonify({"success": True})
+
 
 @app.route('/api/token/alias', methods=['POST'])
 def set_token_alias():

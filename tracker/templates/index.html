@@ -517,12 +517,11 @@
                     <div style="display: flex; gap: 10px; margin-top: 10px;">
                         <button id="btn_mode_aruco" onclick="setDetectionMode('aruco')"
                             style="background: var(--accent); flex: 1;">ArUco</button>
+
                         <button id="btn_mode_stag" onclick="setDetectionMode('stag')"
-                            style="background: rgba(255,255,255,0.05); flex: 1;">STag</button>
-                        <button id="btn_mode_runetag" onclick="setDetectionMode('runetag')"
-                            style="background: rgba(255,255,255,0.05); flex: 1;">RuneTag</button>
+                            style="background: rgba(255,255,255,0.05); flex: 1;">STag HD21</button>
                         <button id="btn_mode_apriltag" onclick="setDetectionMode('apriltag')"
-                            style="background: rgba(255,255,255,0.05); flex: 1;">AprilTag</button>
+                            style="background: rgba(255,255,255,0.05); flex: 1;">AprilTag 16h5</button>
                     </div>
 
                     <div id="settings_aruco" style="margin-top: 20px;">
@@ -544,85 +543,42 @@
                         <button class="secondary" onclick="resetArucoSettings()"
                             style="margin-top: 10px; width: 100%;">Reset ArUco</button>
                     </div>
-
-                    <div id="settings_stag" style="margin-top: 20px; display: none;">
-                        <h4>STag Settings</h4>
-                        <div class="control-group">
-                            <label><span>Error Correction</span> <input type="number" id="val_stag_error_correction"
-                                    value="3" step="1" class="val-input"
-                                    onchange="syncSlider(this, 'stag_error_correction'); updateSettings()"></label>
-                            <input type="range" id="stag_error_correction" min="0" max="5" step="1" value="3"
-                                oninput="updateVal('stag_error_correction')">
-                            <p class="help-text">Higher = more noise resilient. Max 5 for HD11.</p>
-                        </div>
-                        <div class="control-group">
-                            <label><span>Search Padding (px)</span> <input type="number" id="val_stag_roi_padding"
-                                    value="20" step="1" class="val-input"
-                                    onchange="syncSlider(this, 'stag_roi_padding'); updateSettings()"></label>
-                            <input type="range" id="stag_roi_padding" min="5" max="100" step="1" value="20"
-                                oninput="updateVal('stag_roi_padding')">
-                            <p class="help-text">Extra area around the token to search for the marker.</p>
-                        </div>
-                    </div>
-
-                    <div id="settings_runetag" style="margin-top: 20px; display: none;">
-                        <h4>RuneTag Settings</h4>
-                        <div class="control-group">
-                            <label><span>Min Score</span> <input type="number" id="val_runetag_min_score" value="0.3"
-                                    step="0.05" class="val-input"
-                                    onchange="syncSlider(this, 'runetag_min_score'); updateSettings()"></label>
-                            <input type="range" id="runetag_min_score" min="0.05" max="0.95" step="0.05" value="0.3"
-                                oninput="updateVal('runetag_min_score')">
-                            <p class="help-text">Higher means less noise but harder to detect.</p>
-                        </div>
-                        <div class="control-group">
-                            <label><span>Detection Scale</span> <input type="number" id="val_runetag_detect_scale"
-                                    value="0.5" step="0.1" class="val-input"
-                                    onchange="syncSlider(this, 'runetag_detect_scale'); updateSettings()"></label>
-                            <input type="range" id="runetag_detect_scale" min="0.1" max="1.0" step="0.1" value="0.5"
-                                oninput="updateVal('runetag_detect_scale')">
-                            <p class="help-text">Higher scale improves detection at distance but uses more CPU.</p>
-                        </div>
-                        <div class="control-group">
-                            <label><span>Hamming Dist</span> <input type="number" id="val_runetag_hamming_dist"
-                                    value="4" step="1" class="val-input"
-                                    onchange="syncSlider(this, 'runetag_hamming_dist'); updateSettings()"></label>
-                            <input type="range" id="runetag_hamming_dist" min="0" max="8" step="1" value="4"
-                                oninput="updateVal('runetag_hamming_dist')">
-                        </div>
-                        <div class="control-group" style="display: flex; gap: 10px;">
-                            <label style="flex: 1;"><input type="checkbox" id="runetag_invert"
-                                    onchange="updateSettings()"> Invert Marker</label>
-                            <label style="flex: 1;"><input type="checkbox" id="runetag_precision"
-                                    onchange="updateSettings()"> Precision Mode</label>
-                        </div>
-                        <p class="help-text">Invert for phone screens. Precision for small markers (slower).</p>
-                    </div>
-
                     <div id="settings_apriltag" style="margin-top: 20px; display: none;">
                         <h4>AprilTag Settings</h4>
                         <div class="control-group">
-                            <label><span>Decision Margin: <strong id="val_apriltag_decision_margin">30</strong></span>
-                                <input type="range" id="apriltag_decision_margin" min="0" max="150" step="5" value="30"
-                                    oninput="syncSlider(this, 'val_apriltag_decision_margin'); updateSettings()">
-                            </label>
-                            <p class="help-text">Increase this to eliminate false positives (especially for tag16h5).
-                            </p>
+                            <label><span>Decision Margin</span> <input type="number" id="val_apriltag_decision_margin"
+                                    value="30" step="5" class="val-input"
+                                    oninput="syncSlider(this, 'apriltag_decision_margin'); updateSettings()"></label>
+                            <input type="range" id="apriltag_decision_margin" min="0" max="150" step="5" value="30"
+                                oninput="updateVal('apriltag_decision_margin')">
+                            <p class="help-text">Higher values reduce false positives for tag16h5.</p>
                         </div>
                         <div class="control-group">
-                            <label><span>Tag Family</span>
-                                <select id="apriltag_family" class="val-input" onchange="updateSettings()"
-                                    style="width: 100%; margin-top: 5px;">
-                                    <option value="tag36h11">tag36h11 (Standard)</option>
-                                    <option value="tag25h9">tag25h9</option>
-                                    <option value="tag16h5">tag16h5</option>
-                                    <option value="tagCircle21h7">tagCircle21h7 (Circular)</option>
-                                    <option value="tagCircle49h12">tagCircle49h12 (Circular)</option>
-                                    <option value="tagStandard41h12">tagStandard41h12</option>
-                                    <option value="tagStandard52h13">tagStandard52h13</option>
-                                </select>
+                            <label><span>Fixed Family</span>
+                                <input type="text" id="apriltag_family_display" class="val-input" value="tag16h5"
+                                    readonly style="width: 100%; text-align: left; opacity: 0.85;">
                             </label>
-                            <p class="help-text">Select the family that matches your printed markers.</p>
+                            <p class="help-text">This build uses AprilTag 16h5 for detection.</p>
+                        </div>
+                    </div>
+
+                    <div id="settings_stag" style="margin-top: 20px; display: none;">
+                        <h4>STag Settings (HD21)</h4>
+                        <div class="control-group">
+                            <label><span>Error Correction</span> <input type="number" id="val_stag_error_correction"
+                                    value="5" step="1" class="val-input"
+                                    oninput="syncSlider(this, 'stag_error_correction'); updateSettings()"></label>
+                            <input type="range" id="stag_error_correction" min="0" max="10" step="1" value="5"
+                                oninput="updateVal('stag_error_correction')">
+                            <p class="help-text">Higher values improve robustness but can increase false positives.</p>
+                        </div>
+                        <div class="control-group">
+                            <label><span>ROI Padding</span> <input type="number" id="val_stag_roi_padding"
+                                    value="40" step="1" class="val-input"
+                                    oninput="syncSlider(this, 'stag_roi_padding'); updateSettings()"></label>
+                            <input type="range" id="stag_roi_padding" min="10" max="120" step="1" value="40"
+                                oninput="updateVal('stag_roi_padding')">
+                            <p class="help-text">Larger padding helps when the tag is near the disk edge.</p>
                         </div>
                     </div>
                 </div>
@@ -814,6 +770,20 @@
 
         function syncSlider(inputEl, sliderId) {
             document.getElementById(sliderId).value = inputEl.value;
+            if (sliderId.includes('area')) updateAreaIndicators();
+        }
+
+        function updateVal(id) {
+            const val = document.getElementById(id).value;
+            const displayEl = document.getElementById('val_' + id);
+            if (displayEl) {
+                if (displayEl.tagName === 'INPUT') displayEl.value = val;
+                else displayEl.innerText = val;
+            }
+            updateSettings();
+        }
+
+        function updateAreaIndicators() {
         }
 
         function updateSettings() {
@@ -836,15 +806,11 @@
                 hough_param2: document.getElementById('hough_param2').value,
                 aruco_min_perimeter: document.getElementById('aruco_min_perimeter').value,
                 aruco_adaptive_thresh_min: document.getElementById('aruco_adaptive_thresh_min').value,
+
+                apriltag_family: 'tag16h5',
+                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value,
                 stag_error_correction: document.getElementById('stag_error_correction').value,
-                stag_roi_padding: document.getElementById('stag_roi_padding').value,
-                runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value,
-                runetag_min_score: document.getElementById('runetag_min_score').value,
-                runetag_detect_scale: document.getElementById('runetag_detect_scale').value,
-                runetag_invert: document.getElementById('runetag_invert').checked,
-                runetag_precision: document.getElementById('runetag_precision').checked,
-                apriltag_family: document.getElementById('apriltag_family').value,
-                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value
+                stag_roi_padding: document.getElementById('stag_roi_padding').value
             };
 
             // Update UI numeric inputs
@@ -879,14 +845,14 @@
         function setDetectionMode(mode) {
             window.detection_mode = mode;
             document.getElementById('btn_mode_aruco').style.background = (mode === 'aruco' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
+
             document.getElementById('btn_mode_stag').style.background = (mode === 'stag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
-            document.getElementById('btn_mode_runetag').style.background = (mode === 'runetag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
             document.getElementById('btn_mode_apriltag').style.background = (mode === 'apriltag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
 
             // Show/Hide specific settings
             document.getElementById('settings_aruco').style.display = (mode === 'aruco' ? 'block' : 'none');
+
             document.getElementById('settings_stag').style.display = (mode === 'stag' ? 'block' : 'none');
-            document.getElementById('settings_runetag').style.display = (mode === 'runetag' ? 'block' : 'none');
             document.getElementById('settings_apriltag').style.display = (mode === 'apriltag' ? 'block' : 'none');
 
             updateSettings();
@@ -931,15 +897,11 @@
                 hough_param2: document.getElementById('hough_param2').value,
                 aruco_min_perimeter: document.getElementById('aruco_min_perimeter').value,
                 aruco_adaptive_thresh_min: document.getElementById('aruco_adaptive_thresh_min').value,
+
+                apriltag_family: 'tag16h5',
+                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value,
                 stag_error_correction: document.getElementById('stag_error_correction').value,
-                stag_roi_padding: document.getElementById('stag_roi_padding').value,
-                runetag_hamming_dist: document.getElementById('runetag_hamming_dist').value,
-                runetag_min_score: document.getElementById('runetag_min_score').value,
-                runetag_detect_scale: document.getElementById('runetag_detect_scale').value,
-                runetag_invert: document.getElementById('runetag_invert').checked,
-                runetag_precision: document.getElementById('runetag_precision').checked,
-                apriltag_family: document.getElementById('apriltag_family').value,
-                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value
+                stag_roi_padding: document.getElementById('stag_roi_padding').value
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -949,44 +911,24 @@
             if (saved) {
                 try {
                     const config = JSON.parse(saved);
-                    if (config.cameraUrl) document.getElementById('cameraUrl').value = config.cameraUrl;
-                    if (config.distortion_k1) document.getElementById('distortion_k1').value = config.distortion_k1;
-                    if (config.zoom) document.getElementById('zoom').value = config.zoom;
-                    if (config.offset_x) document.getElementById('offset_x').value = config.offset_x;
-                    if (config.offset_y) document.getElementById('offset_y').value = config.offset_y;
-                    if (config.rotation) document.getElementById('rotation').value = config.rotation;
-                    if (config.stag_error_correction) {
-                        document.getElementById('stag_error_correction').value = config.stag_error_correction;
-                        document.getElementById('val_stag_error_correction').innerText = config.stag_error_correction;
-                    }
-                    if (config.stag_roi_padding) {
-                        document.getElementById('stag_roi_padding').value = config.stag_roi_padding;
-                        document.getElementById('val_stag_roi_padding').innerText = config.stag_roi_padding;
-                    }
-                    if (config.runetag_hamming_dist) {
-                        document.getElementById('runetag_hamming_dist').value = config.runetag_hamming_dist;
-                        document.getElementById('val_runetag_hamming_dist').innerText = config.runetag_hamming_dist;
-                    }
-                    if (config.runetag_min_score) {
-                        document.getElementById('runetag_min_score').value = config.runetag_min_score;
-                        document.getElementById('val_runetag_min_score').innerText = config.runetag_min_score;
-                    }
-                    if (config.runetag_detect_scale) {
-                        document.getElementById('runetag_detect_scale').value = config.runetag_detect_scale;
-                        document.getElementById('val_runetag_detect_scale').innerText = config.runetag_detect_scale;
-                    }
-                    if (config.runetag_invert !== undefined) {
-                        document.getElementById('runetag_invert').checked = config.runetag_invert;
-                    }
-                    if (config.runetag_precision !== undefined) {
-                        document.getElementById('runetag_precision').checked = config.runetag_precision;
-                    }
-                    if (config.apriltag_decision_margin) {
+                    if (config.cameraUrl !== undefined) document.getElementById('cameraUrl').value = config.cameraUrl;
+                    if (config.distortion_k1 !== undefined) document.getElementById('distortion_k1').value = config.distortion_k1;
+                    if (config.zoom !== undefined) document.getElementById('zoom').value = config.zoom;
+                    if (config.offset_x !== undefined) document.getElementById('offset_x').value = config.offset_x;
+                    if (config.offset_y !== undefined) document.getElementById('offset_y').value = config.offset_y;
+                    if (config.rotation !== undefined) document.getElementById('rotation').value = config.rotation;
+
+                    if (config.apriltag_decision_margin !== undefined) {
                         document.getElementById('apriltag_decision_margin').value = config.apriltag_decision_margin;
-                        document.getElementById('val_apriltag_decision_margin').innerText = config.apriltag_decision_margin;
+                        document.getElementById('val_apriltag_decision_margin').value = config.apriltag_decision_margin;
                     }
-                    if (config.apriltag_family) {
-                        document.getElementById('apriltag_family').value = config.apriltag_family;
+                    if (config.stag_error_correction !== undefined) {
+                        document.getElementById('stag_error_correction').value = config.stag_error_correction;
+                        document.getElementById('val_stag_error_correction').value = config.stag_error_correction;
+                    }
+                    if (config.stag_roi_padding !== undefined) {
+                        document.getElementById('stag_roi_padding').value = config.stag_roi_padding;
+                        document.getElementById('val_stag_roi_padding').value = config.stag_roi_padding;
                     }
 
                     if (config.detection_mode) {
@@ -1015,7 +957,10 @@
         }
 
         // Load config on page load
-        window.addEventListener('DOMContentLoaded', loadConfig);
+        window.addEventListener('DOMContentLoaded', () => {
+            loadConfig();
+            updateAreaIndicators();
+        });
 
     </script>
 </body>
