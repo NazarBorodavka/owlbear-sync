@@ -4,140 +4,19 @@ from flask import Flask, render_template, Response, request, jsonify
 from flask_socketio import SocketIO
 import threading
 import time
-import logging
 import os
-import requests
 from flask_httpauth import HTTPBasicAuth
 import json
-import queue
 import collections
-import importlib
-import multiprocessing as mp
 
-# STag Support
-if importlib.util.find_spec("stag") is not None:
-    import stag
-    STAG_AVAILABLE = True
-else:
-    STAG_AVAILABLE = False
-
-# AprilTag Support: prefer pupil_apriltags if available, otherwise try the 'apriltag' package
+# AprilTag Support: use pupil_apriltags as the single backend.
 APRILTAG_AVAILABLE = False
-APRILTAG_BACKEND = None
+apriltag_detector = None
 try:
-    # pupil_apriltags provides an AprilTagDetector class
     from pupil_apriltags import Detector as AprilTagDetector
     APRILTAG_AVAILABLE = True
-    APRILTAG_BACKEND = "pupil_apriltags"
 except Exception:
-    try:
-        import apriltag as apriltag_lib
-        APRILTAG_AVAILABLE = True
-        APRILTAG_BACKEND = "apriltag"
-    except Exception:
-        APRILTAG_AVAILABLE = False
-        APRILTAG_BACKEND = None
-
-# Multiprocessing-based Apriltag worker to isolate native crashes in C-extensions
-apriltag_task_queue = None
-apriltag_result_queue = None
-apriltag_proc = None
-
-def apriltag_worker_main(task_q, result_q, backend, family):
-    """Worker process entrypoint: constructs its own detector and processes frames."""
-    try:
-        if backend == "pupil_apriltags":
-            from pupil_apriltags import Detector as AprilTagDetector
-            detector = AprilTagDetector(families=family)
-        else:
-            import apriltag as apriltag_lib
-            detector = apriltag_lib.Detector(apriltag_lib.DetectorOptions(families=family))
-    except Exception as e:
-        result_q.put({'error': f'worker_init_error: {e}'})
-        return
-
-    while True:
-        try:
-            img = task_q.get()
-            if img is None:
-                break
-            # Ensure contiguous uint8
-            import numpy as _np
-            try:
-                img = _np.ascontiguousarray(img, dtype=_np.uint8)
-            except Exception:
-                img = _np.array(img, dtype=_np.uint8)
-            try:
-                results = detector.detect(img)
-                out = []
-                for r in results:
-                    rid = int(getattr(r, 'tag_id', getattr(r, 'id', -1)))
-                    center = [float(r.center[0]), float(r.center[1])] if hasattr(r, 'center') else [0.0, 0.0]
-                    corners = []
-                    if hasattr(r, 'corners'):
-                        for c in r.corners:
-                            corners.append([float(c[0]), float(c[1])])
-                    out.append({'id': rid, 'center': center, 'corners': corners, 'decision_margin': getattr(r, 'decision_margin', None)})
-                result_q.put({'results': out})
-            except Exception as e:
-                result_q.put({'error': str(e)})
-        except EOFError:
-            break
-        except Exception:
-            # Protect worker from crashing silently
-            import traceback
-            result_q.put({'error': 'worker_crash'})
-            traceback.print_exc()
-            break
-
-def start_apriltag_worker():
-    global apriltag_task_queue, apriltag_result_queue, apriltag_proc
-    if apriltag_proc is not None and apriltag_proc.is_alive():
-        return True
-    ctx = mp.get_context('spawn')
-    apriltag_task_queue = ctx.Queue(maxsize=2)
-    apriltag_result_queue = ctx.Queue(maxsize=2)
-    apriltag_proc = ctx.Process(target=apriltag_worker_main, args=(apriltag_task_queue, apriltag_result_queue, APRILTAG_BACKEND, apriltag_family), daemon=True)
-    apriltag_proc.start()
-    return True
-
-def stop_apriltag_worker():
-    global apriltag_task_queue, apriltag_result_queue, apriltag_proc
-    try:
-        if apriltag_task_queue is not None:
-            try:
-                apriltag_task_queue.put_nowait(None)
-            except Exception:
-                pass
-        if apriltag_proc is not None:
-            apriltag_proc.terminate()
-            apriltag_proc.join(timeout=1)
-    finally:
-        apriltag_task_queue = None
-        apriltag_result_queue = None
-        apriltag_proc = None
-
-def detect_apriltags_via_worker(img, timeout=0.5):
-    """Send image to worker and wait for results. Returns list of dicts or raises Exception."""
-    global apriltag_task_queue, apriltag_result_queue
-    if apriltag_proc is None or (apriltag_proc is not None and not apriltag_proc.is_alive()):
-        started = start_apriltag_worker()
-        if not started:
-            raise RuntimeError('could not start apriltag worker')
-    try:
-        # Put the image (pickleable numpy array)
-        apriltag_task_queue.put(img, timeout=0.2)
-        res = apriltag_result_queue.get(timeout=timeout)
-        if 'error' in res:
-            raise RuntimeError(res['error'])
-        return res.get('results', [])
-    except Exception as e:
-        # If anything goes wrong, stop the worker to avoid repeated faults
-        try:
-            stop_apriltag_worker()
-        except Exception:
-            pass
-        raise
+    APRILTAG_AVAILABLE = False
 
 class IPCameraCapture:
     def __init__(self, url):
@@ -216,8 +95,8 @@ LEGACY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global aruco_min_perimeter, aruco_adaptive_thresh_min, auto_blank, detection_mode
-    global apriltag_family, apriltag_decision_margin, stag_error_correction, stag_roi_padding
+    global auto_blank
+    global apriltag_family, apriltag_decision_margin
     global token_aliases, manual_blank
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
 
@@ -229,8 +108,6 @@ def load_config_from_disk():
                 c = json.load(f)
                 apriltag_family = 'tag16h5'
                 apriltag_decision_margin = float(c.get('apriltag_decision_margin', 30.0))
-                stag_error_correction = int(c.get('stag_error_correction', 5))
-                stag_roi_padding = int(c.get('stag_roi_padding', 40))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -245,8 +122,6 @@ def load_config_from_disk():
                 hough_param2 = c.get('hough_param2', 45)
                 hough_min_radius = c.get('hough_min_radius', 30)
                 hough_max_radius = c.get('hough_max_radius', 40)
-                aruco_min_perimeter = c.get('aruco_min_perimeter', 0.01)
-                aruco_adaptive_thresh_min = c.get('aruco_adaptive_thresh_min', 3)
                 auto_blank = c.get('auto_blank', False)
                 token_aliases = c.get('token_aliases', {})
                 print(f"Loaded config from disk: {config_path}")
@@ -279,13 +154,9 @@ def save_config_to_disk():
         'rotation': rotation, 'brightness': brightness, 'contrast': contrast, 'exposure': exposure,
         'hough_param1': hough_param1, 'hough_param2': hough_param2,
         'hough_min_radius': hough_min_radius, 'hough_max_radius': hough_max_radius,
-        'aruco_min_perimeter': aruco_min_perimeter, 'aruco_adaptive_thresh_min': aruco_adaptive_thresh_min,
         'auto_blank': auto_blank,
-        'detection_mode': detection_mode,
         'apriltag_family': apriltag_family,
         'apriltag_decision_margin': apriltag_decision_margin,
-        'stag_error_correction': stag_error_correction,
-        'stag_roi_padding': stag_roi_padding,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin"),
         'calibration_model': calibration_model
@@ -334,23 +205,13 @@ hough_param2 = 45
 hough_min_radius = 30
 hough_max_radius = 40
 
-# ArUco Detection
-aruco_min_perimeter = 0.01
-aruco_adaptive_thresh_min = 3
-aruco_poly_approx = 0.05
 auto_blank = False # Toggle for anti-reflection mode
 flip_x = False
 flip_y = False
-# The app is AprilTag-only now
-detection_mode = 'apriltag'
 
 apriltag_family = 'tag16h5'
+apriltag_decision_margin = 30.0
 manual_blank = False
-stag_error_correction = 5
-stag_roi_padding = 40
-
-# Global Detection Engines
-apriltag_detector = None
 
 # Performance optimization: Cache for software exposure table
 exposure_table = None
@@ -394,10 +255,9 @@ def get_video_stream():
     global raw_frame_for_stream, undistorted_frame_for_stream
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, detection_mode
-    global STAG_AVAILABLE, APRILTAG_AVAILABLE
+    global APRILTAG_AVAILABLE, apriltag_detector
     global src_pts, corner_idx, homography_matrix, auto_blank, manual_blank
-    global stag_error_correction, stag_roi_padding, apriltag_family, apriltag_decision_margin
+    global apriltag_family, apriltag_decision_margin
     global camera_matrix, dist_coeffs, calibration_model
 
     fail_count = 0
@@ -467,13 +327,13 @@ def get_video_stream():
                     if model == 'standard':
                         dist = np.array(dist_coeffs, dtype=np.float64).reshape(-1, 1)
                         cam = np.array(camera_matrix, dtype=np.float64)
-                        new_cam, _ = cv2.getOptimalNewCameraMatrix(cam, dist, (w, h), 0.25, (w, h))
+                        new_cam, _ = cv2.getOptimalNewCameraMatrix(cam, dist, (w, h), 1.0, (w, h))
                         undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(cam, dist, None, new_cam, (w, h), cv2.CV_32FC1)
                     else:
                         cam = np.array(camera_matrix, dtype=np.float64)
                         dist = np.array(dist_coeffs, dtype=np.float64)
                         new_cam = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
-                            cam, dist, (w, h), np.eye(3), balance=0.25)
+                            cam, dist, (w, h), np.eye(3), balance=1.0)
                         undistort_map1, undistort_map2 = cv2.fisheye.initUndistortRectifyMap(
                             cam, dist, np.eye(3), new_cam, (w, h), cv2.CV_32FC1)
                     undistort_model = model
@@ -495,7 +355,7 @@ def get_video_stream():
                 cx, cy = w / 2, h / 2
                 tmp_cam = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
                 dist = np.array([distortion_k1, 0, 0, 0, 0], dtype=np.float32)
-                new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(tmp_cam, dist, (w, h), 0)
+                new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(tmp_cam, dist, (w, h), 1.0)
                 undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(tmp_cam, dist, None, new_camera_matrix, (w, h), cv2.CV_32FC1)
                 settings_dirty = False
             frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
@@ -569,16 +429,13 @@ def get_video_stream():
                         cv2.circle(frame, (x, y), r, (0, 255, 255), 2)
 
         # Collect AprilTag detections per disk, then resolve to a single token per tag id.
-        apriltag_candidates = {} if detection_mode == 'apriltag' else None
-
-        # AprilTag-only app: ArUco/STag code removed
+        apriltag_candidates = {}
         
         markers = {}
         # We now look for markers ONLY inside detected circles to avoid map noise
         for (circ_x, circ_y, circ_r) in detected_circles:
             # Crop a small area around the disk
-            # Increase padding for STag to avoid clipping the marker border
-            pad = stag_roi_padding if detection_mode == 'stag' else 40
+            pad = 40
             y1, y2 = max(0, circ_y - circ_r - pad), min(h, circ_y + circ_r + pad)
             x1, x2 = max(0, circ_x - circ_r - pad), min(w, circ_x + circ_r + pad)
 
@@ -590,42 +447,78 @@ def get_video_stream():
             roi_enhanced = cv2.equalizeHist(roi)
 
             try:
-                if detection_mode == 'apriltag':
-                    # Restrict AprilTag detection to the disk ROI and keep the token centered on the disk center.
-                    if not APRILTAG_AVAILABLE:
-                        continue
-                    try:
-                        img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
-                        results = detect_apriltags_via_worker(img, timeout=0.35)
-                    except Exception as e:
-                        print(f"AprilTag worker error: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        APRILTAG_AVAILABLE = False
-                        results = []
+                # Restrict AprilTag detection to the disk ROI and keep the token centered on the disk center.
+                if not APRILTAG_AVAILABLE:
+                    continue
+                try:
+                    if apriltag_detector is None:
+                        apriltag_detector = AprilTagDetector(families=apriltag_family)
+                    
+                    img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
+                    raw_results = apriltag_detector.detect(img)
+                    results = []
+                    for r in raw_results:
+                        rid = int(getattr(r, 'tag_id', getattr(r, 'id', -1)))
+                        center = [float(r.center[0]), float(r.center[1])] if hasattr(r, 'center') else [0.0, 0.0]
+                        results.append({'id': rid, 'center': center, 'decision_margin': getattr(r, 'decision_margin', None)})
+                except Exception as e:
+                    print(f"AprilTag detection error: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    results = []
 
-                    if results:
-                        # Pick the most confident detection in this disk.
-                        def _score(r):
-                            dm = r.get('decision_margin')
-                            return float(dm) if dm is not None else -1.0
+                if results:
+                    # Pick the most confident detection in this disk.
+                    def _score(r):
+                        dm = r.get('decision_margin')
+                        return float(dm) if dm is not None else -1.0
 
-                        best = max(results, key=_score)
-                        best_dm = best.get('decision_margin', None)
-                        if best_dm is None or best_dm >= apriltag_decision_margin:
-                            rid = int(best.get('id', -1))
-                            if rid >= 0:
-                                apriltag_candidates.setdefault(rid, []).append({
-                                    "center": (circ_x, circ_y),
-                                    "decision_margin": float(best_dm) if best_dm is not None else -1.0,
-                                })
+                    best = max(results, key=_score)
+                    best_dm = best.get('decision_margin', None)
+                    if best_dm is None or best_dm >= apriltag_decision_margin:
+                        rid = int(best.get('id', -1))
+                        if rid >= 0:
+                            apriltag_candidates.setdefault(rid, []).append({
+                                "center": (circ_x, circ_y),
+                                "decision_margin": float(best_dm) if best_dm is not None else -1.0,
+                            })
             except Exception as e:
                 print(f"ERROR inside circle loop: {e}")
                 import traceback
                 traceback.print_exc()
                 continue
 
-        if detection_mode == 'apriltag' and apriltag_candidates:
+        # Fallback: if no ROI-constrained candidates were found, run AprilTag on the full frame.
+        if not apriltag_candidates and APRILTAG_AVAILABLE:
+            try:
+                if apriltag_detector is None:
+                    apriltag_detector = AprilTagDetector(families=apriltag_family)
+
+                full_img = np.ascontiguousarray(gray, dtype=np.uint8)
+                raw_results = apriltag_detector.detect(full_img)
+                full_results = []
+                for r in raw_results:
+                    rid = int(getattr(r, 'tag_id', getattr(r, 'id', -1)))
+                    center = [float(r.center[0]), float(r.center[1])] if hasattr(r, 'center') else [0.0, 0.0]
+                    full_results.append({'id': rid, 'center': center, 'decision_margin': getattr(r, 'decision_margin', None)})
+            except Exception as e:
+                print(f"AprilTag full-frame fallback error: {e}")
+                full_results = []
+
+            for r in full_results:
+                dm = r.get('decision_margin', None)
+                if dm is not None and float(dm) < apriltag_decision_margin:
+                    continue
+                rid = int(r.get('id', -1))
+                center = r.get('center') or [None, None]
+                if rid < 0 or center[0] is None or center[1] is None:
+                    continue
+                apriltag_candidates.setdefault(rid, []).append({
+                    "center": (float(center[0]), float(center[1])),
+                    "decision_margin": float(dm) if dm is not None else -1.0,
+                })
+
+        if apriltag_candidates:
             if not hasattr(get_video_stream, "tracked_tokens"):
                 get_video_stream.tracked_tokens = {}
 
@@ -644,15 +537,13 @@ def get_video_stream():
                 best = max(candidates, key=_cand_score)
                 markers[rid] = best['center']
 
-        # STag support removed (AprilTag-only)
-
-        # --- Temporal & ArUco Fusion ---
+        # --- Temporal token fusion ---
         detected_tokens = []
         if not hasattr(get_video_stream, "tracked_tokens"):
             get_video_stream.tracked_tokens = {}
         matched_ids = set()
 
-        # 1. Process all detected ArUco markers (Primary source of truth)
+        # 1. Process all detected markers (primary source of truth)
         for m_id, (m_x, m_y) in markers.items():
             token_id = f"Marker_{m_id}"
             
@@ -824,9 +715,9 @@ def get_video_stream():
                     cv2.line(frame, (int(src_pts[i-1][0]), int(src_pts[i-1][1])), (int(src_pts[i][0]), int(src_pts[i][1])), (255, 0, 0), 2)
                 if corner_idx == 4 and i == 3:
                     cv2.line(frame, (int(src_pts[3][0]), int(src_pts[3][1])), (int(src_pts[0][0]), int(src_pts[0][1])), (255, 0, 0), 2)
-                
-            with frame_lock:
-                current_frame = frame.copy()
+
+        with frame_lock:
+            current_frame = frame.copy()
             
         # Throttle loop to maintain ~5 FPS target
         elapsed = time.time() - loop_start
@@ -1146,15 +1037,13 @@ def camera_calibration_status():
 def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
-    global camera_url, detection_mode, manual_blank, flip_x, flip_y
-    global STAG_AVAILABLE, APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin
-    global apriltag_detector, stag_error_correction, stag_roi_padding
+    global auto_blank, token_aliases
+    global camera_url, manual_blank, flip_x, flip_y
+    global APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin
 
     data = request.json
     if 'camera_url' in data:
         camera_url = data['camera_url']
-    # detection_mode is AprilTag-only and cannot be changed via settings
     if 'apriltag_decision_margin' in data:
         try:
             val = float(data['apriltag_decision_margin'])
@@ -1164,11 +1053,6 @@ def update_settings():
         apriltag_decision_margin = max(0.0, min(100.0, val))
     if 'apriltag_family' in data:
         apriltag_family = 'tag16h5'
-        apriltag_detector = None
-    if 'stag_error_correction' in data:
-        stag_error_correction = int(data['stag_error_correction'])
-    if 'stag_roi_padding' in data:
-        stag_roi_padding = int(data['stag_roi_padding'])
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
     if 'zoom' in data: zoom_level = float(data['zoom'])
     if 'offset_x' in data: offset_x = float(data['offset_x'])
@@ -1191,12 +1075,7 @@ def update_settings():
     if 'hough_min_radius' in data: hough_min_radius = int(data['hough_min_radius'])
     if 'hough_max_radius' in data: hough_max_radius = int(data['hough_max_radius'])
     
-    # ArUco Params
-    if 'aruco_min_perimeter' in data: aruco_min_perimeter = float(data['aruco_min_perimeter'])
-    if 'aruco_adaptive_thresh_min' in data: aruco_adaptive_thresh_min = int(data['aruco_adaptive_thresh_min'])
-    if 'aruco_poly_approx' in data: aruco_poly_approx = float(data['aruco_poly_approx'])
     if 'auto_blank' in data: auto_blank = bool(data['auto_blank'])
-    
 
     save_config_to_disk()
     global settings_dirty

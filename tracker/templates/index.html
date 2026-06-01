@@ -513,37 +513,8 @@
                 </div>
 
                 <div class="glass-panel">
-                    <h3>Marker Detection Mode</h3>
-                    <div style="display: flex; gap: 10px; margin-top: 10px;">
-                        <button id="btn_mode_aruco" onclick="setDetectionMode('aruco')"
-                            style="background: var(--accent); flex: 1;">ArUco</button>
-
-                        <button id="btn_mode_stag" onclick="setDetectionMode('stag')"
-                            style="background: rgba(255,255,255,0.05); flex: 1;">STag HD21</button>
-                        <button id="btn_mode_apriltag" onclick="setDetectionMode('apriltag')"
-                            style="background: rgba(255,255,255,0.05); flex: 1;">AprilTag 16h5</button>
-                    </div>
-
-                    <div id="settings_aruco" style="margin-top: 20px;">
-                        <h4>ArUco Settings</h4>
-                        <div class="control-group">
-                            <label><span>Min Perimeter Rate</span> <input type="number" id="val_aruco_min_perimeter"
-                                    value="0.01" step="0.005" class="val-input"
-                                    onchange="syncSlider(this, 'aruco_min_perimeter'); updateSettings()"></label>
-                            <input type="range" id="aruco_min_perimeter" min="0.001" max="0.1" step="0.001" value="0.01"
-                                oninput="updateVal('aruco_min_perimeter')">
-                        </div>
-                        <div class="control-group">
-                            <label><span>Adaptive Threshold Min</span> <input type="number"
-                                    id="val_aruco_adaptive_thresh_min" value="3" step="1" class="val-input"
-                                    onchange="syncSlider(this, 'aruco_adaptive_thresh_min'); updateSettings()"></label>
-                            <input type="range" id="aruco_adaptive_thresh_min" min="3" max="23" step="2" value="3"
-                                oninput="updateVal('aruco_adaptive_thresh_min')">
-                        </div>
-                        <button class="secondary" onclick="resetArucoSettings()"
-                            style="margin-top: 10px; width: 100%;">Reset ArUco</button>
-                    </div>
-                    <div id="settings_apriltag" style="margin-top: 20px; display: none;">
+                    <h3>AprilTag Detection</h3>
+                    <div id="settings_apriltag" style="margin-top: 10px;">
                         <h4>AprilTag Settings</h4>
                         <div class="control-group">
                             <label><span>Decision Margin</span> <input type="number" id="val_apriltag_decision_margin"
@@ -561,26 +532,6 @@
                             <p class="help-text">This build uses AprilTag 16h5 for detection.</p>
                         </div>
                     </div>
-
-                    <div id="settings_stag" style="margin-top: 20px; display: none;">
-                        <h4>STag Settings (HD21)</h4>
-                        <div class="control-group">
-                            <label><span>Error Correction</span> <input type="number" id="val_stag_error_correction"
-                                    value="5" step="1" class="val-input"
-                                    oninput="syncSlider(this, 'stag_error_correction'); updateSettings()"></label>
-                            <input type="range" id="stag_error_correction" min="0" max="10" step="1" value="5"
-                                oninput="updateVal('stag_error_correction')">
-                            <p class="help-text">Higher values improve robustness but can increase false positives.</p>
-                        </div>
-                        <div class="control-group">
-                            <label><span>ROI Padding</span> <input type="number" id="val_stag_roi_padding"
-                                    value="40" step="1" class="val-input"
-                                    oninput="syncSlider(this, 'stag_roi_padding'); updateSettings()"></label>
-                            <input type="range" id="stag_roi_padding" min="10" max="120" step="1" value="40"
-                                oninput="updateVal('stag_roi_padding')">
-                            <p class="help-text">Larger padding helps when the tag is near the disk edge.</p>
-                        </div>
-                    </div>
                 </div>
 
                 <div class="glass-panel">
@@ -595,6 +546,7 @@
 
                 <div class="glass-panel">
                     <h3>Calibration</h3>
+                    <p id="trackingStatus" class="status neutral" style="margin-bottom: 5px;">Tracking Active</p>
                     <p id="calibStatus" class="status neutral">Corners marked: 0/4</p>
                     <button class="secondary" onclick="resetCalibration()">Reset Corners</button>
                     <hr style="margin: 15px 0">
@@ -630,13 +582,13 @@
             updateTokenListUI(data.tokens);
 
             // Optionally update UI to show if blackout is active
-            const calibStatus = document.getElementById('calibStatus');
+            const trackingStatus = document.getElementById('trackingStatus');
             if (data.blank_screen) {
-                calibStatus.innerText = "BLACKOUT ACTIVE (Tokens Missing)";
-                calibStatus.style.color = "var(--error)";
+                trackingStatus.innerText = "BLACKOUT ACTIVE (Tokens Missing)";
+                trackingStatus.style.color = "var(--error)";
             } else {
-                calibStatus.innerText = "Tracking Active";
-                calibStatus.style.color = "var(--success)";
+                trackingStatus.innerText = "Tracking Active";
+                trackingStatus.style.color = "var(--success)";
             }
         });
 
@@ -810,18 +762,13 @@
                 show_overlay: document.getElementById('show_overlay').checked,
                 auto_blank: document.getElementById('auto_blank').checked,
                 manual_blank: document.getElementById('manual_blank').checked,
-                detection_mode: window.detection_mode || 'aruco',
                 hough_min_radius: document.getElementById('hough_min_radius').value,
                 hough_max_radius: document.getElementById('hough_max_radius').value,
                 hough_param1: document.getElementById('hough_param1').value,
                 hough_param2: document.getElementById('hough_param2').value,
-                aruco_min_perimeter: document.getElementById('aruco_min_perimeter').value,
-                aruco_adaptive_thresh_min: document.getElementById('aruco_adaptive_thresh_min').value,
 
                 apriltag_family: 'tag16h5',
-                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value,
-                stag_error_correction: document.getElementById('stag_error_correction').value,
-                stag_roi_padding: document.getElementById('stag_roi_padding').value
+                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value
             };
 
             // Update UI numeric inputs
@@ -853,28 +800,6 @@
             updateSettings();
         }
 
-        function setDetectionMode(mode) {
-            window.detection_mode = mode;
-            document.getElementById('btn_mode_aruco').style.background = (mode === 'aruco' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
-
-            document.getElementById('btn_mode_stag').style.background = (mode === 'stag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
-            document.getElementById('btn_mode_apriltag').style.background = (mode === 'apriltag' ? 'var(--accent)' : 'rgba(255,255,255,0.05)');
-
-            // Show/Hide specific settings
-            document.getElementById('settings_aruco').style.display = (mode === 'aruco' ? 'block' : 'none');
-
-            document.getElementById('settings_stag').style.display = (mode === 'stag' ? 'block' : 'none');
-            document.getElementById('settings_apriltag').style.display = (mode === 'apriltag' ? 'block' : 'none');
-
-            updateSettings();
-        }
-
-        function resetArucoSettings() {
-            document.getElementById('aruco_min_perimeter').value = "0.01";
-            document.getElementById('aruco_adaptive_thresh_min').value = "3";
-            updateSettings();
-        }
-
         function resetSettings() {
             document.getElementById('distortion_k1').value = "0.0";
             document.getElementById('zoom').value = "1.0";
@@ -901,18 +826,13 @@
                 show_overlay: document.getElementById('show_overlay').checked,
                 auto_blank: document.getElementById('auto_blank').checked,
                 manual_blank: document.getElementById('manual_blank').checked,
-                detection_mode: window.detection_mode || 'aruco',
                 hough_min_radius: document.getElementById('hough_min_radius').value,
                 hough_max_radius: document.getElementById('hough_max_radius').value,
                 hough_param1: document.getElementById('hough_param1').value,
                 hough_param2: document.getElementById('hough_param2').value,
-                aruco_min_perimeter: document.getElementById('aruco_min_perimeter').value,
-                aruco_adaptive_thresh_min: document.getElementById('aruco_adaptive_thresh_min').value,
 
                 apriltag_family: 'tag16h5',
-                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value,
-                stag_error_correction: document.getElementById('stag_error_correction').value,
-                stag_roi_padding: document.getElementById('stag_roi_padding').value
+                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -933,18 +853,6 @@
                         document.getElementById('apriltag_decision_margin').value = config.apriltag_decision_margin;
                         document.getElementById('val_apriltag_decision_margin').value = config.apriltag_decision_margin;
                     }
-                    if (config.stag_error_correction !== undefined) {
-                        document.getElementById('stag_error_correction').value = config.stag_error_correction;
-                        document.getElementById('val_stag_error_correction').value = config.stag_error_correction;
-                    }
-                    if (config.stag_roi_padding !== undefined) {
-                        document.getElementById('stag_roi_padding').value = config.stag_roi_padding;
-                        document.getElementById('val_stag_roi_padding').value = config.stag_roi_padding;
-                    }
-
-                    if (config.detection_mode) {
-                        setDetectionMode(config.detection_mode);
-                    }
                     if (config.exposure !== undefined) document.getElementById('exposure').value = config.exposure;
                     if (config.contrast !== undefined) document.getElementById('contrast').value = config.contrast;
                     if (config.brightness !== undefined) document.getElementById('brightness').value = config.brightness;
@@ -956,8 +864,6 @@
                     if (config.hough_max_radius !== undefined) document.getElementById('hough_max_radius').value = config.hough_max_radius;
                     if (config.hough_param1 !== undefined) document.getElementById('hough_param1').value = config.hough_param1;
                     if (config.hough_param2 !== undefined) document.getElementById('hough_param2').value = config.hough_param2;
-                    if (config.aruco_min_perimeter !== undefined) document.getElementById('aruco_min_perimeter').value = config.aruco_min_perimeter;
-                    if (config.aruco_adaptive_thresh_min !== undefined) document.getElementById('aruco_adaptive_thresh_min').value = config.aruco_adaptive_thresh_min;
 
                     // Push loaded settings to backend
                     updateSettings();
