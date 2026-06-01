@@ -597,7 +597,18 @@
                     <h3>Calibration</h3>
                     <p id="calibStatus" class="status neutral">Corners marked: 0/4</p>
                     <button class="secondary" onclick="resetCalibration()">Reset Corners</button>
-
+                    <hr style="margin: 15px 0">
+                    <h4 style="margin-top: 15px; font-size: 0.95rem; margin-bottom: 10px;">Camera Calibration (Fisheye)</h4>
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin: 0 0 12px 0;">Automatically correct lens distortion using a chessboard pattern.</p>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">
+                        <button class="secondary" onclick="caliStartCalib()" style="font-size: 0.85rem; padding: 8px;">Start Calib</button>
+                        <button class="secondary" onclick="caliAddFrame()" style="font-size: 0.85rem; padding: 8px;">Add Snapshot</button>
+                        <button class="secondary" onclick="caliFinishCalib()" style="font-size: 0.85rem; padding: 8px;">Finish</button>
+                        <button class="secondary" onclick="caliResetCalib()" style="font-size: 0.85rem; padding: 8px;">Reset</button>
+                        <button class="secondary" onclick="caliStatusCalib()" style="font-size: 0.85rem; padding: 8px;">Status</button>
+                        <button class="secondary" onclick="caliOpenDiag()" style="font-size: 0.85rem; padding: 8px;">Diagnostic</button>
+                    </div>
+                    <p id="caliMsg" class="status neutral" style="font-size: 0.8rem; margin: 8px 0 0 0; min-height: 20px;"></p>
                     <div class="info-box">
                         <strong>How to calibrate:</strong><br>
                         Click the 4 corners of the projected grid on the video. The system needs this to map the
@@ -961,6 +972,94 @@
             loadConfig();
             updateAreaIndicators();
         });
+
+        // Camera Calibration Functions
+        function caliStartCalib() {
+            const msg = document.getElementById('caliMsg');
+            fetch('/api/camera_calibration/start', { method: 'POST' })
+                .then(r => r.json())
+                .then(d => {
+                    msg.innerText = 'Calibration started. Use Add Snapshot to collect frames.';
+                    msg.className = 'status neutral';
+                })
+                .catch(e => {
+                    msg.innerText = 'Error: ' + e.message;
+                    msg.className = 'status error';
+                });
+        }
+
+        function caliAddFrame() {
+            const msg = document.getElementById('caliMsg');
+            fetch('/api/camera_calibration/add_frame', { method: 'POST' })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.found) {
+                        msg.innerText = `Snapshot added. Frames: ${d.frames_collected}`;
+                        msg.className = 'status success';
+                    } else {
+                        msg.innerText = 'Chessboard not detected in frame.';
+                        msg.className = 'status neutral';
+                    }
+                })
+                .catch(e => {
+                    msg.innerText = 'Error: ' + e.message;
+                    msg.className = 'status error';
+                });
+        }
+
+        function caliFinishCalib() {
+            const msg = document.getElementById('caliMsg');
+            msg.innerText = 'Calibrating...';
+            msg.className = 'status neutral';
+            fetch('/api/camera_calibration/finish', { method: 'POST' })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.success) {
+                        msg.innerText = `✓ Calibration complete (${d.model || 'fisheye'}, RMS=${d.rms.toFixed(3)})`;
+                        msg.className = 'status success';
+                    } else {
+                        msg.innerText = 'Calibration failed: ' + (d.error || 'unknown error');
+                        msg.className = 'status error';
+                    }
+                })
+                .catch(e => {
+                    msg.innerText = 'Error: ' + e.message;
+                    msg.className = 'status error';
+                });
+        }
+
+        function caliResetCalib() {
+            const msg = document.getElementById('caliMsg');
+            fetch('/api/camera_calibration/reset', { method: 'POST' })
+                .then(r => r.json())
+                .then(d => {
+                    msg.innerText = 'Calibration data reset.';
+                    msg.className = 'status neutral';
+                })
+                .catch(e => {
+                    msg.innerText = 'Error: ' + e.message;
+                    msg.className = 'status error';
+                });
+        }
+
+        function caliStatusCalib() {
+            const msg = document.getElementById('caliMsg');
+            fetch('/api/camera_calibration/status')
+                .then(r => r.json())
+                .then(d => {
+                    const status = d.calibrated ? '✓ Calibrated' : 'Not calibrated';
+                    msg.innerText = `${status} | Frames: ${d.frames_collected} | Mode: ${d.calib_mode ? 'Active' : 'Idle'}`;
+                    msg.className = d.calibrated ? 'status success' : 'status neutral';
+                })
+                .catch(e => {
+                    msg.innerText = 'Error: ' + e.message;
+                    msg.className = 'status error';
+                });
+        }
+
+        function caliOpenDiag() {
+            window.open('/diagnostic', '_blank');
+        }
 
     </script>
 </body>

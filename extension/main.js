@@ -29,26 +29,6 @@ document.querySelector('#app').innerHTML = `
       </div>
       <button id="test-blackout-btn" class="secondary">Test Blackout (3s)</button>
     </div>
-
-    <div class="calibration-section">
-      <h3>Camera Calibration (Fisheye)</h3>
-      <p class="subtitle">Automated calibration and diagnostic tools.</p>
-      <div class="control-row">
-        <label>API User:</label>
-        <input id="api-user" type="text" placeholder="admin" />
-        <label>Password:</label>
-        <input id="api-pass" type="password" placeholder="admin" />
-      </div>
-      <div class="control-row">
-        <button id="cal-start">Start Calibration</button>
-        <button id="cal-add">Add Snapshot</button>
-        <button id="cal-finish">Finish Calibration</button>
-        <button id="cal-reset">Reset</button>
-        <button id="cal-status">Status</button>
-        <button id="cal-diag">Open Diagnostic</button>
-      </div>
-      <div id="cal-msg" style="margin-top:8px;color:#ddd"></div>
-    </div>
   </div>
 `
 
@@ -102,100 +82,6 @@ document.getElementById('connect-btn').addEventListener('click', () => {
   connectSocketIO(url);
 });
 
-// Calibration UI helpers
-function getApiBase() {
-  let url = document.getElementById('ws-url').value || '';
-  if (!url) return '';
-  // Remove trailing slash
-  if (url.endsWith('/')) url = url.slice(0, -1);
-  return url;
-}
-
-function getAuthHeader() {
-  const u = document.getElementById('api-user').value || '';
-  const p = document.getElementById('api-pass').value || '';
-  if (!u) return {};
-  const token = btoa(`${u}:${p}`);
-  return { 'Authorization': `Basic ${token}` };
-}
-
-async function apiCall(path, method='POST') {
-  const base = getApiBase();
-  if (!base) {
-    throw new Error('Tracker URL not set');
-  }
-  const headers = Object.assign({'Content-Type': 'application/json'}, getAuthHeader());
-  const res = await fetch(base + path, { method, headers });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`HTTP ${res.status}: ${txt}`);
-  }
-  const ct = res.headers.get('content-type') || '';
-  if (ct.indexOf('application/json') !== -1) return await res.json();
-  return await res.text();
-}
-
-document.getElementById('cal-start').addEventListener('click', async () => {
-  const msg = document.getElementById('cal-msg');
-  try {
-    const r = await apiCall('/api/camera_calibration/start');
-    msg.innerText = 'Calibration started. Use Add Snapshot to collect frames.';
-  } catch (e) {
-    msg.innerText = 'Error: ' + e.message;
-  }
-});
-
-document.getElementById('cal-add').addEventListener('click', async () => {
-  const msg = document.getElementById('cal-msg');
-  try {
-    const r = await apiCall('/api/camera_calibration/add_frame');
-    if (r.found) msg.innerText = `Snapshot added. Frames collected: ${r.frames_collected}`;
-    else msg.innerText = `Chessboard not found in frame.`;
-  } catch (e) {
-    msg.innerText = 'Error: ' + e.message;
-  }
-});
-
-document.getElementById('cal-finish').addEventListener('click', async () => {
-  const msg = document.getElementById('cal-msg');
-  try {
-    const r = await apiCall('/api/camera_calibration/finish');
-    if (r.success) {
-      msg.innerText = `Calibration finished (model=${r.model || 'fisheye'}). RMS=${r.rms.toFixed(3)}`;
-    } else {
-      msg.innerText = 'Calibration failed: ' + JSON.stringify(r);
-    }
-  } catch (e) {
-    msg.innerText = 'Error: ' + e.message;
-  }
-});
-
-document.getElementById('cal-reset').addEventListener('click', async () => {
-  const msg = document.getElementById('cal-msg');
-  try {
-    const r = await apiCall('/api/camera_calibration/reset');
-    msg.innerText = 'Calibration data reset.';
-  } catch (e) {
-    msg.innerText = 'Error: ' + e.message;
-  }
-});
-
-document.getElementById('cal-status').addEventListener('click', async () => {
-  const msg = document.getElementById('cal-msg');
-  try {
-    const r = await apiCall('/api/camera_calibration/status', 'GET');
-    msg.innerText = `Calib mode=${r.calib_mode}, frames=${r.frames_collected}, calibrated=${r.calibrated}`;
-  } catch (e) {
-    msg.innerText = 'Error: ' + e.message;
-  }
-});
-
-document.getElementById('cal-diag').addEventListener('click', async () => {
-  const base = getApiBase();
-  if (!base) { document.getElementById('cal-msg').innerText = 'Tracker URL not set'; return; }
-  // open diagnostic page in a new tab
-  window.open(base + '/diagnostic', '_blank');
-});
 
 function connectSocketIO(url) {
   if (socket) socket.disconnect();
