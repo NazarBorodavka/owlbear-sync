@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir --break-system-packages -r tracker/requirements.t
 RUN python -c "import cv2; print(f'[OK] cv2 version: {cv2.__version__}')" || (echo "[ERROR] cv2 import failed" && exit 1)
 
 COPY tracker ./tracker
+COPY extension ./extension
 
 # Expose the Flask web server port
 EXPOSE 5000

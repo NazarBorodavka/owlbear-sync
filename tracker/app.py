@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from flask import Flask, render_template, Response, request, jsonify
+from flask import Flask, render_template, Response, request, jsonify, send_from_directory
 from flask_socketio import SocketIO
 import threading
 import time
@@ -61,6 +61,13 @@ class IPCameraCapture:
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates', static_folder=None)
 app.config['JSON_SORT_KEYS'] = False
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
@@ -1169,6 +1176,13 @@ def reset_tokens():
     ignored_tokens = set()
     token_aliases = {}
     return jsonify({"success": True})
+
+@app.route('/extension/<path:filename>', methods=['GET', 'OPTIONS'])
+def serve_extension(filename):
+    if request.method == 'OPTIONS':
+        return '', 200
+    ext_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'extension')
+    return send_from_directory(ext_dir, filename)
 
 if __name__ == '__main__':
     print("Starting server on port 5000...")
