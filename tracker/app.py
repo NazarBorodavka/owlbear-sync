@@ -99,7 +99,7 @@ def load_config_from_disk():
     global apriltag_family, apriltag_decision_margin
     global token_aliases, manual_blank
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
-
+    global src_pts, corner_idx, homography_matrix
     for config_path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
         if not os.path.exists(config_path):
             continue
@@ -142,6 +142,21 @@ def load_config_from_disk():
                         camera_matrix = None
                         dist_coeffs = None
                         calibration_model = None
+                
+                # Load corner calibration
+                if 'src_pts' in c and 'corner_idx' in c:
+                    loaded_idx = c['corner_idx']
+                    if loaded_idx > 0 and 'src_pts' in c:
+                        import numpy as _np
+                        import cv2 as _cv2
+                        loaded_pts = c['src_pts']
+                        for i in range(min(4, loaded_idx, len(loaded_pts))):
+                            src_pts[i] = [float(loaded_pts[i][0]), float(loaded_pts[i][1])]
+                        corner_idx = loaded_idx
+                        
+                        if corner_idx == 4:
+                            dst_pts = _np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=_np.float32)
+                            homography_matrix, _ = _cv2.findHomography(src_pts, dst_pts)
         except Exception as e:
             print(f"Error loading config from {config_path}: {e}")
             continue
@@ -159,7 +174,9 @@ def save_config_to_disk():
         'apriltag_decision_margin': apriltag_decision_margin,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin"),
-        'calibration_model': calibration_model
+        'calibration_model': calibration_model,
+        'corner_idx': corner_idx,
+        'src_pts': src_pts.tolist()[:corner_idx] if corner_idx > 0 else []
     }
     # Save camera calibration if available
     if camera_matrix is not None and dist_coeffs is not None:
@@ -201,7 +218,7 @@ ignored_tokens = set()
 hough_dp = 1.2
 hough_min_dist = 20
 hough_param1 = 40
-hough_param2 = 45
+hough_param2 = 30
 hough_min_radius = 30
 hough_max_radius = 40
 
@@ -542,6 +559,7 @@ def get_video_stream():
         if not hasattr(get_video_stream, "tracked_tokens"):
             get_video_stream.tracked_tokens = {}
         matched_ids = set()
+        used_circles = set()
 
         # 1. Process all detected markers (primary source of truth)
         for m_id, (m_x, m_y) in markers.items():
@@ -551,6 +569,7 @@ def get_video_stream():
             best_circ = None
             best_dist = float('inf')
             for (cx, cy, cr) in detected_circles:
+                if (cx, cy, cr) in used_circles: continue
                 d = np.sqrt((cx - m_x)**2 + (cy - m_y)**2)
                 if d < cr and d < best_dist:
                     best_dist = d
@@ -558,11 +577,15 @@ def get_video_stream():
             
             if best_circ:
                 cx, cy, cr = best_circ
+                used_circles.add(best_circ)
                 if token_id in get_video_stream.tracked_tokens:
                     t = get_video_stream.tracked_tokens[token_id]
-                    t["x"] = t["x"] * 0.3 + cx * 0.7
-                    t["y"] = t["y"] * 0.3 + cy * 0.7
-                    t["r"] = t["r"] * 0.3 + cr * 0.7
+                    # Dynamic smoothing: if distance is large (moving fast), snap instantly. If small (stationary/jitter), smooth heavily.
+                    dist = np.hypot(t["x"] - cx, t["y"] - cy)
+                    alpha = 1.0 if dist > 15 else 0.2
+                    t["x"] = t["x"] * (1 - alpha) + cx * alpha
+                    t["y"] = t["y"] * (1 - alpha) + cy * alpha
+                    t["r"] = t["r"] * 0.8 + cr * 0.2 # Smooth radius heavily to avoid outline jitter
                     t["missed"] = 0
                 else:
                     get_video_stream.tracked_tokens[token_id] = {
@@ -572,8 +595,10 @@ def get_video_stream():
                 # No disk found? Use marker center as fallback
                 if token_id in get_video_stream.tracked_tokens:
                     t = get_video_stream.tracked_tokens[token_id]
-                    t["x"] = t["x"] * 0.3 + m_x * 0.7
-                    t["y"] = t["y"] * 0.3 + m_y * 0.7
+                    dist = np.hypot(t["x"] - m_x, t["y"] - m_y)
+                    alpha = 1.0 if dist > 15 else 0.2
+                    t["x"] = t["x"] * (1 - alpha) + m_x * alpha
+                    t["y"] = t["y"] * (1 - alpha) + m_y * alpha
                     t["missed"] = 0
                 else:
                     get_video_stream.tracked_tokens[token_id] = {
@@ -583,32 +608,25 @@ def get_video_stream():
             
         # --- Appear/Disappear Logging ---
         current_marker_ids = set(markers.keys())
-        new_ids = current_marker_ids - last_marker_ids
-        lost_ids = last_marker_ids - current_marker_ids
+        if not hasattr(get_video_stream, "last_marker_ids"):
+            get_video_stream.last_marker_ids = set()
+            
+        new_ids = current_marker_ids - get_video_stream.last_marker_ids
+        lost_ids = get_video_stream.last_marker_ids - current_marker_ids
         
         for nid in new_ids:
             print(f"[TRACKER] Token Detected: ID {nid}", flush=True)
         for lid in lost_ids:
             print(f"[TRACKER] Token Lost: ID {lid}", flush=True)
             
-        last_marker_ids = current_marker_ids
+        get_video_stream.last_marker_ids = current_marker_ids
 
         # 2. Temporal Fallback: Match remaining circles to "missed" tokens
         for (cx, cy, cr) in detected_circles:
-            is_used = False
-            for t_id in matched_ids:
-                t = get_video_stream.tracked_tokens[t_id]
-                if abs(t["x"]-cx) < 5 and abs(t["y"]-cy) < 5:
-                    is_used = True; break
-            if is_used: continue
+            if (cx, cy, cr) in used_circles: continue
 
             best_id = None
-            best_dist = 200 # Increased search radius for lost markers
-        # --- Instant Matching Logic ---
-        matched_ids = set()
-        for (cx, cy, cr) in detected_circles:
-            best_id = None
-            best_dist = 40 
+            best_dist = 60 # Search radius for moving markers
             for t_id, t_data in get_video_stream.tracked_tokens.items():
                 if t_id in matched_ids: continue
                 dist = np.sqrt((cx - t_data["x"])**2 + (cy - t_data["y"])**2)
@@ -618,12 +636,16 @@ def get_video_stream():
             
             if best_id:
                 token = get_video_stream.tracked_tokens[best_id]
-                # Direct update for zero latency
-                token["x"] = cx
-                token["y"] = cy
-                token["r"] = cr
+                token = get_video_stream.tracked_tokens[best_id]
+                # Update position based on circle, maintain ID with dynamic smoothing
+                dist_moved = np.hypot(token["x"] - cx, token["y"] - cy)
+                alpha = 1.0 if dist_moved > 15 else 0.2
+                token["x"] = token["x"] * (1 - alpha) + cx * alpha
+                token["y"] = token["y"] * (1 - alpha) + cy * alpha
+                token["r"] = token["r"] * 0.8 + cr * 0.2
                 token["missed"] = 0
                 matched_ids.add(best_id)
+                used_circles.add((cx, cy, cr))
 
         # Increment missed frames and delete old tokens
         for token_id in list(get_video_stream.tracked_tokens.keys()):
@@ -862,6 +884,7 @@ def calibrate():
             # Map to a standard square 0.0 to 1.0 space
             dst_pts = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
             homography_matrix, _ = cv2.findHomography(src_pts, dst_pts)
+            save_config_to_disk()
             
         return jsonify({"success": True, "corners": corner_idx})
         
@@ -869,6 +892,7 @@ def calibrate():
         corner_idx = 0
         src_pts = np.zeros((4, 2), dtype=np.float32)
         homography_matrix = None
+        save_config_to_disk()
         return jsonify({"success": True})
 
 
