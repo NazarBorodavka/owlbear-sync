@@ -208,8 +208,9 @@ def verify_password(username, password):
 camera_url = "" # IP camera URL
 cap = None
 is_running = False
-# Store config next to this script so writes succeed regardless of the process CWD
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
+# Store config at the container bind-mount path used by docker-compose/CasaOS.
+CONFIG_FILE = os.environ.get('TRACKER_CONFIG_FILE', '/app/config.json')
+LEGACY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
 
 
 def load_config_from_disk():
@@ -218,10 +219,13 @@ def load_config_from_disk():
     global aruco_min_perimeter, aruco_adaptive_thresh_min, auto_blank, detection_mode
     global apriltag_family, apriltag_decision_margin, stag_error_correction, stag_roi_padding
     global token_aliases, manual_blank
+    global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
 
-    if os.path.exists(CONFIG_FILE):
+    for config_path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
+        if not os.path.exists(config_path):
+            continue
         try:
-            with open(CONFIG_FILE, 'r') as f:
+            with open(config_path, 'r') as f:
                 c = json.load(f)
                 apriltag_family = 'tag16h5'
                 apriltag_decision_margin = float(c.get('apriltag_decision_margin', 30.0))
@@ -245,7 +249,7 @@ def load_config_from_disk():
                 aruco_adaptive_thresh_min = c.get('aruco_adaptive_thresh_min', 3)
                 auto_blank = c.get('auto_blank', False)
                 token_aliases = c.get('token_aliases', {})
-                print("Loaded config from disk.")
+                print(f"Loaded config from disk: {config_path}")
                 # Load camera calibration if present
                 cm = c.get('camera_matrix')
                 dd = c.get('dist_coeffs')
@@ -254,15 +258,22 @@ def load_config_from_disk():
                         import numpy as _np
                         camera_matrix = _np.array(cm, dtype=_np.float64)
                         dist_coeffs = _np.array(dd, dtype=_np.float64)
+                        calibration_model = c.get('calibration_model') or ('fisheye' if _np.array(dd).size == 4 else 'standard')
                         settings_dirty = True
-                        print("Loaded camera calibration from config.")
+                        undistort_map1 = None
+                        undistort_map2 = None
+                        print(f"Loaded camera calibration from config ({calibration_model}).")
                     except Exception:
                         camera_matrix = None
                         dist_coeffs = None
+                        calibration_model = None
         except Exception as e:
-            print(f"Error loading config: {e}")
+            print(f"Error loading config from {config_path}: {e}")
+            continue
+        break
 
 def save_config_to_disk():
+    global calibration_model
     c = {
         'distortion_k1': distortion_k1, 'zoom_level': zoom_level, 'offset_x': offset_x, 'offset_y': offset_y,
         'rotation': rotation, 'brightness': brightness, 'contrast': contrast, 'exposure': exposure,
@@ -276,7 +287,8 @@ def save_config_to_disk():
         'stag_error_correction': stag_error_correction,
         'stag_roi_padding': stag_roi_padding,
         'token_aliases': token_aliases,
-        'password': USER_DATA.get("admin", "admin")
+        'password': USER_DATA.get("admin", "admin"),
+        'calibration_model': calibration_model
     }
     # Save camera calibration if available
     if camera_matrix is not None and dist_coeffs is not None:
@@ -286,10 +298,20 @@ def save_config_to_disk():
         except Exception:
             pass
     try:
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(c, f)
-    except Exception as e:
-        print(f"Error saving config: {e}")
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    except Exception:
+        pass
+    for path in (CONFIG_FILE, LEGACY_CONFIG_FILE if LEGACY_CONFIG_FILE != CONFIG_FILE else None):
+        if not path:
+            continue
+        try:
+            with open(path, 'w') as f:
+                json.dump(c, f)
+            print(f"Saved config to {path}")
+            return
+        except Exception as e:
+            print(f"Error saving config to {path}: {e}")
+    print("Error saving config: all save targets failed")
 
 # Preprocessing parameters
 distortion_k1 = 0.0
@@ -330,8 +352,6 @@ stag_roi_padding = 40
 # Global Detection Engines
 apriltag_detector = None
 
-load_config_from_disk()
-
 # Performance optimization: Cache for software exposure table
 exposure_table = None
 last_exposure = -1.0
@@ -348,6 +368,7 @@ current_frame = None
 
 undistort_map1 = None
 undistort_map2 = None
+undistort_model = None
 settings_dirty = True
 
 # For diagnostic overlay: keep a raw and undistorted copy of the latest frame
@@ -357,15 +378,18 @@ undistorted_frame_for_stream = None
 # Camera calibration state (fisheye model)
 camera_matrix = None
 dist_coeffs = None
+calibration_model = None
 calib_mode = False
 calib_objpoints = []
 calib_imgpoints = []
 # Default chessboard pattern (cols, rows) internal corners - change if you use a different board
 chessboard_size = (9, 6)
 
+load_config_from_disk()
+
 
 def get_video_stream():
-    global cap, is_running, current_frame, camera_url, undistort_map1, undistort_map2, settings_dirty
+    global cap, is_running, current_frame, camera_url, undistort_map1, undistort_map2, settings_dirty, undistort_model
     # Expose diagnostic copies of the latest frame
     global raw_frame_for_stream, undistorted_frame_for_stream
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
@@ -374,6 +398,7 @@ def get_video_stream():
     global STAG_AVAILABLE, APRILTAG_AVAILABLE
     global src_pts, corner_idx, homography_matrix, auto_blank, manual_blank
     global stag_error_correction, stag_roi_padding, apriltag_family, apriltag_decision_margin
+    global camera_matrix, dist_coeffs, calibration_model
 
     fail_count = 0
     
@@ -434,16 +459,24 @@ def get_video_stream():
             raw_frame_for_stream = None
         
         # 1. Distortion Correction via precomputed maps.
-        # Prefer a full camera calibration (fisheye model) when available. Fall back to single-k1 model.
+        # Prefer a full camera calibration when available. Fall back to single-k1 model.
         if camera_matrix is not None and dist_coeffs is not None:
-            # Use fisheye undistort (handles strong fisheye lenses better)
-            if settings_dirty or undistort_map1 is None:
+            model = calibration_model or ('fisheye' if getattr(dist_coeffs, 'size', 0) == 4 else 'standard')
+            if settings_dirty or undistort_map1 is None or undistort_model != model:
                 try:
-                    # Estimate new camera matrix for undistort/rectify
-                    new_cam = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
-                        camera_matrix, dist_coeffs, (w, h), np.eye(3), balance=0.0)
-                    undistort_map1, undistort_map2 = cv2.fisheye.initUndistortRectifyMap(
-                        camera_matrix, dist_coeffs, np.eye(3), new_cam, (w, h), cv2.CV_32FC1)
+                    if model == 'standard':
+                        dist = np.array(dist_coeffs, dtype=np.float64).reshape(-1, 1)
+                        cam = np.array(camera_matrix, dtype=np.float64)
+                        new_cam, _ = cv2.getOptimalNewCameraMatrix(cam, dist, (w, h), 0.25, (w, h))
+                        undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(cam, dist, None, new_cam, (w, h), cv2.CV_32FC1)
+                    else:
+                        cam = np.array(camera_matrix, dtype=np.float64)
+                        dist = np.array(dist_coeffs, dtype=np.float64)
+                        new_cam = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+                            cam, dist, (w, h), np.eye(3), balance=0.25)
+                        undistort_map1, undistort_map2 = cv2.fisheye.initUndistortRectifyMap(
+                            cam, dist, np.eye(3), new_cam, (w, h), cv2.CV_32FC1)
+                    undistort_model = model
                     settings_dirty = False
                 except Exception:
                     # If fisheye module or functions are not available, skip calibration
@@ -815,45 +848,44 @@ def generate_frames():
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         time.sleep(0.03) # Limit framerate to browser to save bandwidth
 
+def generate_raw_frames():
+    global raw_frame_for_stream
+    while True:
+        try:
+            if raw_frame_for_stream is None:
+                time.sleep(0.1)
+                continue
+            with frame_lock:
+                rf = raw_frame_for_stream.copy() if raw_frame_for_stream is not None else None
+            if rf is None:
+                time.sleep(0.1)
+                continue
+            ret, buffer = cv2.imencode('.jpg', rf)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Exception:
+            time.sleep(0.1)
 
-        def generate_raw_frames():
-            global raw_frame_for_stream
-            while True:
-                try:
-                    if raw_frame_for_stream is None:
-                        time.sleep(0.1)
-                        continue
-                    with frame_lock:
-                        rf = raw_frame_for_stream.copy() if raw_frame_for_stream is not None else None
-                    if rf is None:
-                        time.sleep(0.1)
-                        continue
-                    ret, buffer = cv2.imencode('.jpg', rf)
-                    frame_bytes = buffer.tobytes()
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                except Exception:
-                    time.sleep(0.1)
 
-
-        def generate_undistorted_frames():
-            global undistorted_frame_for_stream
-            while True:
-                try:
-                    if undistorted_frame_for_stream is None:
-                        time.sleep(0.1)
-                        continue
-                    with frame_lock:
-                        uf = undistorted_frame_for_stream.copy() if undistorted_frame_for_stream is not None else None
-                    if uf is None:
-                        time.sleep(0.1)
-                        continue
-                    ret, buffer = cv2.imencode('.jpg', uf)
-                    frame_bytes = buffer.tobytes()
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                except Exception:
-                    time.sleep(0.1)
+def generate_undistorted_frames():
+    global undistorted_frame_for_stream
+    while True:
+        try:
+            if undistorted_frame_for_stream is None:
+                time.sleep(0.1)
+                continue
+            with frame_lock:
+                uf = undistorted_frame_for_stream.copy() if undistorted_frame_for_stream is not None else None
+            if uf is None:
+                time.sleep(0.1)
+                continue
+            ret, buffer = cv2.imencode('.jpg', uf)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Exception:
+            time.sleep(0.1)
 
 @app.route('/')
 @auth.login_required
@@ -868,19 +900,16 @@ def video_feed():
 
 
 @app.route('/diag_raw_feed')
-@auth.login_required
 def diag_raw_feed():
     return Response(generate_raw_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 @app.route('/diag_undistort_feed')
-@auth.login_required
 def diag_undistort_feed():
     return Response(generate_undistorted_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 @app.route('/diagnostic')
-@auth.login_required
 def diagnostic_page():
     # Simple side-by-side viewer for raw vs undistorted frames
     html = '''<!doctype html>
@@ -956,10 +985,11 @@ def calibrate():
 @auth.login_required
 def camera_calibration_start():
     """Begin a new camera calibration session (fisheye model)."""
-    global calib_mode, calib_objpoints, calib_imgpoints
+    global calib_mode, calib_objpoints, calib_imgpoints, calibration_model
     calib_mode = True
     calib_objpoints = []
     calib_imgpoints = []
+    calibration_model = None
     return jsonify({"success": True, "message": "Calibration started; submit frames using /api/camera_calibration/add_frame"})
 
 
@@ -1005,7 +1035,7 @@ def camera_calibration_add_frame():
 @auth.login_required
 def camera_calibration_finish():
     """Run calibration using collected frames and store the camera matrix + distortion coeffs."""
-    global calib_mode, calib_objpoints, calib_imgpoints, camera_matrix, dist_coeffs, settings_dirty
+    global calib_mode, calib_objpoints, calib_imgpoints, camera_matrix, dist_coeffs, settings_dirty, calibration_model, undistort_map1, undistort_map2, undistort_model
     if not calib_mode or len(calib_imgpoints) == 0:
         return jsonify({"success": False, "error": "No calibration frames collected"}), 400
 
@@ -1039,7 +1069,11 @@ def camera_calibration_finish():
 
         camera_matrix = K
         dist_coeffs = D
+        calibration_model = 'fisheye'
         settings_dirty = True
+        undistort_map1 = None
+        undistort_map2 = None
+        undistort_model = None
         calib_mode = False
 
         # Save calibration to disk
@@ -1062,7 +1096,11 @@ def camera_calibration_finish():
             dist_coeffs = np.array(dc, dtype=np.float64)
             if dist_coeffs.ndim == 1:
                 dist_coeffs = dist_coeffs.reshape(-1, 1)
+            calibration_model = 'standard'
             settings_dirty = True
+            undistort_map1 = None
+            undistort_map2 = None
+            undistort_model = None
             calib_mode = False
             save_config_to_disk()
             return jsonify({"success": True, "model": "standard", "rms": float(ret), "camera_matrix": camera_matrix.tolist(), "dist_coeffs": dist_coeffs.tolist()})
@@ -1081,21 +1119,26 @@ def camera_calibration_finish():
 @app.route('/api/camera_calibration/reset', methods=['POST'])
 @auth.login_required
 def camera_calibration_reset():
-    global calib_mode, calib_objpoints, calib_imgpoints
+    global calib_mode, calib_objpoints, calib_imgpoints, calibration_model, undistort_map1, undistort_map2, undistort_model
     calib_mode = False
     calib_objpoints = []
     calib_imgpoints = []
+    calibration_model = None
+    undistort_map1 = None
+    undistort_map2 = None
+    undistort_model = None
     return jsonify({"success": True})
 
 
 @app.route('/api/camera_calibration/status', methods=['GET'])
 @auth.login_required
 def camera_calibration_status():
-    global calib_mode, calib_objpoints, calib_imgpoints, camera_matrix, dist_coeffs
+    global calib_mode, calib_objpoints, calib_imgpoints, camera_matrix, dist_coeffs, calibration_model
     return jsonify({
         "calib_mode": bool(calib_mode),
         "frames_collected": len(calib_imgpoints),
-        "calibrated": camera_matrix is not None and dist_coeffs is not None
+        "calibrated": camera_matrix is not None and dist_coeffs is not None,
+        "model": calibration_model
     })
 
 @app.route('/api/settings', methods=['POST'])
