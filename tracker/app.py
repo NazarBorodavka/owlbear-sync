@@ -208,7 +208,8 @@ def verify_password(username, password):
 camera_url = "" # IP camera URL
 cap = None
 is_running = False
-CONFIG_FILE = "config.json"
+# Store config next to this script so writes succeed regardless of the process CWD
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
 
 
 def load_config_from_disk():
@@ -365,6 +366,8 @@ chessboard_size = (9, 6)
 
 def get_video_stream():
     global cap, is_running, current_frame, camera_url, undistort_map1, undistort_map2, settings_dirty
+    # Expose diagnostic copies of the latest frame
+    global raw_frame_for_stream, undistorted_frame_for_stream
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, detection_mode

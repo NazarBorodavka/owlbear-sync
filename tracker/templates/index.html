@@ -971,6 +971,8 @@
         window.addEventListener('DOMContentLoaded', () => {
             loadConfig();
             updateAreaIndicators();
+            // Query calibration status and update UI so user knows calibration is applied
+            try { caliStatusCalib(); } catch (e) { /* ignore if not available */ }
         });
 
         // Camera Calibration Functions
