@@ -245,6 +245,19 @@ def load_config_from_disk():
                 auto_blank = c.get('auto_blank', False)
                 token_aliases = c.get('token_aliases', {})
                 print("Loaded config from disk.")
+                # Load camera calibration if present
+                cm = c.get('camera_matrix')
+                dd = c.get('dist_coeffs')
+                if cm is not None and dd is not None:
+                    try:
+                        import numpy as _np
+                        camera_matrix = _np.array(cm, dtype=_np.float64)
+                        dist_coeffs = _np.array(dd, dtype=_np.float64)
+                        settings_dirty = True
+                        print("Loaded camera calibration from config.")
+                    except Exception:
+                        camera_matrix = None
+                        dist_coeffs = None
         except Exception as e:
             print(f"Error loading config: {e}")
 
@@ -264,6 +277,13 @@ def save_config_to_disk():
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin")
     }
+    # Save camera calibration if available
+    if camera_matrix is not None and dist_coeffs is not None:
+        try:
+            c['camera_matrix'] = camera_matrix.tolist()
+            c['dist_coeffs'] = dist_coeffs.tolist()
+        except Exception:
+            pass
     try:
         with open(CONFIG_FILE, 'w') as f:
             json.dump(c, f)
@@ -298,7 +318,8 @@ aruco_poly_approx = 0.05
 auto_blank = False # Toggle for anti-reflection mode
 flip_x = False
 flip_y = False
-detection_mode = 'aruco' # 'aruco', 'apriltag', or 'stag'
+# The app is AprilTag-only now
+detection_mode = 'apriltag'
 
 apriltag_family = 'tag16h5'
 manual_blank = False
@@ -323,9 +344,24 @@ homography_matrix = None
 frame_lock = threading.Lock()
 camera_lock = threading.Lock()
 current_frame = None
+
 undistort_map1 = None
 undistort_map2 = None
 settings_dirty = True
+
+# For diagnostic overlay: keep a raw and undistorted copy of the latest frame
+raw_frame_for_stream = None
+undistorted_frame_for_stream = None
+
+# Camera calibration state (fisheye model)
+camera_matrix = None
+dist_coeffs = None
+calib_mode = False
+calib_objpoints = []
+calib_imgpoints = []
+# Default chessboard pattern (cols, rows) internal corners - change if you use a different board
+chessboard_size = (9, 6)
+
 
 def get_video_stream():
     global cap, is_running, current_frame, camera_url, undistort_map1, undistort_map2, settings_dirty
@@ -388,18 +424,49 @@ def get_video_stream():
 
         # Preprocessing: Apply Distortion Correction, Zoom, Pan, Rotation, Colors
         h, w = frame.shape[:2]
+        # Store raw frame for diagnostic streaming (before any processing)
+        try:
+            raw_frame_for_stream = frame.copy()
+        except Exception:
+            raw_frame_for_stream = None
         
-        # 1. Faster Distortion Correction via Pre-computed Maps
-        if distortion_k1 != 0.0:
+        # 1. Distortion Correction via precomputed maps.
+        # Prefer a full camera calibration (fisheye model) when available. Fall back to single-k1 model.
+        if camera_matrix is not None and dist_coeffs is not None:
+            # Use fisheye undistort (handles strong fisheye lenses better)
+            if settings_dirty or undistort_map1 is None:
+                try:
+                    # Estimate new camera matrix for undistort/rectify
+                    new_cam = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+                        camera_matrix, dist_coeffs, (w, h), np.eye(3), balance=0.0)
+                    undistort_map1, undistort_map2 = cv2.fisheye.initUndistortRectifyMap(
+                        camera_matrix, dist_coeffs, np.eye(3), new_cam, (w, h), cv2.CV_32FC1)
+                    settings_dirty = False
+                except Exception:
+                    # If fisheye module or functions are not available, skip calibration
+                    undistort_map1 = None
+                    undistort_map2 = None
+            if undistort_map1 is not None:
+                frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
+                try:
+                    undistorted_frame_for_stream = frame.copy()
+                except Exception:
+                    undistorted_frame_for_stream = None
+        elif distortion_k1 != 0.0:
+            # Legacy single-coefficient radial distortion correction
             if settings_dirty or undistort_map1 is None:
                 fx, fy = w, h
                 cx, cy = w / 2, h / 2
-                camera_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-                dist_coeffs = np.array([distortion_k1, 0, 0, 0, 0], dtype=np.float32)
-                new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w, h), 0)
-                undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_camera_matrix, (w, h), cv2.CV_32FC1)
+                tmp_cam = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+                dist = np.array([distortion_k1, 0, 0, 0, 0], dtype=np.float32)
+                new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(tmp_cam, dist, (w, h), 0)
+                undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(tmp_cam, dist, None, new_camera_matrix, (w, h), cv2.CV_32FC1)
                 settings_dirty = False
             frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
+            try:
+                undistorted_frame_for_stream = frame.copy()
+            except Exception:
+                undistorted_frame_for_stream = None
             
         # 2. Optimized Zoom, Pan, Rotation (Merged into one warp)
         if zoom_level != 1.0 or offset_x != 0.0 or offset_y != 0.0 or rotation != 0.0:
@@ -468,14 +535,7 @@ def get_video_stream():
         # Collect AprilTag detections per disk, then resolve to a single token per tag id.
         apriltag_candidates = {} if detection_mode == 'apriltag' else None
 
-        # --- ArUco setup ---
-        detector = None
-        if detection_mode == 'aruco':
-            aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-            aruco_params = cv2.aruco.DetectorParameters()
-            aruco_params.adaptiveThreshWinSizeMin = int(aruco_adaptive_thresh_min)
-            aruco_params.minMarkerPerimeterRate = float(aruco_min_perimeter)
-            detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
+        # AprilTag-only app: ArUco/STag code removed
         
         markers = {}
         # We now look for markers ONLY inside detected circles to avoid map noise
@@ -523,30 +583,6 @@ def get_video_stream():
                                     "center": (circ_x, circ_y),
                                     "decision_margin": float(best_dm) if best_dm is not None else -1.0,
                                 })
-                else:
-                    if detector is None:
-                        continue
-                    corners, ids, _ = detector.detectMarkers(roi_enhanced)
-
-                    if ids is not None and len(ids) > 0:
-                        for i, m_id in enumerate(ids.flatten()):
-                            mid_int = int(m_id)
-                            markers[mid_int] = (circ_x, circ_y)
-
-                            if show_overlay and corners is not None and i < len(corners):
-                                try:
-                                    c = corners[i]
-                                    if isinstance(c, np.ndarray) and c.size > 0:
-                                        if c.ndim == 3:
-                                            c = c[0]
-                                        if c.ndim == 2 and c.shape[0] == 4:
-                                            c = c.copy()
-                                            c[:, 0] += x1
-                                            c[:, 1] += y1
-                                            cv2.polylines(frame, [np.int32(c)], True, (255, 0, 255), 2)
-                                except Exception:
-                                    pass
-                            break
             except Exception as e:
                 print(f"ERROR inside circle loop: {e}")
                 import traceback
@@ -572,24 +608,7 @@ def get_video_stream():
                 best = max(candidates, key=_cand_score)
                 markers[rid] = best['center']
 
-        if detection_mode == 'stag' and STAG_AVAILABLE:
-            try:
-                try:
-                    (corners, ids, rejected_corners) = stag.detectMarkers(gray, 21, errorCorrection=stag_error_correction)
-                except TypeError:
-                    (corners, ids, rejected_corners) = stag.detectMarkers(gray, 21)
-                
-                if ids is not None:
-                    for i, m_id in enumerate(ids.flatten()):
-                        c = corners[i]
-                        if c.ndim == 3: c = c[0]
-                        cx = int(np.mean(c[:, 0]))
-                        cy = int(np.mean(c[:, 1]))
-                        markers[int(m_id)] = (cx, cy)
-                        if show_overlay:
-                            cv2.polylines(frame, [np.int32(c)], True, (255, 165, 0), 2)
-            except Exception as e:
-                print(f"STag Detection Error: {e}")
+        # STag support removed (AprilTag-only)
 
         # --- Temporal & ArUco Fusion ---
         detected_tokens = []
@@ -793,6 +812,46 @@ def generate_frames():
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         time.sleep(0.03) # Limit framerate to browser to save bandwidth
 
+
+        def generate_raw_frames():
+            global raw_frame_for_stream
+            while True:
+                try:
+                    if raw_frame_for_stream is None:
+                        time.sleep(0.1)
+                        continue
+                    with frame_lock:
+                        rf = raw_frame_for_stream.copy() if raw_frame_for_stream is not None else None
+                    if rf is None:
+                        time.sleep(0.1)
+                        continue
+                    ret, buffer = cv2.imencode('.jpg', rf)
+                    frame_bytes = buffer.tobytes()
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                except Exception:
+                    time.sleep(0.1)
+
+
+        def generate_undistorted_frames():
+            global undistorted_frame_for_stream
+            while True:
+                try:
+                    if undistorted_frame_for_stream is None:
+                        time.sleep(0.1)
+                        continue
+                    with frame_lock:
+                        uf = undistorted_frame_for_stream.copy() if undistorted_frame_for_stream is not None else None
+                    if uf is None:
+                        time.sleep(0.1)
+                        continue
+                    ret, buffer = cv2.imencode('.jpg', uf)
+                    frame_bytes = buffer.tobytes()
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                except Exception:
+                    time.sleep(0.1)
+
 @app.route('/')
 @auth.login_required
 def index():
@@ -803,6 +862,34 @@ def index():
 def video_feed():
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/diag_raw_feed')
+@auth.login_required
+def diag_raw_feed():
+    return Response(generate_raw_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/diag_undistort_feed')
+@auth.login_required
+def diag_undistort_feed():
+    return Response(generate_undistorted_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/diagnostic')
+@auth.login_required
+def diagnostic_page():
+    # Simple side-by-side viewer for raw vs undistorted frames
+    html = '''<!doctype html>
+<html><head><title>Camera Diagnostic</title></head><body>
+<h2>Camera Diagnostic: Raw (left) vs Undistorted (right)</h2>
+<div style="display:flex;gap:10px;">
+  <div><h3>Raw</h3><img id="raw" src="/diag_raw_feed" style="max-width:45vw;" /></div>
+  <div><h3>Undistorted</h3><img id="und" src="/diag_undistort_feed" style="max-width:45vw;"/></div>
+</div>
+<p>Use this page to visually verify undistortion. Reload after calibration finishes.</p>
+</body></html>'''
+    return html
 
 @app.route('/api/connect', methods=['POST'])
 def connect_camera():
@@ -861,6 +948,138 @@ def calibrate():
         homography_matrix = None
         return jsonify({"success": True})
 
+
+@app.route('/api/camera_calibration/start', methods=['POST'])
+@auth.login_required
+def camera_calibration_start():
+    """Begin a new camera calibration session (fisheye model)."""
+    global calib_mode, calib_objpoints, calib_imgpoints
+    calib_mode = True
+    calib_objpoints = []
+    calib_imgpoints = []
+    return jsonify({"success": True, "message": "Calibration started; submit frames using /api/camera_calibration/add_frame"})
+
+
+@app.route('/api/camera_calibration/add_frame', methods=['POST'])
+@auth.login_required
+def camera_calibration_add_frame():
+    """Capture current frame and try to detect chessboard corners. Returns how many valid frames collected."""
+    global calib_mode, calib_objpoints, calib_imgpoints, chessboard_size
+    if not calib_mode:
+        return jsonify({"success": False, "error": "Calibration not started"}), 400
+
+    with frame_lock:
+        # Prefer the raw captured frame for calibration (before processing)
+        src_img = raw_frame_for_stream if raw_frame_for_stream is not None else current_frame
+        if src_img is None:
+            return jsonify({"success": False, "error": "No frame available"}), 400
+        img = src_img.copy()
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    pattern = (int(chessboard_size[0]), int(chessboard_size[1]))
+    found, corners = cv2.findChessboardCorners(gray, pattern, flags=cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE)
+    if not found:
+        return jsonify({"success": False, "found": False, "message": "Chessboard not detected in frame"}), 200
+
+    # refine corners
+    corners_sub = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
+
+    # prepare object points for this view
+    objp = np.zeros((pattern[0] * pattern[1], 3), dtype=np.float64)
+    objp[:, :2] = np.mgrid[0:pattern[0], 0:pattern[1]].T.reshape(-1, 2)
+
+    # reshape corners to expected format
+    imgp = corners_sub.reshape(-1, 2).astype(np.float64)
+
+    # store as required by fisheye.calibrate: (N,1,points,3)/(N,1,points,2)
+    calib_objpoints.append(objp.reshape(1, -1, 3).copy())
+    calib_imgpoints.append(imgp.reshape(1, -1, 2).copy())
+
+    return jsonify({"success": True, "found": True, "frames_collected": len(calib_imgpoints)})
+
+
+@app.route('/api/camera_calibration/finish', methods=['POST'])
+@auth.login_required
+def camera_calibration_finish():
+    """Run calibration using collected frames and store the camera matrix + distortion coeffs."""
+    global calib_mode, calib_objpoints, calib_imgpoints, camera_matrix, dist_coeffs, settings_dirty
+    if not calib_mode or len(calib_imgpoints) == 0:
+        return jsonify({"success": False, "error": "No calibration frames collected"}), 400
+
+    # Build proper lists
+    objpoints = [op for op in calib_objpoints]
+    imgpoints = [ip for ip in calib_imgpoints]
+
+    # image size from the last collected frame
+    with frame_lock:
+        if current_frame is None:
+            return jsonify({"success": False, "error": "No frame to determine image size"}), 400
+        h, w = current_frame.shape[:2]
+
+    # Try fisheye calibration first (better for strong fisheye lenses), fallback to classical calibrateCamera
+    try:
+        K = np.zeros((3, 3), dtype=np.float64)
+        D = np.zeros((4, 1), dtype=np.float64)
+        objp_list = [op.astype(np.float64) for op in objpoints]
+        imgp_list = [ip.astype(np.float64) for ip in imgpoints]
+
+        # Criteria
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
+        flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
+
+        rms, K, D, rvecs, tvecs = cv2.fisheye.calibrate(
+            objp_list, imgp_list, (w, h), K, D, flags=flags, criteria=criteria)
+
+        camera_matrix = K
+        dist_coeffs = D
+        settings_dirty = True
+        calib_mode = False
+
+        # Save calibration to disk
+        save_config_to_disk()
+
+        return jsonify({"success": True, "model": "fisheye", "rms": float(rms), "camera_matrix": camera_matrix.tolist(), "dist_coeffs": dist_coeffs.tolist()})
+    except Exception as e_fisheye:
+        # Fallback to classical camera calibration
+        try:
+            # Prepare standard lists: reshape each (1, n, dim) to (n, dim)
+            objp_std = [op.reshape(-1, 3).astype(np.float64) for op in objpoints]
+            imgp_std = [ip.reshape(-1, 2).astype(np.float64) for ip in imgpoints]
+
+            ret, Kc, dc, rvecs, tvecs = cv2.calibrateCamera(objp_std, imgp_std, (w, h), None, None)
+
+            camera_matrix = Kc
+            # ensure dist_coeffs is a column vector
+            dist_coeffs = np.array(dc, dtype=np.float64).reshape(-1, 1)
+            settings_dirty = True
+            calib_mode = False
+            save_config_to_disk()
+            return jsonify({"success": True, "model": "standard", "rms": float(ret), "camera_matrix": camera_matrix.tolist(), "dist_coeffs": dist_coeffs.tolist()})
+        except Exception as e_std:
+            # Both calibration attempts failed
+            return jsonify({"success": False, "error": f"fisheye_error: {e_fisheye}; standard_error: {e_std}"}), 500
+
+
+@app.route('/api/camera_calibration/reset', methods=['POST'])
+@auth.login_required
+def camera_calibration_reset():
+    global calib_mode, calib_objpoints, calib_imgpoints
+    calib_mode = False
+    calib_objpoints = []
+    calib_imgpoints = []
+    return jsonify({"success": True})
+
+
+@app.route('/api/camera_calibration/status', methods=['GET'])
+@auth.login_required
+def camera_calibration_status():
+    global calib_mode, calib_objpoints, calib_imgpoints, camera_matrix, dist_coeffs
+    return jsonify({
+        "calib_mode": bool(calib_mode),
+        "frames_collected": len(calib_imgpoints),
+        "calibrated": camera_matrix is not None and dist_coeffs is not None
+    })
+
 @app.route('/api/settings', methods=['POST'])
 @auth.login_required
 def update_settings():
@@ -874,11 +1093,7 @@ def update_settings():
     data = request.json
     if 'camera_url' in data:
         camera_url = data['camera_url']
-    if 'detection_mode' in data:
-        old_mode = detection_mode
-        detection_mode = data['detection_mode']
-        if old_mode != detection_mode:
-            print(f"[API] Switching detection mode: {old_mode} -> {detection_mode}")
+    # detection_mode is AprilTag-only and cannot be changed via settings
     if 'apriltag_decision_margin' in data:
         try:
             val = float(data['apriltag_decision_margin'])
