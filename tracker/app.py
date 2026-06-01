@@ -96,7 +96,7 @@ def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global auto_blank
-    global apriltag_family, apriltag_decision_margin
+    global apriltag_family, apriltag_decision_margin, apriltag_min_id, apriltag_max_id
     global token_aliases, manual_blank
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
     global src_pts, corner_idx, homography_matrix
@@ -108,6 +108,8 @@ def load_config_from_disk():
                 c = json.load(f)
                 apriltag_family = 'tag16h5'
                 apriltag_decision_margin = float(c.get('apriltag_decision_margin', 30.0))
+                apriltag_min_id = int(c.get('apriltag_min_id', 0))
+                apriltag_max_id = int(c.get('apriltag_max_id', 255))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -172,6 +174,8 @@ def save_config_to_disk():
         'auto_blank': auto_blank,
         'apriltag_family': apriltag_family,
         'apriltag_decision_margin': apriltag_decision_margin,
+        'apriltag_min_id': apriltag_min_id,
+        'apriltag_max_id': apriltag_max_id,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin"),
         'calibration_model': calibration_model,
@@ -228,6 +232,8 @@ flip_y = False
 
 apriltag_family = 'tag16h5'
 apriltag_decision_margin = 30.0
+apriltag_min_id = 0
+apriltag_max_id = 255
 manual_blank = False
 
 # Performance optimization: Cache for software exposure table
@@ -492,8 +498,12 @@ def get_video_stream():
 
                     best = max(results, key=_score)
                     best_dm = best.get('decision_margin', None)
+                    rid = int(best.get('id', -1))
+                    
+                    if rid < apriltag_min_id or rid > apriltag_max_id:
+                        continue
+                        
                     if best_dm is None or best_dm >= apriltag_decision_margin:
-                        rid = int(best.get('id', -1))
                         if rid >= 0:
                             apriltag_candidates.setdefault(rid, []).append({
                                 "center": (circ_x, circ_y),
@@ -523,10 +533,13 @@ def get_video_stream():
                 full_results = []
 
             for r in full_results:
+                rid = int(r.get('id', -1))
+                if rid < apriltag_min_id or rid > apriltag_max_id:
+                    continue
+                    
                 dm = r.get('decision_margin', None)
                 if dm is not None and float(dm) < apriltag_decision_margin:
                     continue
-                rid = int(r.get('id', -1))
                 center = r.get('center') or [None, None]
                 if rid < 0 or center[0] is None or center[1] is None:
                     continue
@@ -1063,7 +1076,7 @@ def update_settings():
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global auto_blank, token_aliases
     global camera_url, manual_blank, flip_x, flip_y
-    global APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin
+    global APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin, apriltag_min_id, apriltag_max_id
 
     data = request.json
     if 'camera_url' in data:
@@ -1075,6 +1088,16 @@ def update_settings():
             val = apriltag_decision_margin
         # Clamp to reasonable range to avoid pathological values that may destabilize native detectors
         apriltag_decision_margin = max(0.0, min(100.0, val))
+    if 'apriltag_min_id' in data:
+        try:
+            apriltag_min_id = int(data['apriltag_min_id'])
+        except Exception:
+            pass
+    if 'apriltag_max_id' in data:
+        try:
+            apriltag_max_id = int(data['apriltag_max_id'])
+        except Exception:
+            pass
     if 'apriltag_family' in data:
         apriltag_family = 'tag16h5'
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
@@ -1100,6 +1123,19 @@ def update_settings():
     if 'hough_max_radius' in data: hough_max_radius = int(data['hough_max_radius'])
     
     if 'auto_blank' in data: auto_blank = bool(data['auto_blank'])
+
+    # Re-evaluate all active tracked tokens against the new ID limits
+    if hasattr(get_video_stream, 'tracked_tokens'):
+        to_delete = []
+        for tid, tdata in get_video_stream.tracked_tokens.items():
+            rid = tdata.get('marker_id', -1)
+            if rid != -1 and (rid < apriltag_min_id or rid > apriltag_max_id):
+                to_delete.append(tid)
+        for tid in to_delete:
+            del get_video_stream.tracked_tokens[tid]
+            if hasattr(get_video_stream, 'last_marker_ids') and rid in get_video_stream.last_marker_ids:
+                get_video_stream.last_marker_ids.remove(rid)
+
 
     save_config_to_disk()
     global settings_dirty

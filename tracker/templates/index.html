@@ -500,6 +500,7 @@
                                 onchange="syncSlider(this, 'hough_param1'); updateSettings()"></label>
                         <input type="range" id="hough_param1" min="10" max="100" step="1" value="40"
                             oninput="updateSettings()">
+                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Sets the upper threshold for the internal Canny edge detector. Higher values result in fewer edges and less noise, but might miss faint disks.</p>
                     </div>
                     <div class="slider-container">
                         <label><span>Center Match (Param 2)</span> <input type="number" id="val_hough_param2" value="45"
@@ -507,6 +508,7 @@
                                 onchange="syncSlider(this, 'hough_param2'); updateSettings()"></label>
                         <input type="range" id="hough_param2" min="10" max="100" step="1" value="45"
                             oninput="updateSettings()">
+                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Threshold for circle centers. Higher values are much stricter (perfect circles only), lower values find more circles but risk false positives.</p>
                     </div>
                     <button class="secondary" onclick="resetDiskSettings()" style="margin-top: 10px;">Reset Disk
                         Settings</button>
@@ -524,6 +526,17 @@
                                 oninput="updateVal('apriltag_decision_margin')">
                             <p class="help-text">Higher values reduce false positives for tag16h5.</p>
                         </div>
+                        <div class="control-group" style="display: flex; gap: 10px; margin-top: 15px;">
+                            <div style="flex: 1;">
+                                <label style="display:block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Min Tag ID</label>
+                                <input type="number" id="apriltag_min_id" value="0" min="0" max="255" class="val-input" style="width: 100%;" onchange="updateSettings()">
+                            </div>
+                            <div style="flex: 1;">
+                                <label style="display:block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Max Tag ID</label>
+                                <input type="number" id="apriltag_max_id" value="30" min="0" max="255" class="val-input" style="width: 100%;" onchange="updateSettings()">
+                            </div>
+                        </div>
+                        <p class="help-text" style="margin-top: 5px;">Ignore tags outside this range (useful to prevent false positives from turning into ghost tokens).</p>
                         <div class="control-group">
                             <label><span>Fixed Family</span>
                                 <input type="text" id="apriltag_family_display" class="val-input" value="tag16h5"
@@ -768,7 +781,9 @@
                 hough_param2: document.getElementById('hough_param2').value,
 
                 apriltag_family: 'tag16h5',
-                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value
+                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value,
+                apriltag_min_id: document.getElementById('apriltag_min_id').value,
+                apriltag_max_id: document.getElementById('apriltag_max_id').value
             };
 
             // Update UI numeric inputs
@@ -832,7 +847,9 @@
                 hough_param2: document.getElementById('hough_param2').value,
 
                 apriltag_family: 'tag16h5',
-                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value
+                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value,
+                apriltag_min_id: document.getElementById('apriltag_min_id').value,
+                apriltag_max_id: document.getElementById('apriltag_max_id').value
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -853,6 +870,8 @@
                         document.getElementById('apriltag_decision_margin').value = config.apriltag_decision_margin;
                         document.getElementById('val_apriltag_decision_margin').value = config.apriltag_decision_margin;
                     }
+                    if (config.apriltag_min_id !== undefined) document.getElementById('apriltag_min_id').value = config.apriltag_min_id;
+                    if (config.apriltag_max_id !== undefined) document.getElementById('apriltag_max_id').value = config.apriltag_max_id;
                     if (config.exposure !== undefined) document.getElementById('exposure').value = config.exposure;
                     if (config.contrast !== undefined) document.getElementById('contrast').value = config.contrast;
                     if (config.brightness !== undefined) document.getElementById('brightness').value = config.brightness;
