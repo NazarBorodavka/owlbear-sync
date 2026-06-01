@@ -1006,6 +1006,10 @@ def camera_calibration_finish():
     if not calib_mode or len(calib_imgpoints) == 0:
         return jsonify({"success": False, "error": "No calibration frames collected"}), 400
 
+    # Validate minimum frames
+    if len(calib_imgpoints) < 3:
+        return jsonify({"success": False, "error": f"Need at least 3 frames, only have {len(calib_imgpoints)}. Collect more snapshots from different angles."}), 400
+
     # Build proper lists
     objpoints = [op for op in calib_objpoints]
     imgpoints = [ip for ip in calib_imgpoints]
@@ -1042,22 +1046,33 @@ def camera_calibration_finish():
     except Exception as e_fisheye:
         # Fallback to classical camera calibration
         try:
-            # Prepare standard lists: reshape each (1, n, dim) to (n, dim)
-            objp_std = [op.reshape(-1, 3).astype(np.float64) for op in objpoints]
-            imgp_std = [ip.reshape(-1, 2).astype(np.float64) for ip in imgpoints]
+            # Prepare standard lists: reshape each (1, n, dim) to (n, dim) and ensure float32
+            objp_std = [op.reshape(-1, 3).astype(np.float32) for op in objpoints]
+            imgp_std = [ip.reshape(-1, 2).astype(np.float32) for ip in imgpoints]
 
-            ret, Kc, dc, rvecs, tvecs = cv2.calibrateCamera(objp_std, imgp_std, (w, h), None, None)
+            ret, Kc, dc, rvecs, tvecs = cv2.calibrateCamera(
+                objp_std, imgp_std, (w, h), None, None,
+                flags=cv2.CALIB_FIX_K3)
 
             camera_matrix = Kc
-            # ensure dist_coeffs is a column vector
-            dist_coeffs = np.array(dc, dtype=np.float64).reshape(-1, 1)
+            # dist_coeffs from calibrateCamera is already (1, 4) or (4, 1), ensure (4, 1) format
+            dist_coeffs = np.array(dc, dtype=np.float64)
+            if dist_coeffs.ndim == 1:
+                dist_coeffs = dist_coeffs.reshape(-1, 1)
             settings_dirty = True
             calib_mode = False
             save_config_to_disk()
             return jsonify({"success": True, "model": "standard", "rms": float(ret), "camera_matrix": camera_matrix.tolist(), "dist_coeffs": dist_coeffs.tolist()})
         except Exception as e_std:
-            # Both calibration attempts failed
-            return jsonify({"success": False, "error": f"fisheye_error: {e_fisheye}; standard_error: {e_std}"}), 500
+            # Both calibration attempts failed - provide diagnostic info
+            err_msg = (
+                f"Calibration failed. "
+                f"Frames: {len(objpoints)}. "
+                f"Issues: Fisheye={str(e_fisheye)[:80]}... | Standard={str(e_std)[:80]}... "
+                f"Try: (1) Collect 10-20+ frames, (2) Move camera to different angles/distances, "
+                f"(3) Ensure good lighting and chessboard contrast."
+            )
+            return jsonify({"success": False, "error": err_msg}), 500
 
 
 @app.route('/api/camera_calibration/reset', methods=['POST'])
