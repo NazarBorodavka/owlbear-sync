@@ -477,13 +477,13 @@ def get_video_stream():
         if CCTAG_AVAILABLE and cctag_detector is None:
             cctag_detector = FastCCTagDetector(3) # 3 rings
             
-        def _detect_single_roi(circ):
+        def _detect_single_roi(circ, frame_gray=gray, fw=w, fh=h):
             circ_x, circ_y, circ_r = circ
             pad = int(circ_r * 0.2) + 10
-            y1, y2 = max(0, circ_y - circ_r - pad), min(h, circ_y + circ_r + pad)
-            x1, x2 = max(0, circ_x - circ_r - pad), min(w, circ_x + circ_r + pad)
+            y1, y2 = max(0, circ_y - circ_r - pad), min(fh, circ_y + circ_r + pad)
+            x1, x2 = max(0, circ_x - circ_r - pad), min(fw, circ_x + circ_r + pad)
 
-            roi = gray[y1:y2, x1:x2]
+            roi = frame_gray[y1:y2, x1:x2]
             if roi.size < 100:
                 return []
 
@@ -500,22 +500,29 @@ def get_video_stream():
                 print(f"CCTag detection error: {e}")
                 return []
 
-        if CCTAG_AVAILABLE and detected_circles:
-            # Parallelize CCTag detection over all cropped circles
-            futures = [cctag_executor.submit(_detect_single_roi, circ) for circ in detected_circles]
-            
-            for future in concurrent.futures.as_completed(futures):
-                raw_results = future.result()
-                for r in raw_results:
-                    rid = int(r.get('idx', -1))
-                    if rid < cctag_min_id or rid > cctag_max_id:
-                        continue
-                    
-                    center = (float(r.get('x', 0)), float(r.get('y', 0)))
-                    cctag_candidates.setdefault(rid, []).append({
-                        "center": center,
-                        "decision_margin": float(r.get('decision_margin', 1.0))
-                    })
+        # 1. Check if previous background CCTag analysis is complete
+        if hasattr(get_video_stream, "cctag_futures") and get_video_stream.cctag_futures:
+            if all(f.done() for f in get_video_stream.cctag_futures):
+                for future in get_video_stream.cctag_futures:
+                    try:
+                        raw_results = future.result()
+                        for r in raw_results:
+                            rid = int(r.get('idx', -1))
+                            if rid < cctag_min_id or rid > cctag_max_id:
+                                continue
+                            
+                            center = (float(r.get('x', 0)), float(r.get('y', 0)))
+                            cctag_candidates.setdefault(rid, []).append({
+                                "center": center,
+                                "decision_margin": float(r.get('decision_margin', 1.0))
+                            })
+                    except Exception as e:
+                        pass
+                get_video_stream.cctag_futures = None
+
+        # 2. If free, submit current frame for async analysis
+        if CCTAG_AVAILABLE and detected_circles and not getattr(get_video_stream, "cctag_futures", None):
+            get_video_stream.cctag_futures = [cctag_executor.submit(_detect_single_roi, circ, gray, w, h) for circ in detected_circles]
 
         if cctag_candidates:
             if not hasattr(get_video_stream, "tracked_tokens"):
