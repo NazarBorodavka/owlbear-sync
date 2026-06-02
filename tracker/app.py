@@ -548,7 +548,7 @@ def get_video_stream():
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                 cv2.THRESH_BINARY, 
                 block_size, 
-                5 # Constant subtracted from mean (tunes strictness of black)
+                2 # Lower C to retain black rings that are heavily washed out by projection glare
             )
             
             # 3. CCTag prefers smooth sub-pixel gradients rather than harsh binary stairs.
@@ -573,9 +573,9 @@ def get_video_stream():
                             if "id_votes" not in t_data:
                                 t_data["id_votes"] = {}
                                 
-                            # Exponentially decay historical votes (10% per cycle) to forget old/false IDs
+                            # Exponentially decay historical votes (5% per cycle) to remember history longer
                             for k in list(t_data["id_votes"].keys()):
-                                t_data["id_votes"][k] *= 0.9
+                                t_data["id_votes"][k] *= 0.95
                                 if t_data["id_votes"][k] < 0.1:
                                     del t_data["id_votes"][k]
 
