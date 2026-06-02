@@ -1,5 +1,7 @@
 import cv2
 import numpy as np
+import time
+import concurrent.futures
 from flask import Flask, render_template, Response, request, jsonify, send_from_directory
 from flask_socketio import SocketIO
 import threading
@@ -15,8 +17,15 @@ cctag_detector = None
 try:
     import sys
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../python')))
-    from cctag_ext import FastCCTagDetector
-    CCTAG_AVAILABLE = True
+    try:
+        from cctag_ext import FastCCTagDetector
+        CCTAG_AVAILABLE = True
+        cctag_detector = None
+        cctag_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        print("[OK] CCTag Native Backend Initialized.")
+    except Exception as e:
+        print("CCTag init error:", e)
+        CCTAG_AVAILABLE = False
 except Exception as e:
     print("CCTag init error:", e)
     CCTAG_AVAILABLE = False
@@ -465,34 +474,38 @@ def get_video_stream():
         cctag_candidates = {}
         markers = {}
         
-        for (circ_x, circ_y, circ_r) in detected_circles:
+        if CCTAG_AVAILABLE and cctag_detector is None:
+            cctag_detector = FastCCTagDetector(3) # 3 rings
+            
+        def _detect_single_roi(circ):
+            circ_x, circ_y, circ_r = circ
             pad = int(circ_r * 0.2) + 10
             y1, y2 = max(0, circ_y - circ_r - pad), min(h, circ_y + circ_r + pad)
             x1, x2 = max(0, circ_x - circ_r - pad), min(w, circ_x + circ_r + pad)
 
             roi = gray[y1:y2, x1:x2]
             if roi.size < 100:
-                continue
+                return []
 
             roi_enhanced = cv2.equalizeHist(roi)
-
+            img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
+            
             try:
-                if not CCTAG_AVAILABLE:
-                    continue
-                if cctag_detector is None:
-                    cctag_detector = FastCCTagDetector(3) # 3 rings
-
-                img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
-                
                 raw_results = cctag_detector.detect(img, min_ident_proba=cctag_min_ident_proba, cx=img.shape[1]/2.0, cy=img.shape[0]/2.0, fx=800.0, fy=800.0, offset_x=float(x1), offset_y=float(y1))
-                
                 if raw_results:
-                    # If multiple markers are detected inside the exact same cropped disk, 
-                    # they are overlapping interpretations of the same physical marker.
-                    # Retain only the one with the highest confidence.
                     best_result = max(raw_results, key=lambda x: x.get('decision_margin', 0))
-                    raw_results = [best_result]
+                    return [best_result]
+                return []
+            except Exception as e:
+                print(f"CCTag detection error: {e}")
+                return []
 
+        if CCTAG_AVAILABLE and detected_circles:
+            # Parallelize CCTag detection over all cropped circles
+            futures = [cctag_executor.submit(_detect_single_roi, circ) for circ in detected_circles]
+            
+            for future in concurrent.futures.as_completed(futures):
+                raw_results = future.result()
                 for r in raw_results:
                     rid = int(r.get('idx', -1))
                     if rid < cctag_min_id or rid > cctag_max_id:
@@ -503,9 +516,6 @@ def get_video_stream():
                         "center": center,
                         "decision_margin": float(r.get('decision_margin', 1.0))
                     })
-            except Exception as e:
-                print(f"CCTag detection error: {e}")
-                continue
 
         if cctag_candidates:
             if not hasattr(get_video_stream, "tracked_tokens"):
