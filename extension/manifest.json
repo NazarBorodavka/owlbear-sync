@@ -4,8 +4,8 @@
   "manifest_version": 1,
   "action": {
     "title": "Token Sync",
-    "icon": "https://owlbear-tracker.n4z4r.com/extension/icon.svg",
-    "popover": "https://owlbear-tracker.n4z4r.com/extension/index.html",
+    "icon": "/extension/icon.svg",
+    "popover": "/extension/index.html",
     "width": 350,
     "height": 500
   }

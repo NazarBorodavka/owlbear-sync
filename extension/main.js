@@ -5,7 +5,7 @@ document.querySelector('#app').innerHTML = `
   <div class="container">
     <h2>Token Sync</h2>
     <div class="connection-box">
-      <input type="text" id="ws-url" value="https://owlbear-tracker.n4z4r.com/" placeholder="Tracker URL" />
+      <input type="text" id="ws-url" value="http://localhost:5000/" placeholder="Tracker URL (e.g. http://localhost:5000/)" />
       <button id="connect-btn">Connect</button>
       <div id="status" class="status disconnected">Disconnected</div>
     </div>
