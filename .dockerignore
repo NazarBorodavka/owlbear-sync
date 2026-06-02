@@ -1,0 +1,7 @@
+tracker/venv/
+CCTag-develop/build/
+python/build/
+.git/
+.idea/
+.github/
+__pycache__/

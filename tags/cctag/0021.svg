@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:ev="http://www.w3.org/2001/xml-events" xmlns:xlink="http://www.w3.org/1999/xlink" baseProfile="tiny" height="1000" version="1.2" width="1000">
+  <defs/>
+  <circle cx="500.0" cy="500.0" fill="black" r="500.0"/>
+  <circle cx="500.0" cy="500.0" fill="white" r="425.0"/>
+  <circle cx="500.0" cy="500.0" fill="black" r="375.0"/>
+  <circle cx="500.0" cy="500.0" fill="white" r="300.0"/>
+  <circle cx="500.0" cy="500.0" fill="black" r="250.0"/>
+  <circle cx="500.0" cy="500.0" fill="white" r="175.0"/>
+</svg>

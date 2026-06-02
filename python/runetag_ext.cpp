@@ -74,6 +74,16 @@ public:
                   << " | MinArea: " << minarea << " MaxArea: " << maxarea
                   << " | Ellipses found: " << foundEllipses.size() << std::endl;
 
+        // Save debug images
+        system("mkdir -p temp_debug");
+        cv::imwrite("temp_debug/crop.jpg", process_img);
+        
+        cv::Mat debug_ellipses = process_img.clone();
+        for(size_t i = 0; i < foundEllipses.size(); i++) {
+            cv::ellipse(debug_ellipses, foundEllipses[i], cv::Scalar(0, 255, 0), 1);
+        }
+        cv::imwrite("temp_debug/ellipses.jpg", debug_ellipses);
+
         std::vector<cv::runetag::MarkerDetected> tags_found;
         pDetector->dbgimage = process_img.clone();
         

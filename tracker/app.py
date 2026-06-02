@@ -9,20 +9,17 @@ from flask_httpauth import HTTPBasicAuth
 import json
 import collections
 
-# RUNEtag Support
-RUNETAG_AVAILABLE = False
-runetag_detector = None
+# CCTag Support
+CCTAG_AVAILABLE = False
+cctag_detector = None
 try:
-    import ctypes
-    import os
-    ctypes.CDLL('libopencv_imgcodecs.so', mode=ctypes.RTLD_GLOBAL)
     import sys
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../python')))
-    from runetag_ext import FastRuneTagDetector
-    RUNETAG_AVAILABLE = True
+    from cctag_ext import FastCCTagDetector
+    CCTAG_AVAILABLE = True
 except Exception as e:
-    print("RUNEtag init error:", e)
-    RUNETAG_AVAILABLE = False
+    print("CCTag init error:", e)
+    CCTAG_AVAILABLE = False
 
 class IPCameraCapture:
     def __init__(self, url):
@@ -109,7 +106,7 @@ def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global auto_blank
-    global runetag_min_area, runetag_min_id, runetag_max_id
+    global cctag_min_area, cctag_min_id, cctag_max_id
     global token_aliases, manual_blank
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
     global src_pts, corner_idx, homography_matrix
@@ -119,9 +116,10 @@ def load_config_from_disk():
         try:
             with open(config_path, 'r') as f:
                 c = json.load(f)
-                runetag_min_area = float(c.get('runetag_min_area', 100.0))
-                runetag_min_id = int(c.get('runetag_min_id', 0))
-                runetag_max_id = int(c.get('runetag_max_id', 9))
+                cctag_min_area = float(c.get('cctag_min_area', 100.0))
+                cctag_min_id = int(c.get('cctag_min_id', 0))
+                cctag_max_id = int(c.get('cctag_max_id', 9))
+                cctag_min_ident_proba = float(c.get('cctag_min_ident_proba', 1e-6))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -184,9 +182,10 @@ def save_config_to_disk():
         'hough_param1': hough_param1, 'hough_param2': hough_param2,
         'hough_min_radius': hough_min_radius, 'hough_max_radius': hough_max_radius,
         'auto_blank': auto_blank,
-        'runetag_min_area': runetag_min_area,
-        'runetag_min_id': runetag_min_id,
-        'runetag_max_id': runetag_max_id,
+        'cctag_min_area': cctag_min_area,
+        'cctag_min_id': cctag_min_id,
+        'cctag_max_id': cctag_max_id,
+        'cctag_min_ident_proba': cctag_min_ident_proba,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin"),
         'calibration_model': calibration_model,
@@ -241,9 +240,10 @@ auto_blank = False # Toggle for anti-reflection mode
 flip_x = False
 flip_y = False
 
-runetag_min_area = 100.0
-runetag_min_id = 0
-runetag_max_id = 9
+cctag_min_area = 100.0
+cctag_min_id = 0
+cctag_max_id = 9
+cctag_min_ident_proba = 1e-6
 manual_blank = False
 
 # Performance optimization: Cache for software exposure table
@@ -288,9 +288,9 @@ def get_video_stream():
     global raw_frame_for_stream, undistorted_frame_for_stream
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global RUNETAG_AVAILABLE, runetag_detector
+    global CCTAG_AVAILABLE, cctag_detector
     global src_pts, corner_idx, homography_matrix, auto_blank, manual_blank
-    global runetag_min_area, runetag_min_id, runetag_max_id
+    global cctag_min_area, cctag_min_id, cctag_max_id
     global camera_matrix, dist_coeffs, calibration_model
 
     fail_count = 0
@@ -452,7 +452,7 @@ def get_video_stream():
                 is_inner = False
                 for (ax, ay, ar) in detected_circles:
                     dist = np.sqrt((x - ax)**2 + (y - ay)**2)
-                    if dist < ar: # Center is inside an existing circle
+                    if dist < ar * 1.5: # Center is close to an existing larger circle (nested ring)
                         is_inner = True
                         break
                 if not is_inner:
@@ -461,8 +461,8 @@ def get_video_stream():
                     if show_overlay:
                         cv2.circle(frame, (x, y), r, (0, 255, 255), 2)
 
-        # Collect RUNEtag detections per disk
-        runetag_candidates = {}
+        # Collect CCTag detections per disk
+        cctag_candidates = {}
         markers = {}
         
         for (circ_x, circ_y, circ_r) in detected_circles:
@@ -477,35 +477,41 @@ def get_video_stream():
             roi_enhanced = cv2.equalizeHist(roi)
 
             try:
-                if not RUNETAG_AVAILABLE:
+                if not CCTAG_AVAILABLE:
                     continue
-                if runetag_detector is None:
-                    model_paths = [os.path.abspath(os.path.join(os.path.dirname(__file__), f"../tags/tag_{i}.txt")) for i in range(10)]
-                    runetag_detector = FastRuneTagDetector(model_paths, cx=w/2, cy=h/2)
+                if cctag_detector is None:
+                    cctag_detector = FastCCTagDetector(3) # 3 rings
 
                 img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
                 
-                raw_results = runetag_detector.detect(img, minarea=runetag_min_area, maxarea=10000.0, minroundness=0.3, cx=img.shape[1]/2.0, cy=img.shape[0]/2.0, fx=800.0, fy=800.0, offset_x=float(x1), offset_y=float(y1))
+                raw_results = cctag_detector.detect(img, min_ident_proba=cctag_min_ident_proba, cx=img.shape[1]/2.0, cy=img.shape[0]/2.0, fx=800.0, fy=800.0, offset_x=float(x1), offset_y=float(y1))
                 
+                if raw_results:
+                    # If multiple markers are detected inside the exact same cropped disk, 
+                    # they are overlapping interpretations of the same physical marker.
+                    # Retain only the one with the highest confidence.
+                    best_result = max(raw_results, key=lambda x: x.get('decision_margin', 0))
+                    raw_results = [best_result]
+
                 for r in raw_results:
                     rid = int(r.get('idx', -1))
-                    if rid < runetag_min_id or rid > runetag_max_id:
+                    if rid < cctag_min_id or rid > cctag_max_id:
                         continue
                     
                     center = (float(r.get('x', 0)), float(r.get('y', 0)))
-                    runetag_candidates.setdefault(rid, []).append({
+                    cctag_candidates.setdefault(rid, []).append({
                         "center": center,
-                        "decision_margin": 1.0
+                        "decision_margin": float(r.get('decision_margin', 1.0))
                     })
             except Exception as e:
-                print(f"RUNEtag detection error: {e}")
+                print(f"CCTag detection error: {e}")
                 continue
 
-        if runetag_candidates:
+        if cctag_candidates:
             if not hasattr(get_video_stream, "tracked_tokens"):
                 get_video_stream.tracked_tokens = {}
 
-            for rid, candidates in runetag_candidates.items():
+            for rid, candidates in cctag_candidates.items():
                 prev = get_video_stream.tracked_tokens.get(f"Marker_{rid}")
 
                 def _cand_score(c):
@@ -617,7 +623,7 @@ def get_video_stream():
         for token_id in list(get_video_stream.tracked_tokens.keys()):
             if token_id not in matched_ids:
                 get_video_stream.tracked_tokens[token_id]["missed"] += 1
-                if get_video_stream.tracked_tokens[token_id]["missed"] > 45: # 3 second ghosting
+                if get_video_stream.tracked_tokens[token_id]["missed"] > 10: # ~0.5 second ghosting
                     del get_video_stream.tracked_tokens[token_id]
                     
         # Render and prepare payloads
@@ -1029,26 +1035,24 @@ def update_settings():
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global auto_blank, token_aliases
     global camera_url, manual_blank, flip_x, flip_y
-    global RUNETAG_AVAILABLE, runetag_min_area, runetag_min_id, runetag_max_id
+    global CCTAG_AVAILABLE, cctag_min_area, cctag_min_id, cctag_max_id, cctag_min_ident_proba
 
     data = request.json
     if 'camera_url' in data:
         camera_url = data['camera_url']
-    if 'runetag_min_area' in data:
+    if 'cctag_min_id' in data:
         try:
-            val = float(data['runetag_min_area'])
-        except Exception:
-            val = runetag_min_area
-        # Clamp to reasonable range to avoid pathological values that may destabilize native detectors
-        runetag_min_area = max(0.0, min(100.0, val))
-    if 'runetag_min_id' in data:
-        try:
-            runetag_min_id = int(data['runetag_min_id'])
+            cctag_min_id = int(data['cctag_min_id'])
         except Exception:
             pass
-    if 'runetag_max_id' in data:
+    if 'cctag_max_id' in data:
         try:
-            runetag_max_id = int(data['runetag_max_id'])
+            cctag_max_id = int(data['cctag_max_id'])
+        except Exception:
+            pass
+    if 'cctag_min_ident_proba' in data:
+        try:
+            cctag_min_ident_proba = float(data['cctag_min_ident_proba'])
         except Exception:
             pass
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
@@ -1080,7 +1084,7 @@ def update_settings():
         to_delete = []
         for tid, tdata in get_video_stream.tracked_tokens.items():
             rid = tdata.get('marker_id', -1)
-            if rid != -1 and (rid < runetag_min_id or rid > runetag_max_id):
+            if rid != -1 and (rid < cctag_min_id or rid > cctag_max_id):
                 to_delete.append(tid)
         for tid in to_delete:
             del get_video_stream.tracked_tokens[tid]
