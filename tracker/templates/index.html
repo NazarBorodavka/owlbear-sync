@@ -546,6 +546,30 @@
                             <p class="help-text">Filters false positives. '4' is standard. Higher values (e.g. 8) are strictly accurate but may miss faint tags. Lower values (e.g. 0) detect very faint tags but may misidentify them.</p>
                         </div>
                         <div class="control-group" style="margin-top: 15px;">
+                            <label><span>ID Voting Decay</span> <input type="number" id="val_cctag_id_voting_decay"
+                                    value="0.95" step="0.01" min="0.5" max="0.99" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_id_voting_decay'); updateSettings()"></label>
+                            <input type="range" id="cctag_id_voting_decay" min="0.5" max="0.99" step="0.01" value="0.95"
+                                oninput="updateVal('cctag_id_voting_decay')">
+                            <p class="help-text">Controls how long a token "remembers" its ID. High values (0.95+) prevent flickering and swapping by ignoring short-term hallucinations. Lower values make tokens recover faster if misidentified.</p>
+                        </div>
+                        <div class="control-group" style="margin-top: 15px;">
+                            <label><span>Glare Strictness (C)</span> <input type="number" id="val_cctag_adaptive_thresh_c"
+                                    value="2" step="1" min="-10" max="20" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_adaptive_thresh_c'); updateSettings()"></label>
+                            <input type="range" id="cctag_adaptive_thresh_c" min="-10" max="20" step="1" value="2"
+                                oninput="updateVal('cctag_adaptive_thresh_c')">
+                            <p class="help-text">Threshold for black rings. Lower values (e.g. 0 to 2) help recognize tokens when bright projector light washes out the black ink. Higher values (e.g. 5+) reduce false positives on noisy backgrounds.</p>
+                        </div>
+                        <div class="control-group" style="margin-top: 15px;">
+                            <label><span>Ghosting Persistence</span> <input type="number" id="val_cctag_ghosting_frames"
+                                    value="30" step="1" min="1" max="90" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_ghosting_frames'); updateSettings()"></label>
+                            <input type="range" id="cctag_ghosting_frames" min="1" max="90" step="1" value="30"
+                                oninput="updateVal('cctag_ghosting_frames')">
+                            <p class="help-text">Number of frames a token survives while physically hidden/occluded (e.g. by a hand). 30 frames is roughly 1 second. High values prevent tokens from vanishing during interaction.</p>
+                        </div>
+                        <div class="control-group" style="margin-top: 15px;">
                             <label><span>Fixed Family</span>
                                 <input type="text" id="cctag_family_display" class="val-input" value="3 Crowns"
                                     readonly style="width: 100%; text-align: left; opacity: 0.85;">
@@ -791,7 +815,10 @@
                 cctag_family: '3 crowns',
                 cctag_min_id: document.getElementById('cctag_min_id').value,
                 cctag_max_id: document.getElementById('cctag_max_id').value,
-                cctag_min_ident_proba: Math.pow(10, parseFloat(document.getElementById('cctag_min_ident_proba').value) - 10)
+                cctag_min_ident_proba: Math.pow(10, parseFloat(document.getElementById('cctag_min_ident_proba').value) - 10),
+                cctag_id_voting_decay: parseFloat(document.getElementById('cctag_id_voting_decay').value),
+                cctag_adaptive_thresh_c: parseFloat(document.getElementById('cctag_adaptive_thresh_c').value),
+                cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value)
             };
 
             // Update UI numeric inputs
@@ -863,7 +890,10 @@
                 cctag_family: '3 crowns',
                 cctag_min_id: document.getElementById('cctag_min_id').value,
                 cctag_max_id: document.getElementById('cctag_max_id').value,
-                cctag_min_ident_proba: Math.pow(10, parseFloat(document.getElementById('cctag_min_ident_proba').value) - 10)
+                cctag_min_ident_proba: Math.pow(10, parseFloat(document.getElementById('cctag_min_ident_proba').value) - 10),
+                cctag_id_voting_decay: parseFloat(document.getElementById('cctag_id_voting_decay').value),
+                cctag_adaptive_thresh_c: parseFloat(document.getElementById('cctag_adaptive_thresh_c').value),
+                cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value)
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -888,6 +918,18 @@
                         if (mappedVal < 1) mappedVal = Math.max(0, Math.round(10 + Math.log10(mappedVal)));
                         document.getElementById('cctag_min_ident_proba').value = mappedVal;
                         document.getElementById('val_cctag_min_ident_proba').value = mappedVal;
+                    }
+                    if (config.cctag_id_voting_decay !== undefined) {
+                        document.getElementById('cctag_id_voting_decay').value = config.cctag_id_voting_decay;
+                        document.getElementById('val_cctag_id_voting_decay').value = config.cctag_id_voting_decay;
+                    }
+                    if (config.cctag_adaptive_thresh_c !== undefined) {
+                        document.getElementById('cctag_adaptive_thresh_c').value = config.cctag_adaptive_thresh_c;
+                        document.getElementById('val_cctag_adaptive_thresh_c').value = config.cctag_adaptive_thresh_c;
+                    }
+                    if (config.cctag_ghosting_frames !== undefined) {
+                        document.getElementById('cctag_ghosting_frames').value = config.cctag_ghosting_frames;
+                        document.getElementById('val_cctag_ghosting_frames').value = config.cctag_ghosting_frames;
                     }
                     if (config.exposure !== undefined) document.getElementById('exposure').value = config.exposure;
                     if (config.contrast !== undefined) document.getElementById('contrast').value = config.contrast;

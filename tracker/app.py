@@ -129,6 +129,9 @@ def load_config_from_disk():
                 cctag_min_id = int(c.get('cctag_min_id', 0))
                 cctag_max_id = int(c.get('cctag_max_id', 9))
                 cctag_min_ident_proba = float(c.get('cctag_min_ident_proba', 1e-6))
+                cctag_id_voting_decay = float(c.get('cctag_id_voting_decay', 0.95))
+                cctag_adaptive_thresh_c = float(c.get('cctag_adaptive_thresh_c', 2.0))
+                cctag_ghosting_frames = int(c.get('cctag_ghosting_frames', 30))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -195,6 +198,9 @@ def save_config_to_disk():
         'cctag_min_id': cctag_min_id,
         'cctag_max_id': cctag_max_id,
         'cctag_min_ident_proba': cctag_min_ident_proba,
+        'cctag_id_voting_decay': cctag_id_voting_decay,
+        'cctag_adaptive_thresh_c': cctag_adaptive_thresh_c,
+        'cctag_ghosting_frames': cctag_ghosting_frames,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin"),
         'calibration_model': calibration_model,
@@ -253,6 +259,9 @@ cctag_min_area = 100.0
 cctag_min_id = 0
 cctag_max_id = 9
 cctag_min_ident_proba = 1e-6
+cctag_id_voting_decay = 0.95
+cctag_adaptive_thresh_c = 2.0
+cctag_ghosting_frames = 30
 manual_blank = False
 
 # Performance optimization: Cache for software exposure table
@@ -512,7 +521,7 @@ def get_video_stream():
         for token_id in list(get_video_stream.tracked_tokens.items()):
             if token_id[0] not in matched_tokens:
                 get_video_stream.tracked_tokens[token_id[0]]["missed"] += 1
-                if get_video_stream.tracked_tokens[token_id[0]]["missed"] > 30: # ~1.0 second ghosting persistence
+                if get_video_stream.tracked_tokens[token_id[0]]["missed"] > cctag_ghosting_frames: # default ~1.0 second ghosting persistence
                     del get_video_stream.tracked_tokens[token_id[0]]
 
         # --- SLOW RECOGNIZER: ID assignment via CCTag ---
@@ -548,7 +557,7 @@ def get_video_stream():
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                 cv2.THRESH_BINARY, 
                 block_size, 
-                2 # Lower C to retain black rings that are heavily washed out by projection glare
+                cctag_adaptive_thresh_c # Tunes strictness of black vs projection glare
             )
             
             # 3. CCTag prefers smooth sub-pixel gradients rather than harsh binary stairs.
@@ -573,9 +582,9 @@ def get_video_stream():
                             if "id_votes" not in t_data:
                                 t_data["id_votes"] = {}
                                 
-                            # Exponentially decay historical votes (5% per cycle) to remember history longer
+                            # Exponentially decay historical votes to remember history longer
                             for k in list(t_data["id_votes"].keys()):
-                                t_data["id_votes"][k] *= 0.95
+                                t_data["id_votes"][k] *= cctag_id_voting_decay
                                 if t_data["id_votes"][k] < 0.1:
                                     del t_data["id_votes"][k]
 
@@ -1060,6 +1069,7 @@ def update_settings():
     global auto_blank, token_aliases
     global camera_url, manual_blank, flip_x, flip_y
     global CCTAG_AVAILABLE, cctag_min_area, cctag_min_id, cctag_max_id, cctag_min_ident_proba
+    global cctag_id_voting_decay, cctag_adaptive_thresh_c, cctag_ghosting_frames
 
     data = request.json
     if 'camera_url' in data:
@@ -1079,6 +1089,18 @@ def update_settings():
             cctag_min_ident_proba = float(data['cctag_min_ident_proba'])
         except Exception:
             pass
+    if 'cctag_id_voting_decay' in data:
+        try:
+            cctag_id_voting_decay = float(data['cctag_id_voting_decay'])
+        except Exception: pass
+    if 'cctag_adaptive_thresh_c' in data:
+        try:
+            cctag_adaptive_thresh_c = float(data['cctag_adaptive_thresh_c'])
+        except Exception: pass
+    if 'cctag_ghosting_frames' in data:
+        try:
+            cctag_ghosting_frames = int(data['cctag_ghosting_frames'])
+        except Exception: pass
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
     if 'zoom' in data: zoom_level = float(data['zoom'])
     if 'offset_x' in data: offset_x = float(data['offset_x'])
