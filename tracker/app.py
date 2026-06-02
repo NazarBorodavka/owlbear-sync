@@ -520,8 +520,9 @@ def get_video_stream():
             cctag_detector = FastCCTagDetector(3) # 3 rings
             
         def _detect_single_roi_from_token(t_id, cx, cy, cr, frame_gray=gray, fw=w, fh=h):
-            # Pad by 50% of the radius on all sides (making the bounding box 1.5x the diameter)
-            pad = int(cr * 0.5)
+            # TIGHT padding: We use raw coordinates so there's no lag.
+            # A tight crop prevents the map projection background from confusing the detector.
+            pad = int(cr * 0.25) + 5
             y1, y2 = max(0, int(cy - cr - pad)), min(fh, int(cy + cr + pad))
             x1, x2 = max(0, int(cx - cr - pad)), min(fw, int(cx + cr + pad))
 
@@ -529,9 +530,9 @@ def get_video_stream():
             if roi.size < 100:
                 return (t_id, None)
 
-            # Optional: CLAHE works better than global equalizeHist for varied lighting
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-            roi_enhanced = clahe.apply(roi)
+            # Revert to Global Histogram Equalization.
+            # CLAHE on a tiny 100x100 ROI destroys the marker by amplifying map texture noise!
+            roi_enhanced = cv2.equalizeHist(roi)
             img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
             
             try:
