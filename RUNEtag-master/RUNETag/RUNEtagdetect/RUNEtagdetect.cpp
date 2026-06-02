@@ -433,7 +433,7 @@ int main (int argc, char** argv)
         {
             cv::RotatedRect rr = foundEllipses[i];
             rr.angle=-rr.angle;
-            cv::ellipse( dbgout, rr, CV_RGB(255,0,0),1,CV_AA );
+            cv::ellipse( dbgout, rr, CV_RGB(255,0,0),1,cv::LINE_AA );
         }
 
         std::cout << "> Rendering ellipses" << std::endl;
@@ -541,7 +541,7 @@ int main (int argc, char** argv)
 		if(pnprefine)
 			flags |= cv::runetag::FLAG_REFINE;
 
-		cv::runetag::Pose RT = cv::runetag::findPose( tags_found[i], intrinsics, distortion, &poseok, method==0?CV_ITERATIVE:CV_EPNP, flags);
+		cv::runetag::Pose RT = cv::runetag::findPose( tags_found[i], intrinsics, distortion, &poseok, method==0?cv::SOLVEPNP_ITERATIVE:CV_EPNP, flags);
 
         if( poseok )
         {

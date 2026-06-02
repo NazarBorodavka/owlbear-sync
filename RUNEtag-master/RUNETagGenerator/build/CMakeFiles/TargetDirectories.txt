@@ -1,0 +1,9 @@
+/home/nazar/My Files/Projects/Code/owlbear-sync/owlbear-sync/RUNEtag-master/RUNETagGenerator/build/CMakeFiles/RUNETagGenerator.dir
+/home/nazar/My Files/Projects/Code/owlbear-sync/owlbear-sync/RUNEtag-master/RUNETagGenerator/build/CMakeFiles/edit_cache.dir
+/home/nazar/My Files/Projects/Code/owlbear-sync/owlbear-sync/RUNEtag-master/RUNETagGenerator/build/CMakeFiles/rebuild_cache.dir
+/home/nazar/My Files/Projects/Code/owlbear-sync/owlbear-sync/RUNEtag-master/RUNETagGenerator/build/CMakeFiles/list_install_components.dir
+/home/nazar/My Files/Projects/Code/owlbear-sync/owlbear-sync/RUNEtag-master/RUNETagGenerator/build/CMakeFiles/install.dir
+/home/nazar/My Files/Projects/Code/owlbear-sync/owlbear-sync/RUNEtag-master/RUNETagGenerator/build/CMakeFiles/install/local.dir
+/home/nazar/My Files/Projects/Code/owlbear-sync/owlbear-sync/RUNEtag-master/RUNETagGenerator/build/CMakeFiles/install/strip.dir
+/home/nazar/My Files/Projects/Code/owlbear-sync/owlbear-sync/RUNEtag-master/RUNETagGenerator/build/CMakeFiles/RUNETagGenerator_autogen_timestamp_deps.dir
+/home/nazar/My Files/Projects/Code/owlbear-sync/owlbear-sync/RUNEtag-master/RUNETagGenerator/build/CMakeFiles/RUNETagGenerator_autogen.dir

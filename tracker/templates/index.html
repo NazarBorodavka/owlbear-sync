@@ -516,30 +516,30 @@
 
                 <div class="glass-panel">
                     <h3>AprilTag Detection</h3>
-                    <div id="settings_apriltag" style="margin-top: 10px;">
+                    <div id="settings_runetag" style="margin-top: 10px;">
                         <h4>AprilTag Settings</h4>
                         <div class="control-group">
-                            <label><span>Decision Margin</span> <input type="number" id="val_apriltag_decision_margin"
+                            <label><span>Minimum Area</span> <input type="number" id="val_runetag_min_area"
                                     value="30" step="5" class="val-input"
-                                    oninput="syncSlider(this, 'apriltag_decision_margin'); updateSettings()"></label>
-                            <input type="range" id="apriltag_decision_margin" min="0" max="150" step="5" value="30"
-                                oninput="updateVal('apriltag_decision_margin')">
+                                    oninput="syncSlider(this, 'runetag_min_area'); updateSettings()"></label>
+                            <input type="range" id="runetag_min_area" min="0" max="150" step="5" value="30"
+                                oninput="updateVal('runetag_min_area')">
                             <p class="help-text">Higher values reduce false positives for tag16h5.</p>
                         </div>
                         <div class="control-group" style="display: flex; gap: 10px; margin-top: 15px;">
                             <div style="flex: 1;">
                                 <label style="display:block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Min Tag ID</label>
-                                <input type="number" id="apriltag_min_id" value="0" min="0" max="255" class="val-input" style="width: 100%;" onchange="updateSettings()">
+                                <input type="number" id="runetag_min_id" value="0" min="0" max="255" class="val-input" style="width: 100%;" onchange="updateSettings()">
                             </div>
                             <div style="flex: 1;">
                                 <label style="display:block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Max Tag ID</label>
-                                <input type="number" id="apriltag_max_id" value="30" min="0" max="255" class="val-input" style="width: 100%;" onchange="updateSettings()">
+                                <input type="number" id="runetag_max_id" value="30" min="0" max="255" class="val-input" style="width: 100%;" onchange="updateSettings()">
                             </div>
                         </div>
                         <p class="help-text" style="margin-top: 5px;">Ignore tags outside this range (useful to prevent false positives from turning into ghost tokens).</p>
                         <div class="control-group">
                             <label><span>Fixed Family</span>
-                                <input type="text" id="apriltag_family_display" class="val-input" value="tag16h5"
+                                <input type="text" id="runetag_family_display" class="val-input" value="tag16h5"
                                     readonly style="width: 100%; text-align: left; opacity: 0.85;">
                             </label>
                             <p class="help-text">This build uses AprilTag 16h5 for detection.</p>
@@ -780,10 +780,10 @@
                 hough_param1: document.getElementById('hough_param1').value,
                 hough_param2: document.getElementById('hough_param2').value,
 
-                apriltag_family: 'tag16h5',
-                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value,
-                apriltag_min_id: document.getElementById('apriltag_min_id').value,
-                apriltag_max_id: document.getElementById('apriltag_max_id').value
+                runetag_family: 'tag16h5',
+                runetag_min_area: document.getElementById('runetag_min_area').value,
+                runetag_min_id: document.getElementById('runetag_min_id').value,
+                runetag_max_id: document.getElementById('runetag_max_id').value
             };
 
             // Update UI numeric inputs
@@ -846,10 +846,10 @@
                 hough_param1: document.getElementById('hough_param1').value,
                 hough_param2: document.getElementById('hough_param2').value,
 
-                apriltag_family: 'tag16h5',
-                apriltag_decision_margin: document.getElementById('apriltag_decision_margin').value,
-                apriltag_min_id: document.getElementById('apriltag_min_id').value,
-                apriltag_max_id: document.getElementById('apriltag_max_id').value
+                runetag_family: 'tag16h5',
+                runetag_min_area: document.getElementById('runetag_min_area').value,
+                runetag_min_id: document.getElementById('runetag_min_id').value,
+                runetag_max_id: document.getElementById('runetag_max_id').value
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -866,12 +866,12 @@
                     if (config.offset_y !== undefined) document.getElementById('offset_y').value = config.offset_y;
                     if (config.rotation !== undefined) document.getElementById('rotation').value = config.rotation;
 
-                    if (config.apriltag_decision_margin !== undefined) {
-                        document.getElementById('apriltag_decision_margin').value = config.apriltag_decision_margin;
-                        document.getElementById('val_apriltag_decision_margin').value = config.apriltag_decision_margin;
+                    if (config.runetag_min_area !== undefined) {
+                        document.getElementById('runetag_min_area').value = config.runetag_min_area;
+                        document.getElementById('val_runetag_min_area').value = config.runetag_min_area;
                     }
-                    if (config.apriltag_min_id !== undefined) document.getElementById('apriltag_min_id').value = config.apriltag_min_id;
-                    if (config.apriltag_max_id !== undefined) document.getElementById('apriltag_max_id').value = config.apriltag_max_id;
+                    if (config.runetag_min_id !== undefined) document.getElementById('runetag_min_id').value = config.runetag_min_id;
+                    if (config.runetag_max_id !== undefined) document.getElementById('runetag_max_id').value = config.runetag_max_id;
                     if (config.exposure !== undefined) document.getElementById('exposure').value = config.exposure;
                     if (config.contrast !== undefined) document.getElementById('contrast').value = config.contrast;
                     if (config.brightness !== undefined) document.getElementById('brightness').value = config.brightness;

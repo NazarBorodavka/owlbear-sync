@@ -9,14 +9,20 @@ from flask_httpauth import HTTPBasicAuth
 import json
 import collections
 
-# AprilTag Support: use pupil_apriltags as the single backend.
-APRILTAG_AVAILABLE = False
-apriltag_detector = None
+# RUNEtag Support
+RUNETAG_AVAILABLE = False
+runetag_detector = None
 try:
-    from pupil_apriltags import Detector as AprilTagDetector
-    APRILTAG_AVAILABLE = True
-except Exception:
-    APRILTAG_AVAILABLE = False
+    import ctypes
+    import os
+    ctypes.CDLL('libopencv_imgcodecs.so', mode=ctypes.RTLD_GLOBAL)
+    import sys
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../python')))
+    from runetag_ext import FastRuneTagDetector
+    RUNETAG_AVAILABLE = True
+except Exception as e:
+    print("RUNEtag init error:", e)
+    RUNETAG_AVAILABLE = False
 
 class IPCameraCapture:
     def __init__(self, url):
@@ -103,7 +109,7 @@ def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global auto_blank
-    global apriltag_family, apriltag_decision_margin, apriltag_min_id, apriltag_max_id
+    global runetag_min_area, runetag_min_id, runetag_max_id
     global token_aliases, manual_blank
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
     global src_pts, corner_idx, homography_matrix
@@ -113,10 +119,9 @@ def load_config_from_disk():
         try:
             with open(config_path, 'r') as f:
                 c = json.load(f)
-                apriltag_family = 'tag16h5'
-                apriltag_decision_margin = float(c.get('apriltag_decision_margin', 30.0))
-                apriltag_min_id = int(c.get('apriltag_min_id', 0))
-                apriltag_max_id = int(c.get('apriltag_max_id', 255))
+                runetag_min_area = float(c.get('runetag_min_area', 100.0))
+                runetag_min_id = int(c.get('runetag_min_id', 0))
+                runetag_max_id = int(c.get('runetag_max_id', 9))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -179,10 +184,9 @@ def save_config_to_disk():
         'hough_param1': hough_param1, 'hough_param2': hough_param2,
         'hough_min_radius': hough_min_radius, 'hough_max_radius': hough_max_radius,
         'auto_blank': auto_blank,
-        'apriltag_family': apriltag_family,
-        'apriltag_decision_margin': apriltag_decision_margin,
-        'apriltag_min_id': apriltag_min_id,
-        'apriltag_max_id': apriltag_max_id,
+        'runetag_min_area': runetag_min_area,
+        'runetag_min_id': runetag_min_id,
+        'runetag_max_id': runetag_max_id,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin"),
         'calibration_model': calibration_model,
@@ -237,10 +241,9 @@ auto_blank = False # Toggle for anti-reflection mode
 flip_x = False
 flip_y = False
 
-apriltag_family = 'tag16h5'
-apriltag_decision_margin = 30.0
-apriltag_min_id = 0
-apriltag_max_id = 255
+runetag_min_area = 100.0
+runetag_min_id = 0
+runetag_max_id = 9
 manual_blank = False
 
 # Performance optimization: Cache for software exposure table
@@ -285,9 +288,9 @@ def get_video_stream():
     global raw_frame_for_stream, undistorted_frame_for_stream
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global APRILTAG_AVAILABLE, apriltag_detector
+    global RUNETAG_AVAILABLE, runetag_detector
     global src_pts, corner_idx, homography_matrix, auto_blank, manual_blank
-    global apriltag_family, apriltag_decision_margin
+    global runetag_min_area, runetag_min_id, runetag_max_id
     global camera_matrix, dist_coeffs, calibration_model
 
     fail_count = 0
@@ -458,108 +461,51 @@ def get_video_stream():
                     if show_overlay:
                         cv2.circle(frame, (x, y), r, (0, 255, 255), 2)
 
-        # Collect AprilTag detections per disk, then resolve to a single token per tag id.
-        apriltag_candidates = {}
-        
+        # Collect RUNEtag detections per disk
+        runetag_candidates = {}
         markers = {}
-        # We now look for markers ONLY inside detected circles to avoid map noise
+        
         for (circ_x, circ_y, circ_r) in detected_circles:
-            # Crop a small area around the disk
-            pad = 40
+            pad = int(circ_r * 0.2) + 10
             y1, y2 = max(0, circ_y - circ_r - pad), min(h, circ_y + circ_r + pad)
             x1, x2 = max(0, circ_x - circ_r - pad), min(w, circ_x + circ_r + pad)
 
             roi = gray[y1:y2, x1:x2]
             if roi.size < 100:
-                continue  # Too small to process
+                continue
 
-            # Use enhanced ROI for all modes for consistency
             roi_enhanced = cv2.equalizeHist(roi)
 
             try:
-                # Restrict AprilTag detection to the disk ROI and keep the token centered on the disk center.
-                if not APRILTAG_AVAILABLE:
+                if not RUNETAG_AVAILABLE:
                     continue
-                try:
-                    if apriltag_detector is None:
-                        apriltag_detector = AprilTagDetector(families=apriltag_family)
-                    
-                    img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
-                    raw_results = apriltag_detector.detect(img)
-                    results = []
-                    for r in raw_results:
-                        rid = int(getattr(r, 'tag_id', getattr(r, 'id', -1)))
-                        center = [float(r.center[0]), float(r.center[1])] if hasattr(r, 'center') else [0.0, 0.0]
-                        results.append({'id': rid, 'center': center, 'decision_margin': getattr(r, 'decision_margin', None)})
-                except Exception as e:
-                    print(f"AprilTag detection error: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    results = []
+                if runetag_detector is None:
+                    model_paths = [os.path.abspath(os.path.join(os.path.dirname(__file__), f"../tags/tag_{i}.txt")) for i in range(10)]
+                    runetag_detector = FastRuneTagDetector(model_paths, cx=w/2, cy=h/2)
 
-                if results:
-                    # Pick the most confident detection in this disk.
-                    def _score(r):
-                        dm = r.get('decision_margin')
-                        return float(dm) if dm is not None else -1.0
-
-                    best = max(results, key=_score)
-                    best_dm = best.get('decision_margin', None)
-                    rid = int(best.get('id', -1))
-                    
-                    if rid < apriltag_min_id or rid > apriltag_max_id:
+                img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
+                
+                raw_results = runetag_detector.detect(img, minarea=runetag_min_area, maxarea=10000.0, minroundness=0.3, cx=img.shape[1]/2.0, cy=img.shape[0]/2.0, fx=800.0, fy=800.0, offset_x=float(x1), offset_y=float(y1))
+                
+                for r in raw_results:
+                    rid = int(r.get('idx', -1))
+                    if rid < runetag_min_id or rid > runetag_max_id:
                         continue
-                        
-                    if best_dm is None or best_dm >= apriltag_decision_margin:
-                        if rid >= 0:
-                            apriltag_candidates.setdefault(rid, []).append({
-                                "center": (circ_x, circ_y),
-                                "decision_margin": float(best_dm) if best_dm is not None else -1.0,
-                            })
+                    
+                    center = (float(r.get('x', 0)), float(r.get('y', 0)))
+                    runetag_candidates.setdefault(rid, []).append({
+                        "center": center,
+                        "decision_margin": 1.0
+                    })
             except Exception as e:
-                print(f"ERROR inside circle loop: {e}")
-                import traceback
-                traceback.print_exc()
+                print(f"RUNEtag detection error: {e}")
                 continue
 
-        # Fallback: if no ROI-constrained candidates were found, run AprilTag on the full frame.
-        if not apriltag_candidates and APRILTAG_AVAILABLE:
-            try:
-                if apriltag_detector is None:
-                    apriltag_detector = AprilTagDetector(families=apriltag_family)
-
-                full_img = np.ascontiguousarray(gray, dtype=np.uint8)
-                raw_results = apriltag_detector.detect(full_img)
-                full_results = []
-                for r in raw_results:
-                    rid = int(getattr(r, 'tag_id', getattr(r, 'id', -1)))
-                    center = [float(r.center[0]), float(r.center[1])] if hasattr(r, 'center') else [0.0, 0.0]
-                    full_results.append({'id': rid, 'center': center, 'decision_margin': getattr(r, 'decision_margin', None)})
-            except Exception as e:
-                print(f"AprilTag full-frame fallback error: {e}")
-                full_results = []
-
-            for r in full_results:
-                rid = int(r.get('id', -1))
-                if rid < apriltag_min_id or rid > apriltag_max_id:
-                    continue
-                    
-                dm = r.get('decision_margin', None)
-                if dm is not None and float(dm) < apriltag_decision_margin:
-                    continue
-                center = r.get('center') or [None, None]
-                if rid < 0 or center[0] is None or center[1] is None:
-                    continue
-                apriltag_candidates.setdefault(rid, []).append({
-                    "center": (float(center[0]), float(center[1])),
-                    "decision_margin": float(dm) if dm is not None else -1.0,
-                })
-
-        if apriltag_candidates:
+        if runetag_candidates:
             if not hasattr(get_video_stream, "tracked_tokens"):
                 get_video_stream.tracked_tokens = {}
 
-            for rid, candidates in apriltag_candidates.items():
+            for rid, candidates in runetag_candidates.items():
                 prev = get_video_stream.tracked_tokens.get(f"Marker_{rid}")
 
                 def _cand_score(c):
@@ -1083,30 +1029,28 @@ def update_settings():
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global auto_blank, token_aliases
     global camera_url, manual_blank, flip_x, flip_y
-    global APRILTAG_AVAILABLE, apriltag_family, apriltag_decision_margin, apriltag_min_id, apriltag_max_id
+    global RUNETAG_AVAILABLE, runetag_min_area, runetag_min_id, runetag_max_id
 
     data = request.json
     if 'camera_url' in data:
         camera_url = data['camera_url']
-    if 'apriltag_decision_margin' in data:
+    if 'runetag_min_area' in data:
         try:
-            val = float(data['apriltag_decision_margin'])
+            val = float(data['runetag_min_area'])
         except Exception:
-            val = apriltag_decision_margin
+            val = runetag_min_area
         # Clamp to reasonable range to avoid pathological values that may destabilize native detectors
-        apriltag_decision_margin = max(0.0, min(100.0, val))
-    if 'apriltag_min_id' in data:
+        runetag_min_area = max(0.0, min(100.0, val))
+    if 'runetag_min_id' in data:
         try:
-            apriltag_min_id = int(data['apriltag_min_id'])
+            runetag_min_id = int(data['runetag_min_id'])
         except Exception:
             pass
-    if 'apriltag_max_id' in data:
+    if 'runetag_max_id' in data:
         try:
-            apriltag_max_id = int(data['apriltag_max_id'])
+            runetag_max_id = int(data['runetag_max_id'])
         except Exception:
             pass
-    if 'apriltag_family' in data:
-        apriltag_family = 'tag16h5'
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
     if 'zoom' in data: zoom_level = float(data['zoom'])
     if 'offset_x' in data: offset_x = float(data['offset_x'])
@@ -1136,7 +1080,7 @@ def update_settings():
         to_delete = []
         for tid, tdata in get_video_stream.tracked_tokens.items():
             rid = tdata.get('marker_id', -1)
-            if rid != -1 and (rid < apriltag_min_id or rid > apriltag_max_id):
+            if rid != -1 and (rid < runetag_min_id or rid > runetag_max_id):
                 to_delete.append(tid)
         for tid in to_delete:
             del get_video_stream.tracked_tokens[tid]
