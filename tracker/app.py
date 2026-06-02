@@ -512,7 +512,7 @@ def get_video_stream():
         for token_id in list(get_video_stream.tracked_tokens.items()):
             if token_id[0] not in matched_tokens:
                 get_video_stream.tracked_tokens[token_id[0]]["missed"] += 1
-                if get_video_stream.tracked_tokens[token_id[0]]["missed"] > 10: # ~0.5 second ghosting
+                if get_video_stream.tracked_tokens[token_id[0]]["missed"] > 30: # ~1.0 second ghosting persistence
                     del get_video_stream.tracked_tokens[token_id[0]]
 
         # --- SLOW RECOGNIZER: ID assignment via CCTag ---
@@ -565,33 +565,63 @@ def get_video_stream():
 
         if hasattr(get_video_stream, "cctag_futures") and get_video_stream.cctag_futures:
             if all(f.done() for f in get_video_stream.cctag_futures):
-                candidates_by_rid = {}
                 for future in get_video_stream.cctag_futures:
                     try:
                         t_id, raw_results = future.result()
-                        if raw_results:
-                            best_result = max(raw_results, key=lambda x: x.get('decision_margin', 0))
-                            rid = int(best_result.get('idx', -1))
-                            if cctag_min_id <= rid <= cctag_max_id:
-                                candidates_by_rid.setdefault(rid, []).append({
-                                    "t_id": t_id,
-                                    "decision_margin": best_result.get('decision_margin', 0)
-                                })
+                        if t_id in get_video_stream.tracked_tokens:
+                            t_data = get_video_stream.tracked_tokens[t_id]
+                            if "id_votes" not in t_data:
+                                t_data["id_votes"] = {}
+                                
+                            # Exponentially decay historical votes (10% per cycle) to forget old/false IDs
+                            for k in list(t_data["id_votes"].keys()):
+                                t_data["id_votes"][k] *= 0.9
+                                if t_data["id_votes"][k] < 0.1:
+                                    del t_data["id_votes"][k]
+
+                            # Accumulate new votes from CCTag
+                            if raw_results:
+                                for res in raw_results:
+                                    rid = int(res.get('idx', -1))
+                                    dm = res.get('decision_margin', 0)
+                                    if cctag_min_id <= rid <= cctag_max_id and dm > 0:
+                                        t_data["id_votes"][rid] = t_data["id_votes"].get(rid, 0) + dm
+                            
+                            # The best marker_id is the one with the highest accumulated historical confidence
+                            if t_data["id_votes"]:
+                                best_rid = max(t_data["id_votes"].items(), key=lambda x: x[1])[0]
+                                t_data["marker_id"] = best_rid
+                            else:
+                                t_data["marker_id"] = None
                     except Exception as e:
                         pass
+                
+                # Resolve cross-token collisions globally using historical votes
+                claimed_ids = {}
+                for t_id, t_data in get_video_stream.tracked_tokens.items():
+                    m_id = t_data.get("marker_id")
+                    if m_id is not None:
+                        votes = t_data.get("id_votes", {}).get(m_id, 0)
+                        missed = t_data.get("missed", 0)
                         
-                for rid, candidates in candidates_by_rid.items():
-                    best = max(candidates, key=lambda x: x["decision_margin"])
-                    best_t_id = best["t_id"]
-                    
-                    if best_t_id in get_video_stream.tracked_tokens:
-                        # Clear this rid from any other token to prevent ID duplication
-                        # (ID duplication causes the deduplicator to randomly hide valid tokens!)
-                        for t_id, t_data in get_video_stream.tracked_tokens.items():
-                            if t_id != best_t_id and t_data.get("marker_id") == rid:
+                        if m_id not in claimed_ids:
+                            claimed_ids[m_id] = (t_id, votes, missed)
+                        else:
+                            existing_t_id, existing_votes, existing_missed = claimed_ids[m_id]
+                            
+                            # Actively tracked tokens ALWAYS beat ghost tokens.
+                            # If both are active, the one with highest historical votes wins.
+                            if missed < existing_missed or (missed == existing_missed and votes > existing_votes):
+                                # New token wins, demote the old one
+                                get_video_stream.tracked_tokens[existing_t_id]["marker_id"] = None
+                                if "id_votes" in get_video_stream.tracked_tokens[existing_t_id]:
+                                    get_video_stream.tracked_tokens[existing_t_id]["id_votes"][m_id] = 0
+                                claimed_ids[m_id] = (t_id, votes, missed)
+                            else:
+                                # Old token keeps it, demote new one
                                 t_data["marker_id"] = None
-                                
-                        get_video_stream.tracked_tokens[best_t_id]["marker_id"] = rid
+                                if "id_votes" in t_data:
+                                    t_data["id_votes"][m_id] = 0
 
                 get_video_stream.cctag_futures = None
 
