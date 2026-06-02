@@ -530,8 +530,31 @@ def get_video_stream():
             if roi.size < 100:
                 return (t_id, [])
 
-            # Global Histogram Equalization reliably maps white base to 255 and rings to 0
-            roi_enhanced = cv2.equalizeHist(roi)
+            # --- Projection Mapping Defeater Pipeline ---
+            # 1. Slight blur to kill the sharp projector pixel grid and micro-textures
+            blur = cv2.GaussianBlur(roi, (5, 5), 0)
+            
+            # 2. Adaptive thresholding: Since the map projects dark/light patterns, 
+            # global contrast fails. We use a local window (~radius size) to separate 
+            # the black ink from the white base locally, perfectly deleting the map texture!
+            block_size = int(cr)
+            if block_size % 2 == 0: 
+                block_size += 1
+            if block_size < 11: 
+                block_size = 11
+                
+            binary = cv2.adaptiveThreshold(
+                blur, 255, 
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                cv2.THRESH_BINARY, 
+                block_size, 
+                5 # Constant subtracted from mean (tunes strictness of black)
+            )
+            
+            # 3. CCTag prefers smooth sub-pixel gradients rather than harsh binary stairs.
+            # We slightly blur the perfect binary image to restore sub-pixel edges.
+            roi_enhanced = cv2.GaussianBlur(binary, (3, 3), 0)
+            
             img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
             
             try:
