@@ -470,22 +470,59 @@ def get_video_stream():
                     if show_overlay:
                         cv2.circle(frame, (x, y), r, (0, 255, 255), 2)
 
-        # Collect CCTag detections per disk
-        cctag_candidates = {}
-        markers = {}
-        
+        # --- FAST TRACKER: Coordinate tracking via Hough Circles ---
+        if not hasattr(get_video_stream, "tracked_tokens"):
+            get_video_stream.tracked_tokens = {}
+            get_video_stream.token_counter = 0
+
+        matched_tokens = set()
+
+        for (cx, cy, cr) in detected_circles:
+            best_id = None
+            best_dist = 60 # Search radius for moving markers
+            for t_id, t_data in get_video_stream.tracked_tokens.items():
+                if t_id in matched_tokens: continue
+                dist = np.sqrt((cx - t_data["x"])**2 + (cy - t_data["y"])**2)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_id = t_id
+            
+            if best_id:
+                token = get_video_stream.tracked_tokens[best_id]
+                dist_moved = np.hypot(token["x"] - cx, token["y"] - cy)
+                alpha = 1.0 if dist_moved > 15 else 0.2
+                token["x"] = token["x"] * (1 - alpha) + cx * alpha
+                token["y"] = token["y"] * (1 - alpha) + cy * alpha
+                token["r"] = token["r"] * 0.8 + cr * 0.2
+                token["missed"] = 0
+                matched_tokens.add(best_id)
+            else:
+                new_id = f"Token_{get_video_stream.token_counter}"
+                get_video_stream.token_counter += 1
+                get_video_stream.tracked_tokens[new_id] = {
+                    "x": cx, "y": cy, "r": cr, "missed": 0, "marker_id": None
+                }
+                matched_tokens.add(new_id)
+
+        # Increment missed frames and delete old tokens
+        for token_id in list(get_video_stream.tracked_tokens.keys()):
+            if token_id not in matched_tokens:
+                get_video_stream.tracked_tokens[token_id]["missed"] += 1
+                if get_video_stream.tracked_tokens[token_id]["missed"] > 10: # ~0.5 second ghosting
+                    del get_video_stream.tracked_tokens[token_id]
+
+        # --- SLOW RECOGNIZER: ID assignment via CCTag ---
         if CCTAG_AVAILABLE and cctag_detector is None:
             cctag_detector = FastCCTagDetector(3) # 3 rings
             
-        def _detect_single_roi(circ, frame_gray=gray, fw=w, fh=h):
-            circ_x, circ_y, circ_r = circ
-            pad = int(circ_r * 0.2) + 10
-            y1, y2 = max(0, circ_y - circ_r - pad), min(fh, circ_y + circ_r + pad)
-            x1, x2 = max(0, circ_x - circ_r - pad), min(fw, circ_x + circ_r + pad)
+        def _detect_single_roi_from_token(t_id, cx, cy, cr, frame_gray=gray, fw=w, fh=h):
+            pad = int(cr * 0.2) + 10
+            y1, y2 = max(0, int(cy - cr - pad)), min(fh, int(cy + cr + pad))
+            x1, x2 = max(0, int(cx - cr - pad)), min(fw, int(cx + cr + pad))
 
             roi = frame_gray[y1:y2, x1:x2]
             if roi.size < 100:
-                return []
+                return (t_id, None)
 
             roi_enhanced = cv2.equalizeHist(roi)
             img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
@@ -494,161 +531,48 @@ def get_video_stream():
                 raw_results = cctag_detector.detect(img, min_ident_proba=cctag_min_ident_proba, cx=img.shape[1]/2.0, cy=img.shape[0]/2.0, fx=800.0, fy=800.0, offset_x=float(x1), offset_y=float(y1))
                 if raw_results:
                     best_result = max(raw_results, key=lambda x: x.get('decision_margin', 0))
-                    return [best_result]
-                return []
+                    rid = int(best_result.get('idx', -1))
+                    if cctag_min_id <= rid <= cctag_max_id:
+                        return (t_id, rid)
+                return (t_id, None)
             except Exception as e:
-                print(f"CCTag detection error: {e}")
-                return []
+                return (t_id, None)
 
-        # 1. Check if previous background CCTag analysis is complete
         if hasattr(get_video_stream, "cctag_futures") and get_video_stream.cctag_futures:
             if all(f.done() for f in get_video_stream.cctag_futures):
                 for future in get_video_stream.cctag_futures:
                     try:
-                        raw_results = future.result()
-                        for r in raw_results:
-                            rid = int(r.get('idx', -1))
-                            if rid < cctag_min_id or rid > cctag_max_id:
-                                continue
-                            
-                            center = (float(r.get('x', 0)), float(r.get('y', 0)))
-                            cctag_candidates.setdefault(rid, []).append({
-                                "center": center,
-                                "decision_margin": float(r.get('decision_margin', 1.0))
-                            })
+                        t_id, rid = future.result()
+                        if rid is not None and t_id in get_video_stream.tracked_tokens:
+                            get_video_stream.tracked_tokens[t_id]["marker_id"] = rid
                     except Exception as e:
                         pass
                 get_video_stream.cctag_futures = None
 
-        # 2. If free, submit current frame for async analysis
-        if CCTAG_AVAILABLE and detected_circles and not getattr(get_video_stream, "cctag_futures", None):
-            get_video_stream.cctag_futures = [cctag_executor.submit(_detect_single_roi, circ, gray, w, h) for circ in detected_circles]
-
-        if cctag_candidates:
-            if not hasattr(get_video_stream, "tracked_tokens"):
-                get_video_stream.tracked_tokens = {}
-
-            for rid, candidates in cctag_candidates.items():
-                prev = get_video_stream.tracked_tokens.get(f"Marker_{rid}")
-
-                def _cand_score(c):
-                    dm = c.get('decision_margin', -1.0)
-                    if prev is None:
-                        return dm
-                    cx, cy = c['center']
-                    dist = float(np.hypot(prev["x"] - cx, prev["y"] - cy))
-                    # Prefer confidence, but bias toward prior position to avoid jitter when multiple disks are nearby.
-                    return dm - (dist * 0.01)
-
-                best = max(candidates, key=_cand_score)
-                markers[rid] = best['center']
-
-        # --- Temporal token fusion ---
-        detected_tokens = []
-        if not hasattr(get_video_stream, "tracked_tokens"):
-            get_video_stream.tracked_tokens = {}
-        matched_ids = set()
-        used_circles = set()
-
-        # 1. Process all detected markers (primary source of truth)
-        for m_id, (m_x, m_y) in markers.items():
-            token_id = f"Marker_{m_id}"
-            
-            # Find the best circle that encloses this marker for precision
-            best_circ = None
-            best_dist = float('inf')
-            for (cx, cy, cr) in detected_circles:
-                if (cx, cy, cr) in used_circles: continue
-                d = np.sqrt((cx - m_x)**2 + (cy - m_y)**2)
-                if d < cr and d < best_dist:
-                    best_dist = d
-                    best_circ = (cx, cy, cr)
-            
-            if best_circ:
-                cx, cy, cr = best_circ
-                used_circles.add(best_circ)
-                if token_id in get_video_stream.tracked_tokens:
-                    t = get_video_stream.tracked_tokens[token_id]
-                    # Dynamic smoothing: if distance is large (moving fast), snap instantly. If small (stationary/jitter), smooth heavily.
-                    dist = np.hypot(t["x"] - cx, t["y"] - cy)
-                    alpha = 1.0 if dist > 15 else 0.2
-                    t["x"] = t["x"] * (1 - alpha) + cx * alpha
-                    t["y"] = t["y"] * (1 - alpha) + cy * alpha
-                    t["r"] = t["r"] * 0.8 + cr * 0.2 # Smooth radius heavily to avoid outline jitter
-                    t["missed"] = 0
-                else:
-                    get_video_stream.tracked_tokens[token_id] = {
-                        "x": cx, "y": cy, "r": cr, "missed": 0, "marker_id": m_id
-                    }
-            else:
-                # No disk found? Use marker center as fallback
-                if token_id in get_video_stream.tracked_tokens:
-                    t = get_video_stream.tracked_tokens[token_id]
-                    dist = np.hypot(t["x"] - m_x, t["y"] - m_y)
-                    alpha = 1.0 if dist > 15 else 0.2
-                    t["x"] = t["x"] * (1 - alpha) + m_x * alpha
-                    t["y"] = t["y"] * (1 - alpha) + m_y * alpha
-                    t["missed"] = 0
-                else:
-                    get_video_stream.tracked_tokens[token_id] = {
-                        "x": m_x, "y": m_y, "r": 25, "missed": 0, "marker_id": m_id
-                    }
-            matched_ids.add(token_id)
-            
-        # --- Appear/Disappear Logging ---
-        current_marker_ids = set(markers.keys())
-        if not hasattr(get_video_stream, "last_marker_ids"):
-            get_video_stream.last_marker_ids = set()
-            
-        new_ids = current_marker_ids - get_video_stream.last_marker_ids
-        lost_ids = get_video_stream.last_marker_ids - current_marker_ids
-        
-        for nid in new_ids:
-            print(f"[TRACKER] Token Detected: ID {nid}", flush=True)
-        for lid in lost_ids:
-            print(f"[TRACKER] Token Lost: ID {lid}", flush=True)
-            
-        get_video_stream.last_marker_ids = current_marker_ids
-
-        # 2. Temporal Fallback: Match remaining circles to "missed" tokens
-        for (cx, cy, cr) in detected_circles:
-            if (cx, cy, cr) in used_circles: continue
-
-            best_id = None
-            best_dist = 60 # Search radius for moving markers
+        if CCTAG_AVAILABLE and get_video_stream.tracked_tokens and not getattr(get_video_stream, "cctag_futures", None):
+            get_video_stream.cctag_futures = []
             for t_id, t_data in get_video_stream.tracked_tokens.items():
-                if t_id in matched_ids: continue
-                dist = np.sqrt((cx - t_data["x"])**2 + (cy - t_data["y"])**2)
-                if dist < best_dist:
-                    best_dist = dist
-                    best_id = t_id
-            
-            if best_id:
-                token = get_video_stream.tracked_tokens[best_id]
-                token = get_video_stream.tracked_tokens[best_id]
-                # Update position based on circle, maintain ID with dynamic smoothing
-                dist_moved = np.hypot(token["x"] - cx, token["y"] - cy)
-                alpha = 1.0 if dist_moved > 15 else 0.2
-                token["x"] = token["x"] * (1 - alpha) + cx * alpha
-                token["y"] = token["y"] * (1 - alpha) + cy * alpha
-                token["r"] = token["r"] * 0.8 + cr * 0.2
-                token["missed"] = 0
-                matched_ids.add(best_id)
-                used_circles.add((cx, cy, cr))
+                get_video_stream.cctag_futures.append(cctag_executor.submit(_detect_single_roi_from_token, t_id, t_data["x"], t_data["y"], t_data["r"], gray, w, h))
 
-        # Increment missed frames and delete old tokens
-        for token_id in list(get_video_stream.tracked_tokens.keys()):
-            if token_id not in matched_ids:
-                get_video_stream.tracked_tokens[token_id]["missed"] += 1
-                if get_video_stream.tracked_tokens[token_id]["missed"] > 10: # ~0.5 second ghosting
-                    del get_video_stream.tracked_tokens[token_id]
-                    
-        # Render and prepare payloads
-        for token_id, t_data in get_video_stream.tracked_tokens.items():
-            if token_id in ignored_tokens:
+        # --- Render and Prepare Payloads ---
+        detected_tokens = []
+        
+        # Dedup marker IDs before sending payload
+        best_tokens = {}
+        for t_id, t_data in get_video_stream.tracked_tokens.items():
+            m_id = t_data.get("marker_id")
+            if m_id is not None:
+                if m_id not in best_tokens or t_data["missed"] < best_tokens[m_id]["missed"]:
+                    best_tokens[m_id] = t_data
+
+        current_marker_ids = set()
+        for m_id, t_data in best_tokens.items():
+            final_id = f"Marker_{m_id}"
+            current_marker_ids.add(m_id)
+            if final_id in ignored_tokens:
                 continue
 
-            display_name = token_aliases.get(token_id, token_id)
+            display_name = token_aliases.get(final_id, final_id)
             
             if show_overlay:
                 cv2.circle(frame, (int(t_data["x"]), int(t_data["y"])), int(t_data["r"]), (0, 255, 0), 2)
@@ -662,37 +586,41 @@ def get_video_stream():
                 dst = cv2.perspectiveTransform(pts, homography_matrix)
                 grid_x, grid_y = dst[0][0]
             else:
-                h, w = frame.shape[:2]
                 grid_x = t_data["x"] / w
                 grid_y = t_data["y"] / h
             
-            # Apply Flips and Clamp to 0.0-1.0
             if flip_x: grid_x = 1.0 - grid_x
             if flip_y: grid_y = 1.0 - grid_y
-            
             grid_x = max(0.0, min(1.0, grid_x))
             grid_y = max(0.0, min(1.0, grid_y))
                 
             detected_tokens.append({
-                "id": token_id,
-                "alias": token_aliases.get(token_id),
+                "id": final_id,
+                "alias": token_aliases.get(final_id),
                 "x": float(grid_x),
                 "y": float(grid_y),
                 "has_base": True
             })
-                
-        # Clean up tokens that have been missing for too long (e.g. 5 seconds)
-        to_remove = []
+            
+        # Render "Unknown" tokens locally in red
         for t_id, t_data in get_video_stream.tracked_tokens.items():
-            if t_data["missed"] > 100: # ~5 seconds at 20fps
-                to_remove.append(t_id)
-        for t_id in to_remove:
-            del get_video_stream.tracked_tokens[t_id]
+            if t_data.get("marker_id") is None and show_overlay:
+                cv2.circle(frame, (int(t_data["x"]), int(t_data["y"])), int(t_data["r"]), (0, 0, 255), 2)
+                cv2.putText(frame, "Unknown", (int(t_data["x"]) + 10, int(t_data["y"]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+        # --- Appear/Disappear Logging ---
+        if not hasattr(get_video_stream, "last_marker_ids"):
+            get_video_stream.last_marker_ids = set()
+        new_ids = current_marker_ids - get_video_stream.last_marker_ids
+        lost_ids = get_video_stream.last_marker_ids - current_marker_ids
+        for nid in new_ids: print(f"[TRACKER] Token Detected: ID {nid}", flush=True)
+        for lid in lost_ids: print(f"[TRACKER] Token Lost: ID {lid}", flush=True)
+        get_video_stream.last_marker_ids = current_marker_ids
 
         # Check if any confirmed token is currently "missed" for more than 3 frames
         any_missed = False
         if auto_blank:
-            for t_id, t_data in get_video_stream.tracked_tokens.items():
+            for m_id, t_data in best_tokens.items():
                 if t_data["missed"] > 2: # 2-frame buffer
                     any_missed = True
                     break
