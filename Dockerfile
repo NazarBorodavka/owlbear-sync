@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir --break-system-packages -r tracker/requirements.t
 COPY CCTag-develop ./CCTag-develop
 RUN mkdir -p CCTag-develop/build && cd CCTag-develop/build && \
     cmake .. -DCCTAG_WITH_CUDA=OFF -DCMAKE_BUILD_TYPE=Release && \
-    make -j$(nproc) && make install && ldconfig
+    make -j2 && make install && ldconfig
 
 # Build python wrapper
 COPY python ./python
