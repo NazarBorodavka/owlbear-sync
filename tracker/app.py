@@ -495,28 +495,33 @@ def get_video_stream():
                 token["y"] = token["y"] * (1 - alpha) + cy * alpha
                 token["r"] = token["r"] * 0.8 + cr * 0.2
                 token["missed"] = 0
+                token["raw_x"] = cx
+                token["raw_y"] = cy
+                token["raw_r"] = cr
                 matched_tokens.add(best_id)
             else:
                 new_id = f"Token_{get_video_stream.token_counter}"
                 get_video_stream.token_counter += 1
                 get_video_stream.tracked_tokens[new_id] = {
-                    "x": cx, "y": cy, "r": cr, "missed": 0, "marker_id": None
+                    "x": cx, "y": cy, "r": cr, "missed": 0, "marker_id": None,
+                    "raw_x": cx, "raw_y": cy, "raw_r": cr
                 }
                 matched_tokens.add(new_id)
 
         # Increment missed frames and delete old tokens
-        for token_id in list(get_video_stream.tracked_tokens.keys()):
-            if token_id not in matched_tokens:
-                get_video_stream.tracked_tokens[token_id]["missed"] += 1
-                if get_video_stream.tracked_tokens[token_id]["missed"] > 10: # ~0.5 second ghosting
-                    del get_video_stream.tracked_tokens[token_id]
+        for token_id in list(get_video_stream.tracked_tokens.items()):
+            if token_id[0] not in matched_tokens:
+                get_video_stream.tracked_tokens[token_id[0]]["missed"] += 1
+                if get_video_stream.tracked_tokens[token_id[0]]["missed"] > 10: # ~0.5 second ghosting
+                    del get_video_stream.tracked_tokens[token_id[0]]
 
         # --- SLOW RECOGNIZER: ID assignment via CCTag ---
         if CCTAG_AVAILABLE and cctag_detector is None:
             cctag_detector = FastCCTagDetector(3) # 3 rings
             
         def _detect_single_roi_from_token(t_id, cx, cy, cr, frame_gray=gray, fw=w, fh=h):
-            pad = int(cr * 0.2) + 10
+            # Pad by 50% of the radius on all sides (making the bounding box 1.5x the diameter)
+            pad = int(cr * 0.5)
             y1, y2 = max(0, int(cy - cr - pad)), min(fh, int(cy + cr + pad))
             x1, x2 = max(0, int(cx - cr - pad)), min(fw, int(cx + cr + pad))
 
@@ -524,7 +529,9 @@ def get_video_stream():
             if roi.size < 100:
                 return (t_id, None)
 
-            roi_enhanced = cv2.equalizeHist(roi)
+            # Optional: CLAHE works better than global equalizeHist for varied lighting
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            roi_enhanced = clahe.apply(roi)
             img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
             
             try:
@@ -552,7 +559,8 @@ def get_video_stream():
         if CCTAG_AVAILABLE and get_video_stream.tracked_tokens and not getattr(get_video_stream, "cctag_futures", None):
             get_video_stream.cctag_futures = []
             for t_id, t_data in get_video_stream.tracked_tokens.items():
-                get_video_stream.cctag_futures.append(cctag_executor.submit(_detect_single_roi_from_token, t_id, t_data["x"], t_data["y"], t_data["r"], gray, w, h))
+                if "raw_x" in t_data:
+                    get_video_stream.cctag_futures.append(cctag_executor.submit(_detect_single_roi_from_token, t_id, t_data["raw_x"], t_data["raw_y"], t_data["raw_r"], gray, w, h))
 
         # --- Render and Prepare Payloads ---
         detected_tokens = []
