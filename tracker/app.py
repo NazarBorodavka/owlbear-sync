@@ -519,49 +519,66 @@ def get_video_stream():
         if CCTAG_AVAILABLE and cctag_detector is None:
             cctag_detector = FastCCTagDetector(3) # 3 rings
             
-        def _detect_single_roi_from_token(t_id, cx, cy, cr, frame_gray=gray, fw=w, fh=h):
+        def _detect_single_roi_from_token(t_id, cx, cy, cr, frame_gray, fw, fh):
             # TIGHT padding: We use raw coordinates so there's no lag.
             # A tight crop prevents the map projection background from confusing the detector.
-            pad = int(cr * 0.25) + 5
+            pad = int(cr * 0.4) + 10 # slightly larger than 0.25 to ensure outermost ring isn't clipped
             y1, y2 = max(0, int(cy - cr - pad)), min(fh, int(cy + cr + pad))
             x1, x2 = max(0, int(cx - cr - pad)), min(fw, int(cx + cr + pad))
 
             roi = frame_gray[y1:y2, x1:x2]
             if roi.size < 100:
-                return (t_id, None)
+                return (t_id, [])
 
-            # Revert to Global Histogram Equalization.
-            # CLAHE on a tiny 100x100 ROI destroys the marker by amplifying map texture noise!
+            # Global Histogram Equalization reliably maps white base to 255 and rings to 0
             roi_enhanced = cv2.equalizeHist(roi)
             img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
             
             try:
                 raw_results = cctag_detector.detect(img, min_ident_proba=cctag_min_ident_proba, cx=img.shape[1]/2.0, cy=img.shape[0]/2.0, fx=800.0, fy=800.0, offset_x=float(x1), offset_y=float(y1))
-                if raw_results:
-                    best_result = max(raw_results, key=lambda x: x.get('decision_margin', 0))
-                    rid = int(best_result.get('idx', -1))
-                    if cctag_min_id <= rid <= cctag_max_id:
-                        return (t_id, rid)
-                return (t_id, None)
+                return (t_id, raw_results)
             except Exception as e:
-                return (t_id, None)
+                return (t_id, [])
 
         if hasattr(get_video_stream, "cctag_futures") and get_video_stream.cctag_futures:
             if all(f.done() for f in get_video_stream.cctag_futures):
+                candidates_by_rid = {}
                 for future in get_video_stream.cctag_futures:
                     try:
-                        t_id, rid = future.result()
-                        if rid is not None and t_id in get_video_stream.tracked_tokens:
-                            get_video_stream.tracked_tokens[t_id]["marker_id"] = rid
+                        t_id, raw_results = future.result()
+                        if raw_results:
+                            best_result = max(raw_results, key=lambda x: x.get('decision_margin', 0))
+                            rid = int(best_result.get('idx', -1))
+                            if cctag_min_id <= rid <= cctag_max_id:
+                                candidates_by_rid.setdefault(rid, []).append({
+                                    "t_id": t_id,
+                                    "decision_margin": best_result.get('decision_margin', 0)
+                                })
                     except Exception as e:
                         pass
+                        
+                for rid, candidates in candidates_by_rid.items():
+                    best = max(candidates, key=lambda x: x["decision_margin"])
+                    best_t_id = best["t_id"]
+                    
+                    if best_t_id in get_video_stream.tracked_tokens:
+                        # Clear this rid from any other token to prevent ID duplication
+                        # (ID duplication causes the deduplicator to randomly hide valid tokens!)
+                        for t_id, t_data in get_video_stream.tracked_tokens.items():
+                            if t_id != best_t_id and t_data.get("marker_id") == rid:
+                                t_data["marker_id"] = None
+                                
+                        get_video_stream.tracked_tokens[best_t_id]["marker_id"] = rid
+
                 get_video_stream.cctag_futures = None
 
         if CCTAG_AVAILABLE and get_video_stream.tracked_tokens and not getattr(get_video_stream, "cctag_futures", None):
             get_video_stream.cctag_futures = []
+            # Crucial: we MUST copy the gray frame, otherwise it gets overwritten by the camera while the background thread is still processing it!
+            gray_copy = gray.copy()
             for t_id, t_data in get_video_stream.tracked_tokens.items():
                 if "raw_x" in t_data:
-                    get_video_stream.cctag_futures.append(cctag_executor.submit(_detect_single_roi_from_token, t_id, t_data["raw_x"], t_data["raw_y"], t_data["raw_r"], gray, w, h))
+                    get_video_stream.cctag_futures.append(cctag_executor.submit(_detect_single_roi_from_token, t_id, t_data["raw_x"], t_data["raw_y"], t_data["raw_r"], gray_copy, w, h))
 
         # --- Render and Prepare Payloads ---
         detected_tokens = []
