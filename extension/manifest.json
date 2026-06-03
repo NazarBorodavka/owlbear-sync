@@ -4,8 +4,8 @@
   "manifest_version": 1,
   "action": {
     "title": "Token Sync",
-    "icon": "https://nazarborodavka.github.io/owlbear-sync/extension/icon.svg",
-    "popover": "https://nazarborodavka.github.io/owlbear-sync/extension/index.html",
+    "icon": "/extension/icon.svg",
+    "popover": "/extension/index.html",
     "width": 350,
     "height": 500
   }

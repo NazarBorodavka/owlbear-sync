@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+tracker/venv/
+venv/
+.venv/
+env/
+
+# Config & secrets (generated at runtime, may contain passwords)
+config.json
+tracker/config.json
+.env
+*.env
+
+# CCTag build artifacts (built inside Docker, not needed in repo)
+CCTag-develop/build/
+python/*.so
+python/build/
+python/dist/
+python/*.egg-info/
+
+# Diagnostic temp files
+/tmp/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+
+# Logs
+*.log

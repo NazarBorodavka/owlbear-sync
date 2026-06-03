@@ -1,52 +1,43 @@
 import cv2
 import numpy as np
-from flask import Flask, render_template, Response, request, jsonify
-from flask_socketio import SocketIO
-import threading
 import time
-import logging
+import concurrent.futures
+import threading
 import os
-import requests
-from flask_httpauth import HTTPBasicAuth
 import json
-import queue
+import collections
+from flask import Flask, render_template, Response, request, jsonify, send_from_directory
+from flask_socketio import SocketIO
+from flask_httpauth import HTTPBasicAuth
+
+# CCTag Support
+CCTAG_AVAILABLE = False
+cctag_detector = None
 try:
-    import stag
-    STAG_AVAILABLE = hasattr(stag, 'detectMarkers')
-except ImportError:
-    STAG_AVAILABLE = False
-
-print(f"--- STag Detection Support: {'ENABLED' if STAG_AVAILABLE else 'DISABLED (stag-python library not found)'} ---")
-
-# FFMPEG timeout, force TCP, and disable buffering for lowest latency
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "timeout;5000000|rtsp_transport;tcp|fflags;nobuffer|flags;low_delay"
-# Suppress FFMPEG decoding spam
-os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"
-
-app = Flask(__name__)
-# Suppress werkzeug logging for cleaner terminal output
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
-
-auth = HTTPBasicAuth()
-
-# Default credentials (can be changed in UI/config.json)
-USER_DATA = {
-    "admin": "admin"
-}
-
-@auth.verify_password
-def verify_password(username, password):
-    if username in USER_DATA and USER_DATA[username] == password:
-        return username
-    return None
+    import sys
+    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../python')))
+    try:
+        from cctag_ext import FastCCTagDetector
+        CCTAG_AVAILABLE = True
+        cctag_detector = None
+        # CCTag's internal structures are NOT thread-safe!
+        # Running it concurrently causes memory corruption and randomly missed gradients.
+        # We must restrict the background worker to 1 thread so it processes sequentially.
+        cctag_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        print("[OK] CCTag Native Backend Initialized.")
+    except Exception as e:
+        print("CCTag init error:", e)
+        CCTAG_AVAILABLE = False
+except Exception as e:
+    print("CCTag init error:", e)
+    CCTAG_AVAILABLE = False
 
 class IPCameraCapture:
     def __init__(self, url):
         self.url = url
         self.cap = cv2.VideoCapture(url)
-        # Queue of size 1 to ensure we only ever have the LATEST frame
-        self.q = queue.Queue(maxsize=1)
+        # Use deque with maxlen=1 for atomic "latest frame" access
+        self.frame_buffer = collections.deque(maxlen=1)
         self.is_running = True
         
         # Tapo/RTSP specific optimizations
@@ -61,51 +52,87 @@ class IPCameraCapture:
             if not ret:
                 time.sleep(0.1)
                 continue
-            if not self.q.empty():
-                try:
-                    self.q.get_nowait() # Discard old frame
-                except queue.Empty:
-                    pass
-            self.q.put(frame)
+            self.frame_buffer.append(frame)
 
     def read(self):
-        try:
-            # Wait a tiny bit for a frame, but don't block forever
-            frame = self.q.get(timeout=0.5)
-            return True, frame
-        except:
+        if not self.frame_buffer:
             return False, None
+        return True, self.frame_buffer[0]
 
     def isOpened(self):
         return self.cap.isOpened()
+
+    def grab(self):
+        return True
+
+    def retrieve(self):
+        return self.read()
 
     def release(self):
         self.is_running = False
         self.cap.release()
 
+# Initialize Flask app
+app = Flask(__name__, template_folder='templates', static_folder=None)
+app.config['JSON_SORT_KEYS'] = False
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
+
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# Simple HTTP Basic Auth (used by route decorators)
+auth = HTTPBasicAuth()
+# Default user store (can be overridden by config.json on disk)
+USER_DATA = {"admin": "admin"}
+
+
+@auth.verify_password
+def verify_password(username, password):
+    """Verify username/password against USER_DATA.
+
+    Returns True when credentials match, False otherwise.
+    The stored passwords are plain-text here for simplicity; consider
+    switching to hashed passwords for production.
+    """
+    if not username or not password:
+        return False
+    expected = USER_DATA.get(username)
+    return expected is not None and expected == password
 
 # State variables
 camera_url = "" # IP camera URL
 cap = None
 is_running = False
+# Store config at the container bind-mount path used by docker-compose/CasaOS.
+CONFIG_FILE = os.environ.get('TRACKER_CONFIG_FILE', '/app/config.json')
+LEGACY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
 
-# Global Configuration with Defaults
-CONFIG_FILE = "config.json"
 
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
-    global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
-    global detection_mode, stag_error_correction, stag_roi_padding
-    
-    if os.path.exists(CONFIG_FILE):
+    global hough_param1, hough_param2, hough_min_radius, hough_max_radius
+    global auto_blank
+    global cctag_min_id, cctag_max_id
+    global token_aliases, manual_blank
+    global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
+    global src_pts, corner_idx, homography_matrix
+    for config_path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
+        if not os.path.exists(config_path):
+            continue
         try:
-            with open(CONFIG_FILE, 'r') as f:
+            with open(config_path, 'r') as f:
                 c = json.load(f)
-                detection_mode = c.get('detection_mode', 'aruco')
-                stag_error_correction = int(c.get('stag_error_correction', 3))
-                stag_roi_padding = int(c.get('stag_roi_padding', 20))
+                cctag_min_id = int(c.get('cctag_min_id', 0))
+                cctag_max_id = int(c.get('cctag_max_id', 9))
+                cctag_min_ident_proba = float(c.get('cctag_min_ident_proba', 1e-6))
+                cctag_id_voting_decay = float(c.get('cctag_id_voting_decay', 0.95))
+                cctag_match_radius_mult = float(c.get('cctag_match_radius_mult', 2.0))
+                cctag_ghosting_frames = int(c.get('cctag_ghosting_frames', 30))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -120,33 +147,88 @@ def load_config_from_disk():
                 hough_param2 = c.get('hough_param2', 45)
                 hough_min_radius = c.get('hough_min_radius', 30)
                 hough_max_radius = c.get('hough_max_radius', 40)
-                aruco_min_perimeter = c.get('aruco_min_perimeter', 0.01)
-                aruco_adaptive_thresh_min = c.get('aruco_adaptive_thresh_min', 3)
                 auto_blank = c.get('auto_blank', False)
                 token_aliases = c.get('token_aliases', {})
-                print("Loaded config from disk.")
+                print(f"Loaded config from disk: {config_path}")
+                # Load camera calibration if present
+                cm = c.get('camera_matrix')
+                dd = c.get('dist_coeffs')
+                if cm is not None and dd is not None:
+                    try:
+                        import numpy as _np
+                        camera_matrix = _np.array(cm, dtype=_np.float64)
+                        dist_coeffs = _np.array(dd, dtype=_np.float64)
+                        calibration_model = c.get('calibration_model') or ('fisheye' if _np.array(dd).size == 4 else 'standard')
+                        settings_dirty = True
+                        undistort_map1 = None
+                        undistort_map2 = None
+                        print(f"Loaded camera calibration from config ({calibration_model}).")
+                    except Exception:
+                        camera_matrix = None
+                        dist_coeffs = None
+                        calibration_model = None
+                
+                # Load corner calibration
+                if 'src_pts' in c and 'corner_idx' in c:
+                    loaded_idx = c['corner_idx']
+                    if loaded_idx > 0 and 'src_pts' in c:
+                        import numpy as _np
+                        import cv2 as _cv2
+                        loaded_pts = c['src_pts']
+                        for i in range(min(4, loaded_idx, len(loaded_pts))):
+                            src_pts[i] = [float(loaded_pts[i][0]), float(loaded_pts[i][1])]
+                        corner_idx = loaded_idx
+                        
+                        if corner_idx == 4:
+                            dst_pts = _np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=_np.float32)
+                            homography_matrix, _ = _cv2.findHomography(src_pts, dst_pts)
         except Exception as e:
-            print(f"Error loading config: {e}")
+            print(f"Error loading config from {config_path}: {e}")
+            continue
+        break
 
 def save_config_to_disk():
+    global calibration_model
     c = {
         'distortion_k1': distortion_k1, 'zoom_level': zoom_level, 'offset_x': offset_x, 'offset_y': offset_y,
         'rotation': rotation, 'brightness': brightness, 'contrast': contrast, 'exposure': exposure,
         'hough_param1': hough_param1, 'hough_param2': hough_param2,
         'hough_min_radius': hough_min_radius, 'hough_max_radius': hough_max_radius,
-        'aruco_min_perimeter': aruco_min_perimeter, 'aruco_adaptive_thresh_min': aruco_adaptive_thresh_min,
         'auto_blank': auto_blank,
-        'detection_mode': detection_mode,
-        'stag_error_correction': stag_error_correction,
-        'stag_roi_padding': stag_roi_padding,
+        'cctag_min_id': cctag_min_id,
+        'cctag_max_id': cctag_max_id,
+        'cctag_min_ident_proba': cctag_min_ident_proba,
+        'cctag_id_voting_decay': cctag_id_voting_decay,
+        'cctag_match_radius_mult': cctag_match_radius_mult,
+        'cctag_ghosting_frames': cctag_ghosting_frames,
         'token_aliases': token_aliases,
-        'password': USER_DATA.get("admin", "admin")
+        'password': USER_DATA.get("admin", "admin"),
+        'calibration_model': calibration_model,
+        'corner_idx': corner_idx,
+        'src_pts': src_pts.tolist()[:corner_idx] if corner_idx > 0 else []
     }
+    # Save camera calibration if available
+    if camera_matrix is not None and dist_coeffs is not None:
+        try:
+            c['camera_matrix'] = camera_matrix.tolist()
+            c['dist_coeffs'] = dist_coeffs.tolist()
+        except Exception:
+            pass
     try:
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(c, f)
-    except Exception as e:
-        print(f"Error saving config: {e}")
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    except Exception:
+        pass
+    for path in (CONFIG_FILE, LEGACY_CONFIG_FILE if LEGACY_CONFIG_FILE != CONFIG_FILE else None):
+        if not path:
+            continue
+        try:
+            with open(path, 'w') as f:
+                json.dump(c, f)
+            print(f"Saved config to {path}")
+            return
+        except Exception as e:
+            print(f"Error saving config to {path}: {e}")
+    print("Error saving config: all save targets failed")
 
 # Preprocessing parameters
 distortion_k1 = 0.0
@@ -165,23 +247,27 @@ ignored_tokens = set()
 hough_dp = 1.2
 hough_min_dist = 20
 hough_param1 = 40
-hough_param2 = 45
+hough_param2 = 30
 hough_min_radius = 30
 hough_max_radius = 40
 
-# ArUco Detection
-aruco_min_perimeter = 0.01
-aruco_adaptive_thresh_min = 3
-aruco_poly_approx = 0.05
 auto_blank = False # Toggle for anti-reflection mode
 flip_x = False
 flip_y = False
-detection_mode = 'aruco' # 'aruco' or 'stag'
-stag_error_correction = 3
-stag_roi_padding = 20
+
+cctag_min_id = 0
+cctag_max_id = 9
+cctag_min_ident_proba = 1e-6
+cctag_id_voting_decay = 0.95
+# Multiplier on token radius for CCTag→Hough proximity matching.
+# 2.0 = match if CCTag center is within 2 radii of a Hough circle center.
+cctag_match_radius_mult = 2.0
+cctag_ghosting_frames = 30
 manual_blank = False
 
-load_config_from_disk()
+# Performance optimization: Cache for software exposure table
+exposure_table = None
+last_exposure = -1.0
 
 # Calibration corners
 src_pts = np.zeros((4, 2), dtype=np.float32)
@@ -192,20 +278,44 @@ homography_matrix = None
 frame_lock = threading.Lock()
 camera_lock = threading.Lock()
 current_frame = None
+
 undistort_map1 = None
 undistort_map2 = None
+undistort_model = None
 settings_dirty = True
 
+# For diagnostic overlay: keep a raw and undistorted copy of the latest frame
+raw_frame_for_stream = None
+undistorted_frame_for_stream = None
+
+# Camera calibration state (fisheye model)
+camera_matrix = None
+dist_coeffs = None
+calibration_model = None
+calib_mode = False
+calib_objpoints = []
+calib_imgpoints = []
+# Default chessboard pattern (cols, rows) internal corners - change if you use a different board
+chessboard_size = (9, 6)
+
+load_config_from_disk()
+
+
 def get_video_stream():
-    global cap, is_running, current_frame, camera_url, undistort_map1, undistort_map2, settings_dirty
+    global cap, is_running, current_frame, camera_url, undistort_map1, undistort_map2, settings_dirty, undistort_model
+    # Expose diagnostic copies of the latest frame
+    global raw_frame_for_stream, undistorted_frame_for_stream
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, detection_mode
-    global src_pts, corner_idx, homography_matrix, auto_blank, stag_error_correction, stag_roi_padding, manual_blank
+    global CCTAG_AVAILABLE, cctag_detector
+    global src_pts, corner_idx, homography_matrix, auto_blank, manual_blank
+    global cctag_min_id, cctag_max_id
+    global camera_matrix, dist_coeffs, calibration_model
+
     fail_count = 0
     
-    # 20 FPS target
-    frame_interval = 0.1 
+    # 30 FPS target for fluid tracking
+    frame_interval = 0.033 
     last_marker_ids = set()
     
     while is_running:
@@ -225,8 +335,10 @@ def get_video_stream():
             
         if not success or frame is None:
             fail_count += 1
-            if fail_count > 10:
-                print("Stream disconnected, attempting to reconnect...")
+            if fail_count % 30 == 0:
+                print(f"Waiting for stream... (attempt {fail_count}/150)", flush=True)
+            if fail_count > 150: # Wait up to 15 seconds for stream to start
+                print(f"Stream connection timed out (url: {camera_url}), attempting full reconnect...", flush=True)
                 with camera_lock:
                     if cap is not None:
                         cap.release()
@@ -236,7 +348,7 @@ def get_video_stream():
                     except (ValueError, TypeError):
                         source = camera_url
                     
-                    if isinstance(source, str) and source.startswith('http'):
+                    if isinstance(source, str) and (source.startswith('http') or source.startswith('rtsp') or source.startswith('rtmp')):
                         cap = IPCameraCapture(source)
                     else:
                         cap = cv2.VideoCapture(source)
@@ -252,18 +364,57 @@ def get_video_stream():
 
         # Preprocessing: Apply Distortion Correction, Zoom, Pan, Rotation, Colors
         h, w = frame.shape[:2]
+        # Store raw frame for diagnostic streaming (before any processing)
+        try:
+            raw_frame_for_stream = frame.copy()
+        except Exception:
+            raw_frame_for_stream = None
         
-        # 1. Faster Distortion Correction via Pre-computed Maps
-        if distortion_k1 != 0.0:
+        # 1. Distortion Correction via precomputed maps.
+        # Prefer a full camera calibration when available. Fall back to single-k1 model.
+        if camera_matrix is not None and dist_coeffs is not None:
+            model = calibration_model or ('fisheye' if getattr(dist_coeffs, 'size', 0) == 4 else 'standard')
+            if settings_dirty or undistort_map1 is None or undistort_model != model:
+                try:
+                    if model == 'standard':
+                        dist = np.array(dist_coeffs, dtype=np.float64).reshape(-1, 1)
+                        cam = np.array(camera_matrix, dtype=np.float64)
+                        new_cam, _ = cv2.getOptimalNewCameraMatrix(cam, dist, (w, h), 1.0, (w, h))
+                        undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(cam, dist, None, new_cam, (w, h), cv2.CV_32FC1)
+                    else:
+                        cam = np.array(camera_matrix, dtype=np.float64)
+                        dist = np.array(dist_coeffs, dtype=np.float64)
+                        new_cam = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+                            cam, dist, (w, h), np.eye(3), balance=1.0)
+                        undistort_map1, undistort_map2 = cv2.fisheye.initUndistortRectifyMap(
+                            cam, dist, np.eye(3), new_cam, (w, h), cv2.CV_32FC1)
+                    undistort_model = model
+                    settings_dirty = False
+                except Exception:
+                    # If fisheye module or functions are not available, skip calibration
+                    undistort_map1 = None
+                    undistort_map2 = None
+            if undistort_map1 is not None:
+                frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
+                try:
+                    undistorted_frame_for_stream = frame.copy()
+                except Exception:
+                    undistorted_frame_for_stream = None
+        elif distortion_k1 != 0.0:
+            # Legacy single-coefficient radial distortion correction
             if settings_dirty or undistort_map1 is None:
                 fx, fy = w, h
                 cx, cy = w / 2, h / 2
-                camera_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-                dist_coeffs = np.array([distortion_k1, 0, 0, 0, 0], dtype=np.float32)
-                new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(camera_matrix, dist_coeffs, (w, h), 0)
-                undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(camera_matrix, dist_coeffs, None, new_camera_matrix, (w, h), cv2.CV_32FC1)
+                tmp_cam = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+                dist = np.array([distortion_k1, 0, 0, 0, 0], dtype=np.float32)
+                new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(tmp_cam, dist, (w, h), 1.0)
+                undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(tmp_cam, dist, None, new_camera_matrix, (w, h), cv2.CV_32FC1)
                 settings_dirty = False
             frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
+            try:
+                undistorted_frame_for_stream = frame.copy()
+            except Exception:
+                undistorted_frame_for_stream = None
             
         # 2. Optimized Zoom, Pan, Rotation (Merged into one warp)
         if zoom_level != 1.0 or offset_x != 0.0 or offset_y != 0.0 or rotation != 0.0:
@@ -279,9 +430,12 @@ def get_video_stream():
             
         # Apply software Exposure (Gamma correction)
         if exposure != 1.0 and exposure > 0:
-            invGamma = 1.0 / exposure
-            table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
-            frame = cv2.LUT(frame, table)
+            global exposure_table, last_exposure
+            if exposure != last_exposure or exposure_table is None:
+                invGamma = 1.0 / exposure
+                exposure_table = np.array([((i / 255.0) ** invGamma) * 255 for i in np.arange(0, 256)]).astype("uint8")
+                last_exposure = exposure
+            frame = cv2.LUT(frame, exposure_table)
 
         # Process frame
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -294,14 +448,16 @@ def get_video_stream():
             gray = cv2.bitwise_and(gray, mask)
         
         # --- Optimized Circle Detection (Downsampled) ---
+        # Always run disk detection so AprilTag mode can be constrained to disks.
+        circles = None
         # Resize to 50% for circle search - much faster and reduces noise
         small_gray = cv2.resize(gray, (w // 2, h // 2))
         blurred = cv2.GaussianBlur(small_gray, (5, 5), 1.5)
-        
+
         circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, dp=hough_dp, minDist=hough_min_dist // 2,
-                                   param1=hough_param1, param2=hough_param2, 
-                                   minRadius=hough_min_radius // 2, maxRadius=hough_max_radius // 2)
-                                   
+                                param1=hough_param1, param2=hough_param2,
+                                minRadius=hough_min_radius // 2, maxRadius=hough_max_radius // 2)
+                                    
         detected_circles = []
         if circles is not None:
             circles = circles[0, :]
@@ -315,7 +471,7 @@ def get_video_stream():
                 is_inner = False
                 for (ax, ay, ar) in detected_circles:
                     dist = np.sqrt((x - ax)**2 + (y - ay)**2)
-                    if dist < ar: # Center is inside an existing circle
+                    if dist < ar * 1.5: # Center is close to an existing larger circle (nested ring)
                         is_inner = True
                         break
                 if not is_inner:
@@ -324,161 +480,203 @@ def get_video_stream():
                     if show_overlay:
                         cv2.circle(frame, (x, y), r, (0, 255, 255), 2)
 
-        # --- ArUco setup ---
-        aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-        aruco_params = cv2.aruco.DetectorParameters()
-        aruco_params.adaptiveThreshWinSizeMin = int(aruco_adaptive_thresh_min)
-        aruco_params.minMarkerPerimeterRate = float(aruco_min_perimeter)
-        
-        detector = cv2.aruco.ArucoDetector(aruco_dict, aruco_params)
-        
-        markers = {}
-        # We now look for markers ONLY inside detected circles to avoid map noise
-        for (circ_x, circ_y, circ_r) in detected_circles:
-            # Crop a small area around the disk
-            # STag/ArUco context padding
-            pad = stag_roi_padding if detection_mode == 'stag' else 10
-            y1, y2 = max(0, circ_y - circ_r - pad), min(h, circ_y + circ_r + pad)
-            x1, x2 = max(0, circ_x - circ_r - pad), min(w, circ_x + circ_r + pad)
-            
-            roi = gray[y1:y2, x1:x2]
-            if roi.size < 100: continue # Too small to process
-            
-            # Use enhanced ROI for all modes for consistency
-            roi_enhanced = cv2.equalizeHist(roi)
-            
-            try:
-                # Use original ROI for first pass, enhanced for second
-                if detection_mode == 'stag' and STAG_AVAILABLE:
-                    (corners, ids, rejected) = stag.detectMarkers(roi, 11, stag_error_correction)
-                    if ids is None or len(ids) == 0:
-                        (corners, ids, rejected) = stag.detectMarkers(roi_enhanced, 11, stag_error_correction)
-                elif detection_mode == 'stag' and not STAG_AVAILABLE:
-                    corners, ids, _ = detector.detectMarkers(roi_enhanced)
-                else:
-                    corners, ids, _ = detector.detectMarkers(roi_enhanced)
-                
-                if ids is not None and len(ids) > 0:
-                    for i, m_id in enumerate(ids.flatten()):
-                        mid_int = int(m_id)
-                        markers[mid_int] = (circ_x, circ_y)
-                        
-                        if show_overlay and corners is not None and i < len(corners):
-                            try:
-                                c = corners[i]
-                                if isinstance(c, np.ndarray) and c.size > 0:
-                                    if c.ndim == 3: c = c[0]
-                                    if c.ndim == 2 and c.shape[0] == 4:
-                                        c = c.copy()
-                                        c[:, 0] += x1
-                                        c[:, 1] += y1
-                                        cv2.polylines(frame, [np.int32(c)], True, (255, 0, 255), 2)
-                            except: pass 
-                        break 
-            except Exception as e:
-                continue
-
-        # --- Temporal & ArUco Fusion ---
-        detected_tokens = []
+        # --- FAST TRACKER: Coordinate tracking via Hough Circles ---
         if not hasattr(get_video_stream, "tracked_tokens"):
             get_video_stream.tracked_tokens = {}
-        matched_ids = set()
+            get_video_stream.token_counter = 0
 
-        # 1. Process all detected ArUco markers (Primary source of truth)
-        for m_id, (m_x, m_y) in markers.items():
-            token_id = f"Marker_{m_id}"
-            
-            # Find the best circle that encloses this marker for precision
-            best_circ = None
-            best_dist = float('inf')
-            for (cx, cy, cr) in detected_circles:
-                d = np.sqrt((cx - m_x)**2 + (cy - m_y)**2)
-                if d < cr and d < best_dist:
-                    best_dist = d
-                    best_circ = (cx, cy, cr)
-            
-            if best_circ:
-                cx, cy, cr = best_circ
-                if token_id in get_video_stream.tracked_tokens:
-                    t = get_video_stream.tracked_tokens[token_id]
-                    t["x"] = t["x"] * 0.3 + cx * 0.7
-                    t["y"] = t["y"] * 0.3 + cy * 0.7
-                    t["r"] = t["r"] * 0.3 + cr * 0.7
-                    t["missed"] = 0
-                else:
-                    get_video_stream.tracked_tokens[token_id] = {
-                        "x": cx, "y": cy, "r": cr, "missed": 0, "marker_id": m_id
-                    }
-            else:
-                # No disk found? Use marker center as fallback
-                if token_id in get_video_stream.tracked_tokens:
-                    t = get_video_stream.tracked_tokens[token_id]
-                    t["x"] = t["x"] * 0.3 + m_x * 0.7
-                    t["y"] = t["y"] * 0.3 + m_y * 0.7
-                    t["missed"] = 0
-                else:
-                    get_video_stream.tracked_tokens[token_id] = {
-                        "x": m_x, "y": m_y, "r": 25, "missed": 0, "marker_id": m_id
-                    }
-            matched_ids.add(token_id)
-            
-        # --- Appear/Disappear Logging ---
-        current_marker_ids = set(markers.keys())
-        new_ids = current_marker_ids - last_marker_ids
-        lost_ids = last_marker_ids - current_marker_ids
-        
-        for nid in new_ids:
-            print(f"[TRACKER] Token Detected: ID {nid}", flush=True)
-        for lid in lost_ids:
-            print(f"[TRACKER] Token Lost: ID {lid}", flush=True)
-            
-        last_marker_ids = current_marker_ids
+        matched_tokens = set()
 
-        # 2. Temporal Fallback: Match remaining circles to "missed" tokens
-        for (cx, cy, cr) in detected_circles:
-            is_used = False
-            for t_id in matched_ids:
-                t = get_video_stream.tracked_tokens[t_id]
-                if abs(t["x"]-cx) < 5 and abs(t["y"]-cy) < 5:
-                    is_used = True; break
-            if is_used: continue
-
-            best_id = None
-            best_dist = 200 # Increased search radius for lost markers
-        # --- Instant Matching Logic ---
-        matched_ids = set()
         for (cx, cy, cr) in detected_circles:
             best_id = None
-            best_dist = 40 
+            best_dist = max(cr * 1.5, 60) # Search radius scales with token size
             for t_id, t_data in get_video_stream.tracked_tokens.items():
-                if t_id in matched_ids: continue
-                dist = np.sqrt((cx - t_data["x"])**2 + (cy - t_data["y"])**2)
+                if t_id in matched_tokens: continue
+                # Use velocity-predicted position for matching so fast-moving tokens
+                # aren't treated as new tokens each frame
+                pred_x = t_data["x"] + t_data.get("vx", 0)
+                pred_y = t_data["y"] + t_data.get("vy", 0)
+                dist = np.hypot(cx - pred_x, cy - pred_y)
                 if dist < best_dist:
                     best_dist = dist
                     best_id = t_id
             
             if best_id:
                 token = get_video_stream.tracked_tokens[best_id]
-                # Direct update for zero latency
-                token["x"] = cx
-                token["y"] = cy
-                token["r"] = cr
+                # Dynamic smoothing: snap instantly when moving fast, smooth when stationary
+                dist_moved = np.hypot(token["x"] - cx, token["y"] - cy)
+                alpha = min(1.0, dist_moved / 8.0)  # full snap above 8px movement
+                alpha = max(0.3, alpha)              # always move at least 30% toward detection
+                # Track velocity (exponential moving average) for next-frame prediction
+                token["vx"] = token.get("vx", 0) * 0.5 + (cx - token["x"]) * 0.5
+                token["vy"] = token.get("vy", 0) * 0.5 + (cy - token["y"]) * 0.5
+                token["x"] = token["x"] * (1 - alpha) + cx * alpha
+                token["y"] = token["y"] * (1 - alpha) + cy * alpha
+                token["r"] = token["r"] * 0.85 + cr * 0.15
                 token["missed"] = 0
-                matched_ids.add(best_id)
+                matched_tokens.add(best_id)
+            else:
+                new_id = f"Token_{get_video_stream.token_counter}"
+                get_video_stream.token_counter += 1
+                get_video_stream.tracked_tokens[new_id] = {
+                    "x": cx, "y": cy, "r": cr, "missed": 0, "marker_id": None,
+                    "vx": 0.0, "vy": 0.0
+                }
+                matched_tokens.add(new_id)
 
-        # Increment missed frames and delete old tokens
+        # Increment missed frames and delete old tokens.
+        # While ghosting: use velocity to predict where the token drifted to.
         for token_id in list(get_video_stream.tracked_tokens.keys()):
-            if token_id not in matched_ids:
-                get_video_stream.tracked_tokens[token_id]["missed"] += 1
-                if get_video_stream.tracked_tokens[token_id]["missed"] > 45: # 3 second ghosting
+            if token_id not in matched_tokens:
+                t = get_video_stream.tracked_tokens[token_id]
+                t["missed"] += 1
+                # Dampen velocity during ghost phase (friction)
+                t["vx"] = t.get("vx", 0) * 0.7
+                t["vy"] = t.get("vy", 0) * 0.7
+                # Predict position forward using damped velocity
+                t["x"] += t["vx"]
+                t["y"] += t["vy"]
+                if t["missed"] > cctag_ghosting_frames:
                     del get_video_stream.tracked_tokens[token_id]
-                    
-        # Render and prepare payloads
-        for token_id, t_data in get_video_stream.tracked_tokens.items():
-            if token_id in ignored_tokens:
+
+        # --- SLOW RECOGNIZER: Full-Frame CCTag ---
+        # CRITICAL INSIGHT from diagnostics:
+        # - CCTag on a small 160x160 crop from Hough → ALL WHITE ROI → ZERO detections
+        # - CCTag on full 1920x1080 frame → detects ALL markers in ~341ms
+        # The Hough crop is the bug — even with generous padding, the crop boundary
+        # falls in white paper with no rings visible. Solution: run CCTag on the FULL frame.
+        if CCTAG_AVAILABLE and cctag_detector is None:
+            cctag_detector = FastCCTagDetector(3) # 3 crowns
+
+        def _detect_full_frame(frame_gray):
+            """Run CCTag detection on the entire frame. Returns list of {idx, x, y, decision_margin}."""
+            try:
+                if not CCTAG_AVAILABLE:
+                    return []
+                h_f, w_f = frame_gray.shape
+                # Linear stretch: ensures black rings always have full contrast regardless of lighting.
+                # Preserves gradient profile perfectly. Safe for CCTag's edge math.
+                img_enhanced = cv2.normalize(frame_gray, None, 0, 255, cv2.NORM_MINMAX)
+                img = np.ascontiguousarray(img_enhanced, dtype=np.uint8)
+                # fx/fy ≈ image width is the standard approximation for an unknown focal length.
+                # CCTag uses this only for scale-invariant ellipse fitting.
+                results = cctag_detector.detect(
+                    img,
+                    min_ident_proba=cctag_min_ident_proba,
+                    cx=w_f / 2.0, cy=h_f / 2.0,
+                    fx=float(w_f), fy=float(w_f),
+                )
+                return list(results)
+            except Exception as e:
+                print(f"[CCTag] Full-frame error: {e}", flush=True)
+                return []
+
+        # Collect full-frame CCTag results when the background thread is done
+        if hasattr(get_video_stream, "cctag_future") and get_video_stream.cctag_future is not None:
+            if get_video_stream.cctag_future.done():
+                try:
+                    cctag_results = get_video_stream.cctag_future.result()
+                except Exception:
+                    cctag_results = []
+
+                # Match each CCTag result to the nearest tracked token by Euclidean distance
+                matched_cctag = set()
+                for res in cctag_results:
+                    rid = int(res.get('idx', -1))
+                    dm = float(res.get('decision_margin', 0))
+                    rx, ry = float(res.get('x', 0)), float(res.get('y', 0))
+
+                    if not (cctag_min_id <= rid <= cctag_max_id) or dm <= 0:
+                        continue
+
+                    # Find the closest Hough-tracked token
+                    best_t_id = None
+                    best_dist = float('inf')
+                    for t_id, t_data in get_video_stream.tracked_tokens.items():
+                        d = np.hypot(t_data["x"] - rx, t_data["y"] - ry)
+                        # Accept if CCTag center falls within cctag_match_radius_mult × token radius.
+                        # Higher = more forgiving matching for large/far tokens.
+                        if d < t_data["r"] * cctag_match_radius_mult and d < best_dist:
+                            best_dist = d
+                            best_t_id = t_id
+
+                    if best_t_id is not None and best_t_id not in matched_cctag:
+                        t_data = get_video_stream.tracked_tokens[best_t_id]
+                        # Accumulate votes
+                        votes = t_data.setdefault("id_votes", {})
+                        # Decay old votes
+                        for k in list(votes.keys()):
+                            votes[k] *= cctag_id_voting_decay
+                            if votes[k] < 0.01:  # Drop very stale votes (lower threshold = longer memory)
+                                del votes[k]
+                        votes[rid] = votes.get(rid, 0) + dm
+                        # Best vote wins
+                        best_rid = max(votes.items(), key=lambda x: x[1])[0]
+                        t_data["marker_id"] = best_rid
+                        matched_cctag.add(best_t_id)
+
+                # Tokens not matched this round: decay their votes but keep their ID
+                for t_id, t_data in get_video_stream.tracked_tokens.items():
+                    if t_id not in matched_cctag and "id_votes" in t_data:
+                        for k in list(t_data["id_votes"].keys()):
+                            t_data["id_votes"][k] *= cctag_id_voting_decay
+                            if t_data["id_votes"][k] < 0.01:  # Same threshold
+                                del t_data["id_votes"][k]
+                        if t_data["id_votes"]:
+                            best_rid = max(t_data["id_votes"].items(), key=lambda x: x[1])[0]
+                            t_data["marker_id"] = best_rid
+                        else:
+                            t_data["marker_id"] = None
+
+                # Resolve cross-token ID collisions (two Hough circles both matching same CCTag ID)
+                claimed = {}
+                for t_id, t_data in get_video_stream.tracked_tokens.items():
+                    m_id = t_data.get("marker_id")
+                    if m_id is None:
+                        continue
+                    votes = t_data.get("id_votes", {}).get(m_id, 0)
+                    missed = t_data.get("missed", 0)
+                    if m_id not in claimed:
+                        claimed[m_id] = (t_id, votes, missed)
+                    else:
+                        ex_t, ex_v, ex_m = claimed[m_id]
+                        if missed < ex_m or (missed == ex_m and votes > ex_v):
+                            # Current token wins — reset loser's marker and votes for this ID
+                            loser = get_video_stream.tracked_tokens[ex_t]
+                            loser["marker_id"] = None
+                            loser.get("id_votes", {}).pop(m_id, None)
+                            claimed[m_id] = (t_id, votes, missed)
+                        else:
+                            # Existing token wins — reset current token
+                            t_data["marker_id"] = None
+                            t_data.get("id_votes", {}).pop(m_id, None)
+
+                get_video_stream.cctag_future = None
+
+        # Submit a new full-frame detection job if nothing is running
+        if CCTAG_AVAILABLE and not getattr(get_video_stream, "cctag_future", None):
+            gray_copy = gray.copy()  # Must copy; camera thread overwrites gray continuously
+            get_video_stream.cctag_future = cctag_executor.submit(_detect_full_frame, gray_copy)
+
+        # --- Render and Prepare Payloads ---
+        detected_tokens = []
+        
+        # Dedup marker IDs before sending payload
+        best_tokens = {}
+        for t_id, t_data in get_video_stream.tracked_tokens.items():
+            m_id = t_data.get("marker_id")
+            if m_id is not None:
+                if m_id not in best_tokens or t_data["missed"] < best_tokens[m_id]["missed"]:
+                    best_tokens[m_id] = t_data
+
+        current_marker_ids = set()
+        for m_id, t_data in best_tokens.items():
+            final_id = f"Marker_{m_id}"
+            current_marker_ids.add(m_id)
+            if final_id in ignored_tokens:
                 continue
 
-            display_name = token_aliases.get(token_id, token_id)
+            display_name = token_aliases.get(final_id, final_id)
             
             if show_overlay:
                 cv2.circle(frame, (int(t_data["x"]), int(t_data["y"])), int(t_data["r"]), (0, 255, 0), 2)
@@ -492,37 +690,41 @@ def get_video_stream():
                 dst = cv2.perspectiveTransform(pts, homography_matrix)
                 grid_x, grid_y = dst[0][0]
             else:
-                h, w = frame.shape[:2]
                 grid_x = t_data["x"] / w
                 grid_y = t_data["y"] / h
             
-            # Apply Flips and Clamp to 0.0-1.0
             if flip_x: grid_x = 1.0 - grid_x
             if flip_y: grid_y = 1.0 - grid_y
-            
             grid_x = max(0.0, min(1.0, grid_x))
             grid_y = max(0.0, min(1.0, grid_y))
                 
             detected_tokens.append({
-                "id": token_id,
-                "alias": token_aliases.get(token_id),
+                "id": final_id,
+                "alias": token_aliases.get(final_id),
                 "x": float(grid_x),
                 "y": float(grid_y),
                 "has_base": True
             })
-                
-        # Clean up tokens that have been missing for too long (e.g. 5 seconds)
-        to_remove = []
+            
+        # Render "Unknown" tokens locally in red
         for t_id, t_data in get_video_stream.tracked_tokens.items():
-            if t_data["missed"] > 100: # ~5 seconds at 20fps
-                to_remove.append(t_id)
-        for t_id in to_remove:
-            del get_video_stream.tracked_tokens[t_id]
+            if t_data.get("marker_id") is None and show_overlay:
+                cv2.circle(frame, (int(t_data["x"]), int(t_data["y"])), int(t_data["r"]), (0, 0, 255), 2)
+                cv2.putText(frame, "Unknown", (int(t_data["x"]) + 10, int(t_data["y"]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+        # --- Appear/Disappear Logging ---
+        if not hasattr(get_video_stream, "last_marker_ids"):
+            get_video_stream.last_marker_ids = set()
+        new_ids = current_marker_ids - get_video_stream.last_marker_ids
+        lost_ids = get_video_stream.last_marker_ids - current_marker_ids
+        for nid in new_ids: print(f"[TRACKER] Token Detected: ID {nid}", flush=True)
+        for lid in lost_ids: print(f"[TRACKER] Token Lost: ID {lid}", flush=True)
+        get_video_stream.last_marker_ids = current_marker_ids
 
         # Check if any confirmed token is currently "missed" for more than 3 frames
         any_missed = False
         if auto_blank:
-            for t_id, t_data in get_video_stream.tracked_tokens.items():
+            for m_id, t_data in best_tokens.items():
                 if t_data["missed"] > 2: # 2-frame buffer
                     any_missed = True
                     break
@@ -532,7 +734,6 @@ def get_video_stream():
             print(f"DEBUG: Blackout active! Missing tokens: {missed_ids}")
 
         # --- Final Blackout Decision ---
-        # Blackout if: Manual override is ON OR (Auto-Blank is ON and tokens are missing)
         blackout_active = manual_blank or (auto_blank and any_missed)
 
         # Send data to websocket clients
@@ -556,14 +757,17 @@ def get_video_stream():
                     cv2.line(frame, (int(src_pts[i-1][0]), int(src_pts[i-1][1])), (int(src_pts[i][0]), int(src_pts[i][1])), (255, 0, 0), 2)
                 if corner_idx == 4 and i == 3:
                     cv2.line(frame, (int(src_pts[3][0]), int(src_pts[3][1])), (int(src_pts[0][0]), int(src_pts[0][1])), (255, 0, 0), 2)
-                
+
         with frame_lock:
             current_frame = frame.copy()
             
-        # Throttle loop to maintain ~5 FPS target
+        # Throttle loop to maintain ~30 FPS target
         elapsed = time.time() - loop_start
         if elapsed < frame_interval:
             time.sleep(frame_interval - elapsed)
+
+
+
 
 def generate_frames():
     global current_frame
@@ -580,6 +784,45 @@ def generate_frames():
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         time.sleep(0.03) # Limit framerate to browser to save bandwidth
 
+def generate_raw_frames():
+    global raw_frame_for_stream
+    while True:
+        try:
+            if raw_frame_for_stream is None:
+                time.sleep(0.1)
+                continue
+            with frame_lock:
+                rf = raw_frame_for_stream.copy() if raw_frame_for_stream is not None else None
+            if rf is None:
+                time.sleep(0.1)
+                continue
+            ret, buffer = cv2.imencode('.jpg', rf)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Exception:
+            time.sleep(0.1)
+
+
+def generate_undistorted_frames():
+    global undistorted_frame_for_stream
+    while True:
+        try:
+            if undistorted_frame_for_stream is None:
+                time.sleep(0.1)
+                continue
+            with frame_lock:
+                uf = undistorted_frame_for_stream.copy() if undistorted_frame_for_stream is not None else None
+            if uf is None:
+                time.sleep(0.1)
+                continue
+            ret, buffer = cv2.imencode('.jpg', uf)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Exception:
+            time.sleep(0.1)
+
 @app.route('/')
 @auth.login_required
 def index():
@@ -590,6 +833,31 @@ def index():
 def video_feed():
     return Response(generate_frames(),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/diag_raw_feed')
+def diag_raw_feed():
+    return Response(generate_raw_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/diag_undistort_feed')
+def diag_undistort_feed():
+    return Response(generate_undistorted_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/diagnostic')
+def diagnostic_page():
+    # Simple side-by-side viewer for raw vs undistorted frames
+    html = '''<!doctype html>
+<html><head><title>Camera Diagnostic</title></head><body>
+<h2>Camera Diagnostic: Raw (left) vs Undistorted (right)</h2>
+<div style="display:flex;gap:10px;">
+  <div><h3>Raw</h3><img id="raw" src="/diag_raw_feed" style="max-width:45vw;" /></div>
+  <div><h3>Undistorted</h3><img id="und" src="/diag_undistort_feed" style="max-width:45vw;"/></div>
+</div>
+<p>Use this page to visually verify undistortion. Reload after calibration finishes.</p>
+</body></html>'''
+    return html
 
 @app.route('/api/connect', methods=['POST'])
 def connect_camera():
@@ -607,7 +875,7 @@ def connect_camera():
         except (ValueError, TypeError):
             source = camera_url
             
-        if isinstance(source, str) and source.startswith('http'):
+        if isinstance(source, str) and (source.startswith('http') or source.startswith('rtsp') or source.startswith('rtmp')):
             cap = IPCameraCapture(source)
         else:
             cap = cv2.VideoCapture(source)
@@ -639,6 +907,7 @@ def calibrate():
             # Map to a standard square 0.0 to 1.0 space
             dst_pts = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
             homography_matrix, _ = cv2.findHomography(src_pts, dst_pts)
+            save_config_to_disk()
             
         return jsonify({"success": True, "corners": corner_idx})
         
@@ -646,25 +915,200 @@ def calibrate():
         corner_idx = 0
         src_pts = np.zeros((4, 2), dtype=np.float32)
         homography_matrix = None
+        save_config_to_disk()
         return jsonify({"success": True})
+
+
+@app.route('/api/camera_calibration/start', methods=['POST'])
+@auth.login_required
+def camera_calibration_start():
+    """Begin a new camera calibration session (fisheye model)."""
+    global calib_mode, calib_objpoints, calib_imgpoints, calibration_model
+    calib_mode = True
+    calib_objpoints = []
+    calib_imgpoints = []
+    calibration_model = None
+    return jsonify({"success": True, "message": "Calibration started; submit frames using /api/camera_calibration/add_frame"})
+
+
+@app.route('/api/camera_calibration/add_frame', methods=['POST'])
+@auth.login_required
+def camera_calibration_add_frame():
+    """Capture current frame and try to detect chessboard corners. Returns how many valid frames collected."""
+    global calib_mode, calib_objpoints, calib_imgpoints, chessboard_size
+    if not calib_mode:
+        return jsonify({"success": False, "error": "Calibration not started"}), 400
+
+    with frame_lock:
+        # Prefer the raw captured frame for calibration (before processing)
+        src_img = raw_frame_for_stream if raw_frame_for_stream is not None else current_frame
+        if src_img is None:
+            return jsonify({"success": False, "error": "No frame available"}), 400
+        img = src_img.copy()
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    pattern = (int(chessboard_size[0]), int(chessboard_size[1]))
+    found, corners = cv2.findChessboardCorners(gray, pattern, flags=cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE)
+    if not found:
+        return jsonify({"success": False, "found": False, "message": "Chessboard not detected in frame"}), 200
+
+    # refine corners
+    corners_sub = cv2.cornerSubPix(gray, corners, (11, 11), (-1, -1), (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
+
+    # prepare object points for this view
+    objp = np.zeros((pattern[0] * pattern[1], 3), dtype=np.float64)
+    objp[:, :2] = np.mgrid[0:pattern[0], 0:pattern[1]].T.reshape(-1, 2)
+
+    # reshape corners to expected format
+    imgp = corners_sub.reshape(-1, 2).astype(np.float64)
+
+    # store as required by fisheye.calibrate: (N,1,points,3)/(N,1,points,2)
+    calib_objpoints.append(objp.reshape(1, -1, 3).copy())
+    calib_imgpoints.append(imgp.reshape(1, -1, 2).copy())
+
+    return jsonify({"success": True, "found": True, "frames_collected": len(calib_imgpoints)})
+
+
+@app.route('/api/camera_calibration/finish', methods=['POST'])
+@auth.login_required
+def camera_calibration_finish():
+    """Run calibration using collected frames and store the camera matrix + distortion coeffs."""
+    global calib_mode, calib_objpoints, calib_imgpoints, camera_matrix, dist_coeffs, settings_dirty, calibration_model, undistort_map1, undistort_map2, undistort_model
+    if not calib_mode or len(calib_imgpoints) == 0:
+        return jsonify({"success": False, "error": "No calibration frames collected"}), 400
+
+    # Validate minimum frames
+    if len(calib_imgpoints) < 3:
+        return jsonify({"success": False, "error": f"Need at least 3 frames, only have {len(calib_imgpoints)}. Collect more snapshots from different angles."}), 400
+
+    # Build proper lists
+    objpoints = [op for op in calib_objpoints]
+    imgpoints = [ip for ip in calib_imgpoints]
+
+    # image size from the last collected frame
+    with frame_lock:
+        if current_frame is None:
+            return jsonify({"success": False, "error": "No frame to determine image size"}), 400
+        h, w = current_frame.shape[:2]
+
+    # Try fisheye calibration first (better for strong fisheye lenses), fallback to classical calibrateCamera
+    try:
+        K = np.zeros((3, 3), dtype=np.float64)
+        D = np.zeros((4, 1), dtype=np.float64)
+        objp_list = [op.astype(np.float64) for op in objpoints]
+        imgp_list = [ip.astype(np.float64) for ip in imgpoints]
+
+        # Criteria
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 1e-6)
+        flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC
+
+        rms, K, D, rvecs, tvecs = cv2.fisheye.calibrate(
+            objp_list, imgp_list, (w, h), K, D, flags=flags, criteria=criteria)
+
+        camera_matrix = K
+        dist_coeffs = D
+        calibration_model = 'fisheye'
+        settings_dirty = True
+        undistort_map1 = None
+        undistort_map2 = None
+        undistort_model = None
+        calib_mode = False
+
+        # Save calibration to disk
+        save_config_to_disk()
+
+        return jsonify({"success": True, "model": "fisheye", "rms": float(rms), "camera_matrix": camera_matrix.tolist(), "dist_coeffs": dist_coeffs.tolist()})
+    except Exception as e_fisheye:
+        # Fallback to classical camera calibration
+        try:
+            # Prepare standard lists: reshape each (1, n, dim) to (n, dim) and ensure float32
+            objp_std = [op.reshape(-1, 3).astype(np.float32) for op in objpoints]
+            imgp_std = [ip.reshape(-1, 2).astype(np.float32) for ip in imgpoints]
+
+            ret, Kc, dc, rvecs, tvecs = cv2.calibrateCamera(
+                objp_std, imgp_std, (w, h), None, None,
+                flags=cv2.CALIB_FIX_K3)
+
+            camera_matrix = Kc
+            # dist_coeffs from calibrateCamera is already (1, 4) or (4, 1), ensure (4, 1) format
+            dist_coeffs = np.array(dc, dtype=np.float64)
+            if dist_coeffs.ndim == 1:
+                dist_coeffs = dist_coeffs.reshape(-1, 1)
+            calibration_model = 'standard'
+            settings_dirty = True
+            undistort_map1 = None
+            undistort_map2 = None
+            undistort_model = None
+            calib_mode = False
+            save_config_to_disk()
+            return jsonify({"success": True, "model": "standard", "rms": float(ret), "camera_matrix": camera_matrix.tolist(), "dist_coeffs": dist_coeffs.tolist()})
+        except Exception as e_std:
+            # Both calibration attempts failed - provide diagnostic info
+            err_msg = (
+                f"Calibration failed. "
+                f"Frames: {len(objpoints)}. "
+                f"Issues: Fisheye={str(e_fisheye)[:80]}... | Standard={str(e_std)[:80]}... "
+                f"Try: (1) Collect 10-20+ frames, (2) Move camera to different angles/distances, "
+                f"(3) Ensure good lighting and chessboard contrast."
+            )
+            return jsonify({"success": False, "error": err_msg}), 500
+
+
+@app.route('/api/camera_calibration/reset', methods=['POST'])
+@auth.login_required
+def camera_calibration_reset():
+    global calib_mode, calib_objpoints, calib_imgpoints, calibration_model, undistort_map1, undistort_map2, undistort_model
+    calib_mode = False
+    calib_objpoints = []
+    calib_imgpoints = []
+    calibration_model = None
+    undistort_map1 = None
+    undistort_map2 = None
+    undistort_model = None
+    return jsonify({"success": True})
+
+
+@app.route('/api/camera_calibration/status', methods=['GET'])
+@auth.login_required
+def camera_calibration_status():
+    global calib_mode, calib_objpoints, calib_imgpoints, camera_matrix, dist_coeffs, calibration_model
+    return jsonify({
+        "calib_mode": bool(calib_mode),
+        "frames_collected": len(calib_imgpoints),
+        "calibrated": camera_matrix is not None and dist_coeffs is not None,
+        "model": calibration_model
+    })
 
 @app.route('/api/settings', methods=['POST'])
 @auth.login_required
 def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global aruco_min_perimeter, aruco_adaptive_thresh_min, aruco_poly_approx, auto_blank, token_aliases
-    global camera_url, detection_mode, stag_error_correction, stag_roi_padding, manual_blank
-    
+    global auto_blank, token_aliases
+    global camera_url, manual_blank, flip_x, flip_y
+    global CCTAG_AVAILABLE, cctag_min_id, cctag_max_id, cctag_min_ident_proba
+    global cctag_id_voting_decay, cctag_match_radius_mult, cctag_ghosting_frames
+
     data = request.json
-    if 'camera_url' in data:
-        camera_url = data['camera_url']
-    if 'detection_mode' in data:
-        detection_mode = data['detection_mode']
-    if 'stag_error_correction' in data:
-        stag_error_correction = int(data['stag_error_correction'])
-    if 'stag_roi_padding' in data:
-        stag_roi_padding = int(data['stag_roi_padding'])
+    if 'camera_url' in data: camera_url = data['camera_url']
+    if 'cctag_min_id' in data:
+        try: cctag_min_id = int(data['cctag_min_id'])
+        except Exception: pass
+    if 'cctag_max_id' in data:
+        try: cctag_max_id = int(data['cctag_max_id'])
+        except Exception: pass
+    if 'cctag_min_ident_proba' in data:
+        try: cctag_min_ident_proba = float(data['cctag_min_ident_proba'])
+        except Exception: pass
+    if 'cctag_id_voting_decay' in data:
+        try: cctag_id_voting_decay = float(data['cctag_id_voting_decay'])
+        except Exception: pass
+    if 'cctag_match_radius_mult' in data:
+        try: cctag_match_radius_mult = float(data['cctag_match_radius_mult'])
+        except Exception: pass
+    if 'cctag_ghosting_frames' in data:
+        try: cctag_ghosting_frames = int(data['cctag_ghosting_frames'])
+        except Exception: pass
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
     if 'zoom' in data: zoom_level = float(data['zoom'])
     if 'offset_x' in data: offset_x = float(data['offset_x'])
@@ -678,25 +1122,30 @@ def update_settings():
     if 'manual_blank' in data: manual_blank = bool(data['manual_blank'])
     if 'flip_x' in data: flip_x = bool(data['flip_x'])
     if 'flip_y' in data: flip_y = bool(data['flip_y'])
-    
-    # Hough Params
     if 'hough_dp' in data: hough_dp = float(data['hough_dp'])
     if 'hough_min_dist' in data: hough_min_dist = int(data['hough_min_dist'])
     if 'hough_param1' in data: hough_param1 = float(data['hough_param1'])
     if 'hough_param2' in data: hough_param2 = float(data['hough_param2'])
     if 'hough_min_radius' in data: hough_min_radius = int(data['hough_min_radius'])
     if 'hough_max_radius' in data: hough_max_radius = int(data['hough_max_radius'])
-    
-    # ArUco Params
-    if 'aruco_min_perimeter' in data: aruco_min_perimeter = float(data['aruco_min_perimeter'])
-    if 'aruco_adaptive_thresh_min' in data: aruco_adaptive_thresh_min = int(data['aruco_adaptive_thresh_min'])
-    if 'aruco_poly_approx' in data: aruco_poly_approx = float(data['aruco_poly_approx'])
-    if 'auto_blank' in data: auto_blank = bool(data['auto_blank'])
-    
+
+    # Purge tokens whose marker_id is now outside the new ID range
+    if hasattr(get_video_stream, 'tracked_tokens'):
+        to_delete = []
+        for tid, tdata in get_video_stream.tracked_tokens.items():
+            rid = tdata.get('marker_id')
+            if rid is not None and (int(rid) < cctag_min_id or int(rid) > cctag_max_id):
+                to_delete.append(tid)
+        for tid in to_delete:
+            get_video_stream.tracked_tokens.pop(tid, None)
+        if hasattr(get_video_stream, 'last_marker_ids'):
+            get_video_stream.last_marker_ids -= set(to_delete)
+
     save_config_to_disk()
     global settings_dirty
     settings_dirty = True
     return jsonify({"success": True})
+
 
 @app.route('/api/token/alias', methods=['POST'])
 def set_token_alias():
@@ -724,6 +1173,13 @@ def reset_tokens():
     ignored_tokens = set()
     token_aliases = {}
     return jsonify({"success": True})
+
+@app.route('/extension/<path:filename>', methods=['GET', 'OPTIONS'])
+def serve_extension(filename):
+    if request.method == 'OPTIONS':
+        return '', 200
+    ext_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'extension')
+    return send_from_directory(ext_dir, filename)
 
 if __name__ == '__main__':
     print("Starting server on port 5000...")

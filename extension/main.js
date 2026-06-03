@@ -5,7 +5,7 @@ document.querySelector('#app').innerHTML = `
   <div class="container">
     <h2>Token Sync</h2>
     <div class="connection-box">
-      <input type="text" id="ws-url" value="https://owlbear-tracker.n4z4r.com/" placeholder="Tracker URL" />
+      <input type="text" id="ws-url" value="http://localhost:5000/" placeholder="Tracker URL (e.g. http://localhost:5000/)" />
       <button id="connect-btn">Connect</button>
       <div id="status" class="status disconnected">Disconnected</div>
     </div>
@@ -16,6 +16,19 @@ document.querySelector('#app').innerHTML = `
       <div id="mapping-list" class="mapping-list">
         <p class="empty-msg">No physical tokens detected yet.</p>
       </div>
+    </div>
+
+    <div class="mapping-section">
+      <h3>Sync Performance</h3>
+      <div class="control-row">
+        <label>Sync Rate (FPS): <span id="fps-val">10</span></label>
+        <input type="range" id="sync-fps" min="1" max="30" value="10">
+      </div>
+      <div class="control-row">
+        <label>Sensitivity (px): <span id="sens-val">3</span></label>
+        <input type="range" id="sync-sens" min="0" max="20" value="3" step="0.5">
+      </div>
+      <p style="font-size: 0.75rem; color: #94a3b8; margin-top: 5px;">Higher FPS or lower sensitivity means smoother movement but more network traffic.</p>
     </div>
 
     <div class="blackout-settings">
@@ -42,7 +55,8 @@ let blackoutItemId = null;
 let filterItemId = null;
 let isUpdating = false;
 let lastUpdateTime = 0;
-const THROTTLE_MS = 100; 
+let THROTTLE_MS = 100; 
+let SYNC_THRESHOLD = 3;
 
 OBR.onReady(async () => {
   isReady = true;
@@ -75,12 +89,25 @@ OBR.onReady(async () => {
     await updateBlackout(true);
     setTimeout(() => updateBlackout(false), 3000);
   });
+
+  // UI Listeners for Sync Performance
+  document.getElementById('sync-fps').addEventListener('input', (e) => {
+    const fps = parseInt(e.target.value, 10);
+    document.getElementById('fps-val').innerText = fps;
+    THROTTLE_MS = Math.floor(1000 / fps);
+  });
+
+  document.getElementById('sync-sens').addEventListener('input', (e) => {
+    SYNC_THRESHOLD = parseFloat(e.target.value);
+    document.getElementById('sens-val').innerText = SYNC_THRESHOLD;
+  });
 });
 
 document.getElementById('connect-btn').addEventListener('click', () => {
   const url = document.getElementById('ws-url').value;
   connectSocketIO(url);
 });
+
 
 function connectSocketIO(url) {
   if (socket) socket.disconnect();
@@ -237,8 +264,8 @@ async function syncTokensWithOwlbear(physicalTokens) {
       
       const dist = Math.sqrt(Math.pow(targetItem.position.x - targetX, 2) + Math.pow(targetItem.position.y - targetY, 2));
       
-      // Smooth movement, only apply if moved more than 1/4th of a square
-      if (dist > (dpi / 4)) {
+      // Update if moved more than threshold to prevent network spam
+      if (dist > SYNC_THRESHOLD) {
         itemsToUpdate.push({
           id: targetItem.id,
           position: { x: targetX, y: targetY }
