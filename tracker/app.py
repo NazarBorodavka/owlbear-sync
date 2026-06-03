@@ -313,8 +313,8 @@ def get_video_stream():
 
     fail_count = 0
     
-    # 20 FPS target
-    frame_interval = 0.1 
+    # 30 FPS target for fluid tracking
+    frame_interval = 0.033 
     last_marker_ids = set()
     
     while is_running:
@@ -499,7 +499,7 @@ def get_video_stream():
             if best_id:
                 token = get_video_stream.tracked_tokens[best_id]
                 dist_moved = np.hypot(token["x"] - cx, token["y"] - cy)
-                alpha = 1.0 if dist_moved > 15 else 0.2
+                alpha = 1.0 if dist_moved > 10 else 0.6
                 token["x"] = token["x"] * (1 - alpha) + cx * alpha
                 token["y"] = token["y"] * (1 - alpha) + cy * alpha
                 token["r"] = token["r"] * 0.8 + cr * 0.2
@@ -531,7 +531,7 @@ def get_video_stream():
         def _detect_single_roi_from_token(t_id, cx, cy, cr, frame_gray, fw, fh):
             # TIGHT padding: We use raw coordinates so there's no lag.
             # A tight crop prevents the map projection background from confusing the detector.
-            pad = int(cr * 0.4) + 10 # slightly larger than 0.25 to ensure outermost ring isn't clipped
+            pad = int(cr * 0.25) + 5
             y1, y2 = max(0, int(cy - cr - pad)), min(fh, int(cy + cr + pad))
             x1, x2 = max(0, int(cx - cr - pad)), min(fw, int(cx + cr + pad))
 
@@ -539,30 +539,11 @@ def get_video_stream():
             if roi.size < 100:
                 return (t_id, [])
 
-            # --- Projection Mapping Defeater Pipeline ---
-            # 1. Slight blur to kill the sharp projector pixel grid and micro-textures
-            blur = cv2.GaussianBlur(roi, (5, 5), 0)
-            
-            # 2. Adaptive thresholding: Since the map projects dark/light patterns, 
-            # global contrast fails. We use a local window (~radius size) to separate 
-            # the black ink from the white base locally, perfectly deleting the map texture!
-            block_size = int(cr)
-            if block_size % 2 == 0: 
-                block_size += 1
-            if block_size < 11: 
-                block_size = 11
-                
-            binary = cv2.adaptiveThreshold(
-                blur, 255, 
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                cv2.THRESH_BINARY, 
-                block_size, 
-                cctag_adaptive_thresh_c # Tunes strictness of black vs projection glare
-            )
-            
-            # 3. CCTag prefers smooth sub-pixel gradients rather than harsh binary stairs.
-            # We slightly blur the perfect binary image to restore sub-pixel edges.
-            roi_enhanced = cv2.GaussianBlur(binary, (3, 3), 0)
+            # --- Reverted to Sequential Implementation Logic ---
+            # Global Histogram Equalization worked best for sub-pixel accuracy.
+            # CLAHE and Adaptive Thresholding both risk amplifying texture noise 
+            # or creating binary staircases that break CCTag's sub-pixel edge detection.
+            roi_enhanced = cv2.equalizeHist(roi)
             
             img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
             
