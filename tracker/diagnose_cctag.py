@@ -16,6 +16,7 @@ import numpy as np
 import sys
 import os
 import time
+import json
 
 sys.path.append('/app/python')
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../python')))
@@ -148,46 +149,52 @@ if os.path.exists(tag_path):
 
 # ---- Test 7: RTSP frame (live) ----
 print("\n[TEST 7] Live RTSP frame test (if camera available)...")
-rtsp_url = os.environ.get("DIAG_RTSP_URL", "")
-if not rtsp_url:
-    print("  SKIP: Set DIAG_RTSP_URL env var to test live camera (e.g. rtsp://user:pass@IP:port/stream)")
-
-if rtsp_url:
-    try:
-        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        ret = False
-        for _ in range(10):
-            ret, frame = cap.read()
-            if ret: break
-            time.sleep(0.2)
+# Load camera url from configuration if available
+rtsp_url = "rtsp://user:pass@192.168.0.241:554/stream1"
+for path in (os.path.join(os.path.dirname(__file__), 'config.json'), '/app/config.json', 'config.json'):
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                c = json.load(f)
+                if 'camera_url' in c and c['camera_url']:
+                    rtsp_url = c['camera_url']
+                    break
+        except Exception:
+            pass
+try:
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    ret = False
+    for _ in range(10):
+        ret, frame = cap.read()
+        if ret: break
+        time.sleep(0.2)
+    
+    if ret and frame is not None:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+        print(f"  Frame: {w}x{h}, min={gray.min()}, max={gray.max()}, mean={gray.mean():.1f}")
         
-        if ret and frame is not None:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            h, w = gray.shape
-            print(f"  Frame: {w}x{h}, min={gray.min()}, max={gray.max()}, mean={gray.mean():.1f}")
-            
-            # Full-frame detection (slow but definitive)
-            print("  Running full-frame CCTag detection (may take a few seconds)...")
-            t0 = time.time()
-            gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-            results = det.detect(gray_norm, min_ident_proba=1e-6, cx=w/2.0, cy=h/2.0, fx=float(w), fy=float(w))
-            dt = time.time() - t0
-            print(f"  Full-frame detection time: {dt*1000:.0f}ms")
-            if results:
-                print(f"  OK: Full-frame found: {results}")
-            else:
-                print("  NOTE: Nothing found full-frame")
-            
-            # Save a frame for inspection
-            cv2.imwrite('/tmp/live_frame.jpg', frame)
-            print("  Saved frame to /tmp/live_frame.jpg")
+        # Full-frame detection (slow but definitive)
+        print("  Running full-frame CCTag detection (may take a few seconds)...")
+        t0 = time.time()
+        gray_norm = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+        results = det.detect(gray_norm, min_ident_proba=1e-6, cx=w/2.0, cy=h/2.0, fx=800.0, fy=800.0)
+        dt = time.time() - t0
+        print(f"  Full-frame detection time: {dt*1000:.0f}ms")
+        if results:
+            print(f"  OK: Full-frame found: {results}")
         else:
-            print("  SKIP: Could not connect to RTSP camera (network may not be accessible from container)")
-        cap.release()
-    except Exception as e:
-        print(f"  SKIP: {e}")
-
+            print("  NOTE: Nothing found full-frame - try running on a smaller ROI")
+        
+        # Save a frame for inspection
+        cv2.imwrite('/tmp/live_frame.jpg', frame)
+        print("  Saved frame to /tmp/live_frame.jpg")
+    else:
+        print("  SKIP: Could not connect to RTSP camera (network may not be accessible from container)")
+    cap.release()
+except Exception as e:
+    print(f"  SKIP: {e}")
 
 print("\n" + "=" * 60)
 print("Diagnostics complete.")
