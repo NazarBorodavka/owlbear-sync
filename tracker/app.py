@@ -116,7 +116,7 @@ LEGACY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global auto_blank
+    global auto_blank, auto_blank_delay
     global cctag_min_id, cctag_max_id
     global token_aliases, manual_blank
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
@@ -148,6 +148,7 @@ def load_config_from_disk():
                 hough_min_radius = c.get('hough_min_radius', 30)
                 hough_max_radius = c.get('hough_max_radius', 40)
                 auto_blank = c.get('auto_blank', False)
+                auto_blank_delay = int(c.get('auto_blank_delay', 10))
                 token_aliases = c.get('token_aliases', {})
                 print(f"Loaded config from disk: {config_path}")
                 # Load camera calibration if present
@@ -195,6 +196,7 @@ def save_config_to_disk():
         'hough_param1': hough_param1, 'hough_param2': hough_param2,
         'hough_min_radius': hough_min_radius, 'hough_max_radius': hough_max_radius,
         'auto_blank': auto_blank,
+        'auto_blank_delay': auto_blank_delay,
         'cctag_min_id': cctag_min_id,
         'cctag_max_id': cctag_max_id,
         'cctag_min_ident_proba': cctag_min_ident_proba,
@@ -252,6 +254,7 @@ hough_min_radius = 30
 hough_max_radius = 40
 
 auto_blank = False # Toggle for anti-reflection mode
+auto_blank_delay = 10 # Frames to wait before auto-blanking
 flip_x = False
 flip_y = False
 
@@ -308,7 +311,7 @@ def get_video_stream():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global CCTAG_AVAILABLE, cctag_detector
-    global src_pts, corner_idx, homography_matrix, auto_blank, manual_blank
+    global src_pts, corner_idx, homography_matrix, auto_blank, auto_blank_delay, manual_blank
     global cctag_min_id, cctag_max_id
     global camera_matrix, dist_coeffs, calibration_model
 
@@ -625,8 +628,9 @@ def get_video_stream():
                         if t_data["id_votes"]:
                             best_rid = max(t_data["id_votes"].items(), key=lambda x: x[1])[0]
                             t_data["marker_id"] = best_rid
-                        else:
-                            t_data["marker_id"] = None
+                        # Intentionally NOT setting marker_id to None if votes run out.
+                        # As long as the disk is physically tracked, it retains its last known ID
+                        # unless another token actively claims it with higher confidence.
 
                 # Resolve cross-token ID collisions (two Hough circles both matching same CCTag ID)
                 claimed = {}
@@ -721,16 +725,16 @@ def get_video_stream():
         for lid in lost_ids: print(f"[TRACKER] Token Lost: ID {lid}", flush=True)
         get_video_stream.last_marker_ids = current_marker_ids
 
-        # Check if any confirmed token is currently "missed" for more than 3 frames
+        # Check if any confirmed token is currently "missed" for more than auto_blank_delay frames
         any_missed = False
         if auto_blank:
             for m_id, t_data in best_tokens.items():
-                if t_data["missed"] > 2: # 2-frame buffer
+                if t_data["missed"] > auto_blank_delay:
                     any_missed = True
                     break
         
         if any_missed:
-            missed_ids = [tid for tid, td in get_video_stream.tracked_tokens.items() if td["missed"] > 2]
+            missed_ids = [tid for tid, td in get_video_stream.tracked_tokens.items() if td["missed"] > auto_blank_delay]
             print(f"DEBUG: Blackout active! Missing tokens: {missed_ids}")
 
         # --- Final Blackout Decision ---
@@ -1119,6 +1123,7 @@ def update_settings():
     if 'exposure' in data: exposure = float(data['exposure'])
     if 'show_overlay' in data: show_overlay = bool(data['show_overlay'])
     if 'auto_blank' in data: auto_blank = bool(data['auto_blank'])
+    if 'auto_blank_delay' in data: auto_blank_delay = int(data['auto_blank_delay'])
     if 'manual_blank' in data: manual_blank = bool(data['manual_blank'])
     if 'flip_x' in data: flip_x = bool(data['flip_x'])
     if 'flip_y' in data: flip_y = bool(data['flip_y'])

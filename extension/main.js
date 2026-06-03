@@ -177,60 +177,82 @@ function renderMappingUI() {
     return;
   }
   
-  listEl.innerHTML = '';
+  // Remove the empty message if it exists
+  const emptyMsg = listEl.querySelector('.empty-msg');
+  if (emptyMsg) {
+    emptyMsg.remove();
+  }
+
+  // Map existing elements by physical ID
+  const existingElements = {};
+  listEl.querySelectorAll('.mapping-item').forEach(el => {
+    existingElements[el.dataset.id] = el;
+  });
+
+  const currentIds = new Set(currentPhysicalTokens.map(pt => pt.id));
+
+  // Remove elements for tokens that disappeared
+  for (const id in existingElements) {
+    if (!currentIds.has(id)) {
+      existingElements[id].remove();
+    }
+  }
   
   currentPhysicalTokens.forEach(pt => {
-    const itemEl = document.createElement('div');
-    itemEl.className = 'mapping-item';
-    
-    // Use alias if available, otherwise fallback to the color name from ID
     const displayName = pt.alias || pt.id.split('_')[0];
     
-    const label = document.createElement('div');
-    label.className = 'mapping-label';
-    label.innerHTML = `<strong>${displayName}</strong> <span class="id-tag">${pt.id}</span>`;
-    
-    const select = document.createElement('select');
-    select.className = 'mapping-select';
-    
-    // Default empty option
-    const defaultOpt = document.createElement('option');
-    defaultOpt.value = "";
-    defaultOpt.text = "-- Select Virtual Token --";
-    select.appendChild(defaultOpt);
-    
-    // Populate virtual tokens
-    virtualTokens.forEach(vt => {
-      const opt = document.createElement('option');
-      opt.value = vt.id;
-      // Use text.plainText if it's a text item, otherwise use name
-      opt.text = vt.text && vt.text.plainText ? vt.text.plainText : (vt.name || 'Unnamed Token');
-      select.appendChild(opt);
-    });
-    
-    // Set current value if mapped
-    if (tokenMapping[pt.id]) {
-      select.value = tokenMapping[pt.id];
-    }
-    
-    // Handle changes
-    select.addEventListener('change', (e) => {
-      const virtualId = e.target.value;
-      const selectedToken = virtualTokens.find(vt => vt.id === virtualId);
-      
-      if (virtualId === "") {
-        delete tokenMapping[pt.id];
-        delete assignedNames[pt.id];
-      } else {
-        tokenMapping[pt.id] = virtualId;
-        // Save the name for re-syncing across scenes
-        assignedNames[pt.id] = selectedToken.text && selectedToken.text.plainText ? selectedToken.text.plainText : (selectedToken.name || 'Unnamed Token');
+    if (existingElements[pt.id]) {
+      // Update label if alias changed, leave select untouched
+      const labelStrong = existingElements[pt.id].querySelector('strong');
+      if (labelStrong && labelStrong.innerText !== displayName) {
+        labelStrong.innerText = displayName;
       }
-    });
-    
-    itemEl.appendChild(label);
-    itemEl.appendChild(select);
-    listEl.appendChild(itemEl);
+    } else {
+      // Create new mapping item
+      const itemEl = document.createElement('div');
+      itemEl.className = 'mapping-item';
+      itemEl.dataset.id = pt.id; // Store ID for incremental updates
+      
+      const label = document.createElement('div');
+      label.className = 'mapping-label';
+      label.innerHTML = `<strong>${displayName}</strong> <span class="id-tag">${pt.id}</span>`;
+      
+      const select = document.createElement('select');
+      select.className = 'mapping-select';
+      
+      const defaultOpt = document.createElement('option');
+      defaultOpt.value = "";
+      defaultOpt.text = "-- Select Virtual Token --";
+      select.appendChild(defaultOpt);
+      
+      virtualTokens.forEach(vt => {
+        const opt = document.createElement('option');
+        opt.value = vt.id;
+        opt.text = vt.text && vt.text.plainText ? vt.text.plainText : (vt.name || 'Unnamed Token');
+        select.appendChild(opt);
+      });
+      
+      if (tokenMapping[pt.id]) {
+        select.value = tokenMapping[pt.id];
+      }
+      
+      select.addEventListener('change', (e) => {
+        const virtualId = e.target.value;
+        const selectedToken = virtualTokens.find(vt => vt.id === virtualId);
+        
+        if (virtualId === "") {
+          delete tokenMapping[pt.id];
+          delete assignedNames[pt.id];
+        } else {
+          tokenMapping[pt.id] = virtualId;
+          assignedNames[pt.id] = selectedToken.text && selectedToken.text.plainText ? selectedToken.text.plainText : (selectedToken.name || 'Unnamed Token');
+        }
+      });
+      
+      itemEl.appendChild(label);
+      itemEl.appendChild(select);
+      listEl.appendChild(itemEl);
+    }
   });
 }
 
@@ -305,7 +327,7 @@ async function updateBlackout(active) {
         .fillColor(color)
         .fillOpacity(1.0)
         .strokeWidth(0)
-        .layer("DRAWING") 
+        .layer("FOG") 
         .locked(true)
         .id("blackout-overlay")
         .build();

@@ -472,6 +472,12 @@
                             (when tokens lost)</label>
                     </div>
 
+                    <div class="slider-container" style="margin-top: 10px; padding-left: 28px;">
+                        <label><span>Auto-Blank Delay (frames)</span> <input type="number" id="val_auto_blank_delay" value="10" step="1" min="0" max="150" class="val-input" onchange="syncSlider(this, 'auto_blank_delay'); updateSettings()"></label>
+                        <input type="range" id="auto_blank_delay" min="0" max="150" step="1" value="10" oninput="updateVal('auto_blank_delay')">
+                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">How long a token must be missing before triggering blackout. 30 frames is ~1 second.</p>
+                    </div>
+
                     <div class="slider-container"
                         style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
                         <input type="checkbox" id="manual_blank" onchange="updateSettings()"
@@ -813,6 +819,7 @@
                 brightness: parseFloat(document.getElementById('brightness').value),
                 show_overlay: document.getElementById('show_overlay').checked,
                 auto_blank: document.getElementById('auto_blank').checked,
+                auto_blank_delay: parseInt(document.getElementById('auto_blank_delay').value),
                 manual_blank: document.getElementById('manual_blank').checked,
                 hough_min_radius: parseInt(document.getElementById('hough_min_radius').value),
                 hough_max_radius: parseInt(document.getElementById('hough_max_radius').value),
@@ -884,6 +891,7 @@
                 brightness: document.getElementById('brightness').value,
                 show_overlay: document.getElementById('show_overlay').checked,
                 auto_blank: document.getElementById('auto_blank').checked,
+                auto_blank_delay: parseInt(document.getElementById('auto_blank_delay').value),
                 manual_blank: document.getElementById('manual_blank').checked,
                 hough_min_radius: document.getElementById('hough_min_radius').value,
                 hough_max_radius: document.getElementById('hough_max_radius').value,
@@ -935,6 +943,10 @@
                     if (config.brightness !== undefined) document.getElementById('brightness').value = config.brightness;
                     if (config.show_overlay !== undefined) document.getElementById('show_overlay').checked = config.show_overlay;
                     if (config.auto_blank !== undefined) document.getElementById('auto_blank').checked = config.auto_blank;
+                    if (config.auto_blank_delay !== undefined) {
+                        document.getElementById('auto_blank_delay').value = config.auto_blank_delay;
+                        document.getElementById('val_auto_blank_delay').value = config.auto_blank_delay;
+                    }
                     if (config.manual_blank !== undefined) document.getElementById('manual_blank').checked = config.manual_blank;
                     if (config.hough_min_radius !== undefined) document.getElementById('hough_min_radius').value = config.hough_min_radius;
                     if (config.hough_max_radius !== undefined) document.getElementById('hough_max_radius').value = config.hough_max_radius;
