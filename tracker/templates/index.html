@@ -554,12 +554,12 @@
                             <p class="help-text">Controls how long a token "remembers" its ID. High values (0.95+) prevent flickering and swapping by ignoring short-term hallucinations. Lower values make tokens recover faster if misidentified.</p>
                         </div>
                         <div class="control-group" style="margin-top: 15px;">
-                            <label><span>Glare Strictness (C)</span> <input type="number" id="val_cctag_adaptive_thresh_c"
-                                    value="2" step="1" min="-10" max="20" class="val-input"
-                                    oninput="syncSlider(this, 'cctag_adaptive_thresh_c'); updateSettings()"></label>
-                            <input type="range" id="cctag_adaptive_thresh_c" min="-10" max="20" step="1" value="2"
-                                oninput="updateVal('cctag_adaptive_thresh_c')">
-                            <p class="help-text">Threshold for black rings. Lower values (e.g. 0 to 2) help recognize tokens when bright projector light washes out the black ink. Higher values (e.g. 5+) reduce false positives on noisy backgrounds.</p>
+                            <label><span>Match Radius (×token r)</span> <input type="number" id="val_cctag_match_radius_mult"
+                                    value="2.0" step="0.1" min="0.5" max="5.0" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_match_radius_mult'); updateSettings()"></label>
+                            <input type="range" id="cctag_match_radius_mult" min="0.5" max="5.0" step="0.1" value="2.0"
+                                oninput="updateVal('cctag_match_radius_mult')">
+                            <p class="help-text">How far a CCTag detection can be from a tracked circle to be considered the same token. Increase if tokens are large or the camera is at an angle.</p>
                         </div>
                         <div class="control-group" style="margin-top: 15px;">
                             <label><span>Ghosting Persistence</span> <input type="number" id="val_cctag_ghosting_frames"
@@ -794,34 +794,39 @@
         function updateAreaIndicators() {
         }
 
+        // Debounced settings sender — prevents flooding server with requests on slider drag
+        let _settingsTimer = null;
         function updateSettings() {
+            if (_settingsTimer) clearTimeout(_settingsTimer);
+            _settingsTimer = setTimeout(_sendSettings, 120);
+        }
+
+        function _sendSettings() {
             const config = {
-                distortion_k1: document.getElementById('distortion_k1').value,
-                zoom: document.getElementById('zoom').value,
-                offset_x: document.getElementById('offset_x').value,
-                offset_y: document.getElementById('offset_y').value,
-                rotation: document.getElementById('rotation').value,
-                exposure: document.getElementById('exposure').value,
-                contrast: document.getElementById('contrast').value,
-                brightness: document.getElementById('brightness').value,
+                distortion_k1: parseFloat(document.getElementById('distortion_k1').value),
+                zoom: parseFloat(document.getElementById('zoom').value),
+                offset_x: parseFloat(document.getElementById('offset_x').value),
+                offset_y: parseFloat(document.getElementById('offset_y').value),
+                rotation: parseFloat(document.getElementById('rotation').value),
+                exposure: parseFloat(document.getElementById('exposure').value),
+                contrast: parseFloat(document.getElementById('contrast').value),
+                brightness: parseFloat(document.getElementById('brightness').value),
                 show_overlay: document.getElementById('show_overlay').checked,
                 auto_blank: document.getElementById('auto_blank').checked,
                 manual_blank: document.getElementById('manual_blank').checked,
-                hough_min_radius: document.getElementById('hough_min_radius').value,
-                hough_max_radius: document.getElementById('hough_max_radius').value,
-                hough_param1: document.getElementById('hough_param1').value,
-                hough_param2: document.getElementById('hough_param2').value,
-
-                cctag_family: '3 crowns',
-                cctag_min_id: document.getElementById('cctag_min_id').value,
-                cctag_max_id: document.getElementById('cctag_max_id').value,
+                hough_min_radius: parseInt(document.getElementById('hough_min_radius').value),
+                hough_max_radius: parseInt(document.getElementById('hough_max_radius').value),
+                hough_param1: parseFloat(document.getElementById('hough_param1').value),
+                hough_param2: parseFloat(document.getElementById('hough_param2').value),
+                cctag_min_id: parseInt(document.getElementById('cctag_min_id').value),
+                cctag_max_id: parseInt(document.getElementById('cctag_max_id').value),
                 cctag_min_ident_proba: Math.pow(10, parseFloat(document.getElementById('cctag_min_ident_proba').value) - 10),
                 cctag_id_voting_decay: parseFloat(document.getElementById('cctag_id_voting_decay').value),
-                cctag_adaptive_thresh_c: parseFloat(document.getElementById('cctag_adaptive_thresh_c').value),
+                cctag_match_radius_mult: parseFloat(document.getElementById('cctag_match_radius_mult').value),
                 cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value)
             };
 
-            // Update UI numeric inputs
+            // Sync numeric display inputs
             Object.keys(config).forEach(key => {
                 const el = document.getElementById('val_' + key);
                 if (el) {
@@ -833,14 +838,12 @@
                 }
             });
 
-            // Send to backend
             fetch('/api/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(config)
             });
 
-            // Save to localStorage
             saveConfig();
         }
 
@@ -886,13 +889,11 @@
                 hough_max_radius: document.getElementById('hough_max_radius').value,
                 hough_param1: document.getElementById('hough_param1').value,
                 hough_param2: document.getElementById('hough_param2').value,
-
-                cctag_family: '3 crowns',
                 cctag_min_id: document.getElementById('cctag_min_id').value,
                 cctag_max_id: document.getElementById('cctag_max_id').value,
                 cctag_min_ident_proba: Math.pow(10, parseFloat(document.getElementById('cctag_min_ident_proba').value) - 10),
                 cctag_id_voting_decay: parseFloat(document.getElementById('cctag_id_voting_decay').value),
-                cctag_adaptive_thresh_c: parseFloat(document.getElementById('cctag_adaptive_thresh_c').value),
+                cctag_match_radius_mult: parseFloat(document.getElementById('cctag_match_radius_mult').value),
                 cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value)
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
@@ -909,12 +910,10 @@
                     if (config.offset_x !== undefined) document.getElementById('offset_x').value = config.offset_x;
                     if (config.offset_y !== undefined) document.getElementById('offset_y').value = config.offset_y;
                     if (config.rotation !== undefined) document.getElementById('rotation').value = config.rotation;
-
                     if (config.cctag_min_id !== undefined) document.getElementById('cctag_min_id').value = config.cctag_min_id;
                     if (config.cctag_max_id !== undefined) document.getElementById('cctag_max_id').value = config.cctag_max_id;
                     if (config.cctag_min_ident_proba !== undefined) {
                         let mappedVal = config.cctag_min_ident_proba;
-                        // For backwards compatibility, if they have an old scientific value like 1e-6
                         if (mappedVal < 1) mappedVal = Math.max(0, Math.round(10 + Math.log10(mappedVal)));
                         document.getElementById('cctag_min_ident_proba').value = mappedVal;
                         document.getElementById('val_cctag_min_ident_proba').value = mappedVal;
@@ -923,9 +922,9 @@
                         document.getElementById('cctag_id_voting_decay').value = config.cctag_id_voting_decay;
                         document.getElementById('val_cctag_id_voting_decay').value = config.cctag_id_voting_decay;
                     }
-                    if (config.cctag_adaptive_thresh_c !== undefined) {
-                        document.getElementById('cctag_adaptive_thresh_c').value = config.cctag_adaptive_thresh_c;
-                        document.getElementById('val_cctag_adaptive_thresh_c').value = config.cctag_adaptive_thresh_c;
+                    if (config.cctag_match_radius_mult !== undefined) {
+                        document.getElementById('cctag_match_radius_mult').value = config.cctag_match_radius_mult;
+                        document.getElementById('val_cctag_match_radius_mult').value = config.cctag_match_radius_mult;
                     }
                     if (config.cctag_ghosting_frames !== undefined) {
                         document.getElementById('cctag_ghosting_frames').value = config.cctag_ghosting_frames;
@@ -937,12 +936,10 @@
                     if (config.show_overlay !== undefined) document.getElementById('show_overlay').checked = config.show_overlay;
                     if (config.auto_blank !== undefined) document.getElementById('auto_blank').checked = config.auto_blank;
                     if (config.manual_blank !== undefined) document.getElementById('manual_blank').checked = config.manual_blank;
-
                     if (config.hough_min_radius !== undefined) document.getElementById('hough_min_radius').value = config.hough_min_radius;
                     if (config.hough_max_radius !== undefined) document.getElementById('hough_max_radius').value = config.hough_max_radius;
                     if (config.hough_param1 !== undefined) document.getElementById('hough_param1').value = config.hough_param1;
                     if (config.hough_param2 !== undefined) document.getElementById('hough_param2').value = config.hough_param2;
-
                     // Push loaded settings to backend
                     updateSettings();
                 } catch (e) {

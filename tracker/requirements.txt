@@ -3,4 +3,3 @@ Flask==3.0.2
 Flask-SocketIO==5.3.6
 Flask-HTTPAuth==4.8.0
 numpy>=1.24.0,<1.27
-pupil-apriltags>=1.0.4

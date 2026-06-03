@@ -2,14 +2,13 @@ import cv2
 import numpy as np
 import time
 import concurrent.futures
-from flask import Flask, render_template, Response, request, jsonify, send_from_directory
-from flask_socketio import SocketIO
 import threading
-import time
 import os
-from flask_httpauth import HTTPBasicAuth
 import json
 import collections
+from flask import Flask, render_template, Response, request, jsonify, send_from_directory
+from flask_socketio import SocketIO
+from flask_httpauth import HTTPBasicAuth
 
 # CCTag Support
 CCTAG_AVAILABLE = False
@@ -21,7 +20,10 @@ try:
         from cctag_ext import FastCCTagDetector
         CCTAG_AVAILABLE = True
         cctag_detector = None
-        cctag_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        # CCTag's internal structures are NOT thread-safe!
+        # Running it concurrently causes memory corruption and randomly missed gradients.
+        # We must restrict the background worker to 1 thread so it processes sequentially.
+        cctag_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         print("[OK] CCTag Native Backend Initialized.")
     except Exception as e:
         print("CCTag init error:", e)
@@ -115,7 +117,7 @@ def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global auto_blank
-    global cctag_min_area, cctag_min_id, cctag_max_id
+    global cctag_min_id, cctag_max_id
     global token_aliases, manual_blank
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
     global src_pts, corner_idx, homography_matrix
@@ -125,12 +127,11 @@ def load_config_from_disk():
         try:
             with open(config_path, 'r') as f:
                 c = json.load(f)
-                cctag_min_area = float(c.get('cctag_min_area', 100.0))
                 cctag_min_id = int(c.get('cctag_min_id', 0))
                 cctag_max_id = int(c.get('cctag_max_id', 9))
                 cctag_min_ident_proba = float(c.get('cctag_min_ident_proba', 1e-6))
                 cctag_id_voting_decay = float(c.get('cctag_id_voting_decay', 0.95))
-                cctag_adaptive_thresh_c = float(c.get('cctag_adaptive_thresh_c', 2.0))
+                cctag_match_radius_mult = float(c.get('cctag_match_radius_mult', 2.0))
                 cctag_ghosting_frames = int(c.get('cctag_ghosting_frames', 30))
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
@@ -194,12 +195,11 @@ def save_config_to_disk():
         'hough_param1': hough_param1, 'hough_param2': hough_param2,
         'hough_min_radius': hough_min_radius, 'hough_max_radius': hough_max_radius,
         'auto_blank': auto_blank,
-        'cctag_min_area': cctag_min_area,
         'cctag_min_id': cctag_min_id,
         'cctag_max_id': cctag_max_id,
         'cctag_min_ident_proba': cctag_min_ident_proba,
         'cctag_id_voting_decay': cctag_id_voting_decay,
-        'cctag_adaptive_thresh_c': cctag_adaptive_thresh_c,
+        'cctag_match_radius_mult': cctag_match_radius_mult,
         'cctag_ghosting_frames': cctag_ghosting_frames,
         'token_aliases': token_aliases,
         'password': USER_DATA.get("admin", "admin"),
@@ -255,12 +255,13 @@ auto_blank = False # Toggle for anti-reflection mode
 flip_x = False
 flip_y = False
 
-cctag_min_area = 100.0
 cctag_min_id = 0
 cctag_max_id = 9
 cctag_min_ident_proba = 1e-6
 cctag_id_voting_decay = 0.95
-cctag_adaptive_thresh_c = 2.0
+# Multiplier on token radius for CCTag→Hough proximity matching.
+# 2.0 = match if CCTag center is within 2 radii of a Hough circle center.
+cctag_match_radius_mult = 2.0
 cctag_ghosting_frames = 30
 manual_blank = False
 
@@ -308,7 +309,7 @@ def get_video_stream():
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global CCTAG_AVAILABLE, cctag_detector
     global src_pts, corner_idx, homography_matrix, auto_blank, manual_blank
-    global cctag_min_area, cctag_min_id, cctag_max_id
+    global cctag_min_id, cctag_max_id
     global camera_matrix, dist_coeffs, calibration_model
 
     fail_count = 0
@@ -488,144 +489,174 @@ def get_video_stream():
 
         for (cx, cy, cr) in detected_circles:
             best_id = None
-            best_dist = 60 # Search radius for moving markers
+            best_dist = max(cr * 1.5, 60) # Search radius scales with token size
             for t_id, t_data in get_video_stream.tracked_tokens.items():
                 if t_id in matched_tokens: continue
-                dist = np.sqrt((cx - t_data["x"])**2 + (cy - t_data["y"])**2)
+                # Use velocity-predicted position for matching so fast-moving tokens
+                # aren't treated as new tokens each frame
+                pred_x = t_data["x"] + t_data.get("vx", 0)
+                pred_y = t_data["y"] + t_data.get("vy", 0)
+                dist = np.hypot(cx - pred_x, cy - pred_y)
                 if dist < best_dist:
                     best_dist = dist
                     best_id = t_id
             
             if best_id:
                 token = get_video_stream.tracked_tokens[best_id]
+                # Dynamic smoothing: snap instantly when moving fast, smooth when stationary
                 dist_moved = np.hypot(token["x"] - cx, token["y"] - cy)
-                alpha = 1.0 if dist_moved > 10 else 0.6
+                alpha = min(1.0, dist_moved / 8.0)  # full snap above 8px movement
+                alpha = max(0.3, alpha)              # always move at least 30% toward detection
+                # Track velocity (exponential moving average) for next-frame prediction
+                token["vx"] = token.get("vx", 0) * 0.5 + (cx - token["x"]) * 0.5
+                token["vy"] = token.get("vy", 0) * 0.5 + (cy - token["y"]) * 0.5
                 token["x"] = token["x"] * (1 - alpha) + cx * alpha
                 token["y"] = token["y"] * (1 - alpha) + cy * alpha
-                token["r"] = token["r"] * 0.8 + cr * 0.2
+                token["r"] = token["r"] * 0.85 + cr * 0.15
                 token["missed"] = 0
-                token["raw_x"] = cx
-                token["raw_y"] = cy
-                token["raw_r"] = cr
                 matched_tokens.add(best_id)
             else:
                 new_id = f"Token_{get_video_stream.token_counter}"
                 get_video_stream.token_counter += 1
                 get_video_stream.tracked_tokens[new_id] = {
                     "x": cx, "y": cy, "r": cr, "missed": 0, "marker_id": None,
-                    "raw_x": cx, "raw_y": cy, "raw_r": cr
+                    "vx": 0.0, "vy": 0.0
                 }
                 matched_tokens.add(new_id)
 
-        # Increment missed frames and delete old tokens
-        for token_id in list(get_video_stream.tracked_tokens.items()):
-            if token_id[0] not in matched_tokens:
-                get_video_stream.tracked_tokens[token_id[0]]["missed"] += 1
-                if get_video_stream.tracked_tokens[token_id[0]]["missed"] > cctag_ghosting_frames: # default ~1.0 second ghosting persistence
-                    del get_video_stream.tracked_tokens[token_id[0]]
+        # Increment missed frames and delete old tokens.
+        # While ghosting: use velocity to predict where the token drifted to.
+        for token_id in list(get_video_stream.tracked_tokens.keys()):
+            if token_id not in matched_tokens:
+                t = get_video_stream.tracked_tokens[token_id]
+                t["missed"] += 1
+                # Dampen velocity during ghost phase (friction)
+                t["vx"] = t.get("vx", 0) * 0.7
+                t["vy"] = t.get("vy", 0) * 0.7
+                # Predict position forward using damped velocity
+                t["x"] += t["vx"]
+                t["y"] += t["vy"]
+                if t["missed"] > cctag_ghosting_frames:
+                    del get_video_stream.tracked_tokens[token_id]
 
-        # --- SLOW RECOGNIZER: ID assignment via CCTag ---
+        # --- SLOW RECOGNIZER: Full-Frame CCTag ---
+        # CRITICAL INSIGHT from diagnostics:
+        # - CCTag on a small 160x160 crop from Hough → ALL WHITE ROI → ZERO detections
+        # - CCTag on full 1920x1080 frame → detects ALL markers in ~341ms
+        # The Hough crop is the bug — even with generous padding, the crop boundary
+        # falls in white paper with no rings visible. Solution: run CCTag on the FULL frame.
         if CCTAG_AVAILABLE and cctag_detector is None:
-            cctag_detector = FastCCTagDetector(3) # 3 rings
-            
-        def _detect_single_roi_from_token(t_id, cx, cy, cr, frame_gray, fw, fh):
-            # TIGHT padding: We use raw coordinates so there's no lag.
-            # We use a 40% margin to strictly ensure the outermost ring is never clipped
-            # by HoughCircle jitter. CCTag completely fails if the outer ring touches the edge.
-            pad = int(cr * 0.4) + 10
-            y1, y2 = max(0, int(cy - cr - pad)), min(fh, int(cy + cr + pad))
-            x1, x2 = max(0, int(cx - cr - pad)), min(fw, int(cx + cr + pad))
+            cctag_detector = FastCCTagDetector(3) # 3 crowns
 
-            roi = frame_gray[y1:y2, x1:x2]
-            if roi.size < 100:
-                return (t_id, [])
-
+        def _detect_full_frame(frame_gray):
+            """Run CCTag detection on the entire frame. Returns list of {idx, x, y, decision_margin}."""
             try:
                 if not CCTAG_AVAILABLE:
-                    return (t_id, [])
-                if cctag_detector is None:
-                    cctag_detector = FastCCTagDetector(3) # 3 rings
-
-                # Pass the raw, unmodified ROI directly to CCTag.
-                # CCTag relies on highly specific sub-pixel gradient profiles.
-                # Preprocessing with equalizeHist or adaptiveThreshold destroys these 
-                # delicate gradients and causes it to fail under map projection textures.
-                img = np.ascontiguousarray(roi, dtype=np.uint8)
-                
-                raw_results = cctag_detector.detect(img, min_ident_proba=cctag_min_ident_proba, cx=img.shape[1]/2.0, cy=img.shape[0]/2.0, fx=800.0, fy=800.0, offset_x=float(x1), offset_y=float(y1))
-                return (t_id, raw_results)
+                    return []
+                h_f, w_f = frame_gray.shape
+                # Linear stretch: ensures black rings always have full contrast regardless of lighting.
+                # Preserves gradient profile perfectly. Safe for CCTag's edge math.
+                img_enhanced = cv2.normalize(frame_gray, None, 0, 255, cv2.NORM_MINMAX)
+                img = np.ascontiguousarray(img_enhanced, dtype=np.uint8)
+                # fx/fy ≈ image width is the standard approximation for an unknown focal length.
+                # CCTag uses this only for scale-invariant ellipse fitting.
+                results = cctag_detector.detect(
+                    img,
+                    min_ident_proba=cctag_min_ident_proba,
+                    cx=w_f / 2.0, cy=h_f / 2.0,
+                    fx=float(w_f), fy=float(w_f),
+                )
+                return list(results)
             except Exception as e:
-                return (t_id, [])
+                print(f"[CCTag] Full-frame error: {e}", flush=True)
+                return []
 
-        if hasattr(get_video_stream, "cctag_futures") and get_video_stream.cctag_futures:
-            if all(f.done() for f in get_video_stream.cctag_futures):
-                for future in get_video_stream.cctag_futures:
-                    try:
-                        t_id, raw_results = future.result()
-                        if t_id in get_video_stream.tracked_tokens:
-                            t_data = get_video_stream.tracked_tokens[t_id]
-                            if "id_votes" not in t_data:
-                                t_data["id_votes"] = {}
-                                
-                            # Exponentially decay historical votes to remember history longer
-                            for k in list(t_data["id_votes"].keys()):
-                                t_data["id_votes"][k] *= cctag_id_voting_decay
-                                if t_data["id_votes"][k] < 0.1:
-                                    del t_data["id_votes"][k]
+        # Collect full-frame CCTag results when the background thread is done
+        if hasattr(get_video_stream, "cctag_future") and get_video_stream.cctag_future is not None:
+            if get_video_stream.cctag_future.done():
+                try:
+                    cctag_results = get_video_stream.cctag_future.result()
+                except Exception:
+                    cctag_results = []
 
-                            # Accumulate new votes from CCTag
-                            if raw_results:
-                                for res in raw_results:
-                                    rid = int(res.get('idx', -1))
-                                    dm = res.get('decision_margin', 0)
-                                    if cctag_min_id <= rid <= cctag_max_id and dm > 0:
-                                        t_data["id_votes"][rid] = t_data["id_votes"].get(rid, 0) + dm
-                            
-                            # The best marker_id is the one with the highest accumulated historical confidence
-                            if t_data["id_votes"]:
-                                best_rid = max(t_data["id_votes"].items(), key=lambda x: x[1])[0]
-                                t_data["marker_id"] = best_rid
-                            else:
-                                t_data["marker_id"] = None
-                    except Exception as e:
-                        pass
-                
-                # Resolve cross-token collisions globally using historical votes
-                claimed_ids = {}
+                # Match each CCTag result to the nearest tracked token by Euclidean distance
+                matched_cctag = set()
+                for res in cctag_results:
+                    rid = int(res.get('idx', -1))
+                    dm = float(res.get('decision_margin', 0))
+                    rx, ry = float(res.get('x', 0)), float(res.get('y', 0))
+
+                    if not (cctag_min_id <= rid <= cctag_max_id) or dm <= 0:
+                        continue
+
+                    # Find the closest Hough-tracked token
+                    best_t_id = None
+                    best_dist = float('inf')
+                    for t_id, t_data in get_video_stream.tracked_tokens.items():
+                        d = np.hypot(t_data["x"] - rx, t_data["y"] - ry)
+                        # Accept if CCTag center falls within cctag_match_radius_mult × token radius.
+                        # Higher = more forgiving matching for large/far tokens.
+                        if d < t_data["r"] * cctag_match_radius_mult and d < best_dist:
+                            best_dist = d
+                            best_t_id = t_id
+
+                    if best_t_id is not None and best_t_id not in matched_cctag:
+                        t_data = get_video_stream.tracked_tokens[best_t_id]
+                        # Accumulate votes
+                        votes = t_data.setdefault("id_votes", {})
+                        # Decay old votes
+                        for k in list(votes.keys()):
+                            votes[k] *= cctag_id_voting_decay
+                            if votes[k] < 0.01:  # Drop very stale votes (lower threshold = longer memory)
+                                del votes[k]
+                        votes[rid] = votes.get(rid, 0) + dm
+                        # Best vote wins
+                        best_rid = max(votes.items(), key=lambda x: x[1])[0]
+                        t_data["marker_id"] = best_rid
+                        matched_cctag.add(best_t_id)
+
+                # Tokens not matched this round: decay their votes but keep their ID
+                for t_id, t_data in get_video_stream.tracked_tokens.items():
+                    if t_id not in matched_cctag and "id_votes" in t_data:
+                        for k in list(t_data["id_votes"].keys()):
+                            t_data["id_votes"][k] *= cctag_id_voting_decay
+                            if t_data["id_votes"][k] < 0.01:  # Same threshold
+                                del t_data["id_votes"][k]
+                        if t_data["id_votes"]:
+                            best_rid = max(t_data["id_votes"].items(), key=lambda x: x[1])[0]
+                            t_data["marker_id"] = best_rid
+                        else:
+                            t_data["marker_id"] = None
+
+                # Resolve cross-token ID collisions (two Hough circles both matching same CCTag ID)
+                claimed = {}
                 for t_id, t_data in get_video_stream.tracked_tokens.items():
                     m_id = t_data.get("marker_id")
-                    if m_id is not None:
-                        votes = t_data.get("id_votes", {}).get(m_id, 0)
-                        missed = t_data.get("missed", 0)
-                        
-                        if m_id not in claimed_ids:
-                            claimed_ids[m_id] = (t_id, votes, missed)
+                    if m_id is None:
+                        continue
+                    votes = t_data.get("id_votes", {}).get(m_id, 0)
+                    missed = t_data.get("missed", 0)
+                    if m_id not in claimed:
+                        claimed[m_id] = (t_id, votes, missed)
+                    else:
+                        ex_t, ex_v, ex_m = claimed[m_id]
+                        if missed < ex_m or (missed == ex_m and votes > ex_v):
+                            # Current token wins — reset loser's marker and votes for this ID
+                            loser = get_video_stream.tracked_tokens[ex_t]
+                            loser["marker_id"] = None
+                            loser.get("id_votes", {}).pop(m_id, None)
+                            claimed[m_id] = (t_id, votes, missed)
                         else:
-                            existing_t_id, existing_votes, existing_missed = claimed_ids[m_id]
-                            
-                            # Actively tracked tokens ALWAYS beat ghost tokens.
-                            # If both are active, the one with highest historical votes wins.
-                            if missed < existing_missed or (missed == existing_missed and votes > existing_votes):
-                                # New token wins, demote the old one
-                                get_video_stream.tracked_tokens[existing_t_id]["marker_id"] = None
-                                if "id_votes" in get_video_stream.tracked_tokens[existing_t_id]:
-                                    get_video_stream.tracked_tokens[existing_t_id]["id_votes"][m_id] = 0
-                                claimed_ids[m_id] = (t_id, votes, missed)
-                            else:
-                                # Old token keeps it, demote new one
-                                t_data["marker_id"] = None
-                                if "id_votes" in t_data:
-                                    t_data["id_votes"][m_id] = 0
+                            # Existing token wins — reset current token
+                            t_data["marker_id"] = None
+                            t_data.get("id_votes", {}).pop(m_id, None)
 
-                get_video_stream.cctag_futures = None
+                get_video_stream.cctag_future = None
 
-        if CCTAG_AVAILABLE and get_video_stream.tracked_tokens and not getattr(get_video_stream, "cctag_futures", None):
-            get_video_stream.cctag_futures = []
-            # Crucial: we MUST copy the gray frame, otherwise it gets overwritten by the camera while the background thread is still processing it!
-            gray_copy = gray.copy()
-            for t_id, t_data in get_video_stream.tracked_tokens.items():
-                if "raw_x" in t_data:
-                    get_video_stream.cctag_futures.append(cctag_executor.submit(_detect_single_roi_from_token, t_id, t_data["raw_x"], t_data["raw_y"], t_data["raw_r"], gray_copy, w, h))
+        # Submit a new full-frame detection job if nothing is running
+        if CCTAG_AVAILABLE and not getattr(get_video_stream, "cctag_future", None):
+            gray_copy = gray.copy()  # Must copy; camera thread overwrites gray continuously
+            get_video_stream.cctag_future = cctag_executor.submit(_detect_full_frame, gray_copy)
 
         # --- Render and Prepare Payloads ---
         detected_tokens = []
@@ -703,7 +734,6 @@ def get_video_stream():
             print(f"DEBUG: Blackout active! Missing tokens: {missed_ids}")
 
         # --- Final Blackout Decision ---
-        # Blackout if: Manual override is ON OR (Auto-Blank is ON and tokens are missing)
         blackout_active = manual_blank or (auto_blank and any_missed)
 
         # Send data to websocket clients
@@ -731,10 +761,13 @@ def get_video_stream():
         with frame_lock:
             current_frame = frame.copy()
             
-        # Throttle loop to maintain ~5 FPS target
+        # Throttle loop to maintain ~30 FPS target
         elapsed = time.time() - loop_start
         if elapsed < frame_interval:
             time.sleep(frame_interval - elapsed)
+
+
+
 
 def generate_frames():
     global current_frame
@@ -1053,38 +1086,28 @@ def update_settings():
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
     global auto_blank, token_aliases
     global camera_url, manual_blank, flip_x, flip_y
-    global CCTAG_AVAILABLE, cctag_min_area, cctag_min_id, cctag_max_id, cctag_min_ident_proba
-    global cctag_id_voting_decay, cctag_adaptive_thresh_c, cctag_ghosting_frames
+    global CCTAG_AVAILABLE, cctag_min_id, cctag_max_id, cctag_min_ident_proba
+    global cctag_id_voting_decay, cctag_match_radius_mult, cctag_ghosting_frames
 
     data = request.json
-    if 'camera_url' in data:
-        camera_url = data['camera_url']
+    if 'camera_url' in data: camera_url = data['camera_url']
     if 'cctag_min_id' in data:
-        try:
-            cctag_min_id = int(data['cctag_min_id'])
-        except Exception:
-            pass
-    if 'cctag_max_id' in data:
-        try:
-            cctag_max_id = int(data['cctag_max_id'])
-        except Exception:
-            pass
-    if 'cctag_min_ident_proba' in data:
-        try:
-            cctag_min_ident_proba = float(data['cctag_min_ident_proba'])
-        except Exception:
-            pass
-    if 'cctag_id_voting_decay' in data:
-        try:
-            cctag_id_voting_decay = float(data['cctag_id_voting_decay'])
+        try: cctag_min_id = int(data['cctag_min_id'])
         except Exception: pass
-    if 'cctag_adaptive_thresh_c' in data:
-        try:
-            cctag_adaptive_thresh_c = float(data['cctag_adaptive_thresh_c'])
+    if 'cctag_max_id' in data:
+        try: cctag_max_id = int(data['cctag_max_id'])
+        except Exception: pass
+    if 'cctag_min_ident_proba' in data:
+        try: cctag_min_ident_proba = float(data['cctag_min_ident_proba'])
+        except Exception: pass
+    if 'cctag_id_voting_decay' in data:
+        try: cctag_id_voting_decay = float(data['cctag_id_voting_decay'])
+        except Exception: pass
+    if 'cctag_match_radius_mult' in data:
+        try: cctag_match_radius_mult = float(data['cctag_match_radius_mult'])
         except Exception: pass
     if 'cctag_ghosting_frames' in data:
-        try:
-            cctag_ghosting_frames = int(data['cctag_ghosting_frames'])
+        try: cctag_ghosting_frames = int(data['cctag_ghosting_frames'])
         except Exception: pass
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
     if 'zoom' in data: zoom_level = float(data['zoom'])
@@ -1099,29 +1122,24 @@ def update_settings():
     if 'manual_blank' in data: manual_blank = bool(data['manual_blank'])
     if 'flip_x' in data: flip_x = bool(data['flip_x'])
     if 'flip_y' in data: flip_y = bool(data['flip_y'])
-    
-    # Hough Params
     if 'hough_dp' in data: hough_dp = float(data['hough_dp'])
     if 'hough_min_dist' in data: hough_min_dist = int(data['hough_min_dist'])
     if 'hough_param1' in data: hough_param1 = float(data['hough_param1'])
     if 'hough_param2' in data: hough_param2 = float(data['hough_param2'])
     if 'hough_min_radius' in data: hough_min_radius = int(data['hough_min_radius'])
     if 'hough_max_radius' in data: hough_max_radius = int(data['hough_max_radius'])
-    
-    if 'auto_blank' in data: auto_blank = bool(data['auto_blank'])
 
-    # Re-evaluate all active tracked tokens against the new ID limits
+    # Purge tokens whose marker_id is now outside the new ID range
     if hasattr(get_video_stream, 'tracked_tokens'):
         to_delete = []
         for tid, tdata in get_video_stream.tracked_tokens.items():
-            rid = tdata.get('marker_id', -1)
-            if rid != -1 and (rid < cctag_min_id or rid > cctag_max_id):
+            rid = tdata.get('marker_id')
+            if rid is not None and (int(rid) < cctag_min_id or int(rid) > cctag_max_id):
                 to_delete.append(tid)
         for tid in to_delete:
-            del get_video_stream.tracked_tokens[tid]
-            if hasattr(get_video_stream, 'last_marker_ids') and rid in get_video_stream.last_marker_ids:
-                get_video_stream.last_marker_ids.remove(rid)
-
+            get_video_stream.tracked_tokens.pop(tid, None)
+        if hasattr(get_video_stream, 'last_marker_ids'):
+            get_video_stream.last_marker_ids -= set(to_delete)
 
     save_config_to_disk()
     global settings_dirty
