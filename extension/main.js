@@ -54,7 +54,7 @@ document.querySelector('#app').innerHTML = `
 let socket = null;
 let isReady = false;
 let tokenMapping = {}; // physicalId -> virtualItemId
-let assignedNames = JSON.parse(localStorage.getItem('owlbear_assignedNames') || '{}'); // physicalId -> virtualName (Used to re-sync across scenes)
+let assignedNames = {}; // physicalId -> virtualName (Used to re-sync across scenes)
 let currentPhysicalTokens = [];
 let virtualTokens = [];
 let blackoutItemId = null;
@@ -88,16 +88,6 @@ OBR.onReady(async () => {
   // Initial fetch of virtual tokens
   const items = await OBR.scene.items.getItems();
   virtualTokens = items.filter(item => item.layer === "CHARACTER" || item.layer === "MOUNT");
-
-  // Initial mapping restore
-  const newMapping = {};
-  for (const [physicalId, name] of Object.entries(assignedNames)) {
-    const match = virtualTokens.find(vt => (vt.text && vt.text.plainText === name) || vt.name === name);
-    if (match) {
-      newMapping[physicalId] = match.id;
-    }
-  }
-  tokenMapping = newMapping;
 
   // Add Test Blackout listener
   document.getElementById('test-blackout-btn').addEventListener('click', async () => {
@@ -201,7 +191,6 @@ function connectSocketIO(url) {
             if (match) {
               tokenMapping[pt.id] = match.id;
               assignedNames[pt.id] = pt.alias;
-              localStorage.setItem('owlbear_assignedNames', JSON.stringify(assignedNames));
               mappingChanged = true;
             }
           }
@@ -309,7 +298,6 @@ function renderMappingUI() {
           tokenMapping[pt.id] = virtualId;
           assignedNames[pt.id] = selectedToken.text && selectedToken.text.plainText ? selectedToken.text.plainText : (selectedToken.name || 'Unnamed Token');
         }
-        localStorage.setItem('owlbear_assignedNames', JSON.stringify(assignedNames));
       });
       
       itemEl.appendChild(label);
@@ -338,8 +326,6 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
     
     // Convert physical screen pixels exactly to the underlying map grid coordinates!
     const scenePoint = await OBR.viewport.inverseTransformPoint(screenPoint);
-    
-    const dist = Math.sqrt(Math.pow(targetItem.position.x - scenePoint.x, 2) + Math.pow(targetItem.position.y - scenePoint.y, 2));
     
     // Check if name needs updating
     let needsNameUpdate = false;
