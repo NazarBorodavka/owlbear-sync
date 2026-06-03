@@ -141,11 +141,18 @@ function connectSocketIO(url) {
         const tokens = data.tokens || [];
         const blankScreen = data.blank_screen || false;
         
+        // Fetch items and viewport details concurrently to reduce latency
+        const [items, screenWidth, screenHeight] = await Promise.all([
+          OBR.scene.items.getItems(),
+          OBR.viewport.getWidth(),
+          OBR.viewport.getHeight()
+        ]);
+        
         // 1. Prioritize blackout (Critical for projector setup)
-        await updateBlackout(blankScreen);
+        await updateBlackout(blankScreen, items);
         
         // 2. Sync positions
-        await syncTokensWithOwlbear(tokens);
+        await syncTokensWithOwlbear(tokens, items, screenWidth, screenHeight);
         
         // 3. UI Update (Only if tokens list actually changed)
         const newIds = tokens.map(t => t.id).sort().join(',');
@@ -256,45 +263,42 @@ function renderMappingUI() {
   });
 }
 
-async function syncTokensWithOwlbear(physicalTokens) {
-  const items = await OBR.scene.items.getItems();
+async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenHeight) {
   const itemsToUpdate = [];
-  const dpi = await OBR.scene.grid.getDpi();
   
-  const screenWidth = await OBR.viewport.getWidth();
-  const screenHeight = await OBR.viewport.getHeight();
-  
-  for (const pt of physicalTokens) {
-    // Lookup the assigned virtual token ID
+  // Run all inverseTransformPoint queries concurrently
+  const transformPromises = physicalTokens.map(async (pt) => {
     const virtualId = tokenMapping[pt.id];
-    if (!virtualId) continue; // Skip if not assigned
+    if (!virtualId) return null; // Skip if not assigned
     
     const targetItem = items.find(item => item.id === virtualId);
+    if (!targetItem) return null;
     
-    if (targetItem) {
-      // Map normalized [0,1] token coordinates directly to the Owlbear Viewport pixel size
-      const screenPoint = {
-        x: pt.x * screenWidth,
-        y: pt.y * screenHeight
+    // Map normalized [0,1] token coordinates directly to the Owlbear Viewport pixel size
+    const screenPoint = {
+      x: pt.x * screenWidth,
+      y: pt.y * screenHeight
+    };
+    
+    // Convert physical screen pixels exactly to the underlying map grid coordinates!
+    const scenePoint = await OBR.viewport.inverseTransformPoint(screenPoint);
+    
+    const dist = Math.sqrt(Math.pow(targetItem.position.x - scenePoint.x, 2) + Math.pow(targetItem.position.y - scenePoint.y, 2));
+    
+    // Update if moved more than threshold to prevent network spam
+    if (dist > SYNC_THRESHOLD) {
+      return {
+        id: targetItem.id,
+        position: { x: scenePoint.x, y: scenePoint.y }
       };
-      
-      // Convert physical screen pixels exactly to the underlying map grid coordinates!
-      const scenePoint = await OBR.viewport.inverseTransformPoint(screenPoint);
-      
-      const targetX = scenePoint.x;
-      const targetY = scenePoint.y;
-      
-      const dist = Math.sqrt(Math.pow(targetItem.position.x - targetX, 2) + Math.pow(targetItem.position.y - targetY, 2));
-      
-      // Update if moved more than threshold to prevent network spam
-      if (dist > SYNC_THRESHOLD) {
-        itemsToUpdate.push({
-          id: targetItem.id,
-          position: { x: targetX, y: targetY }
-        });
-      }
     }
-  }
+    return null;
+  });
+  
+  const results = await Promise.all(transformPromises);
+  results.forEach(res => {
+    if (res) itemsToUpdate.push(res);
+  });
   
   if (itemsToUpdate.length > 0) {
     await OBR.scene.items.updateItems(
@@ -311,10 +315,12 @@ async function syncTokensWithOwlbear(physicalTokens) {
   }
 }
 
-async function updateBlackout(active) {
+async function updateBlackout(active, items) {
   try {
     const color = document.getElementById('blackout-color').value || "black";
-    const items = await OBR.scene.items.getItems();
+    if (!items) {
+      items = await OBR.scene.items.getItems();
+    }
     const hasItem = items.some(i => i.id === "blackout-overlay");
 
     if (active && !hasItem) {
