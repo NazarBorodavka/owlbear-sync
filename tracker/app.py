@@ -530,8 +530,9 @@ def get_video_stream():
             
         def _detect_single_roi_from_token(t_id, cx, cy, cr, frame_gray, fw, fh):
             # TIGHT padding: We use raw coordinates so there's no lag.
-            # A tight crop prevents the map projection background from confusing the detector.
-            pad = int(cr * 0.25) + 5
+            # We use a 40% margin to strictly ensure the outermost ring is never clipped
+            # by HoughCircle jitter. CCTag completely fails if the outer ring touches the edge.
+            pad = int(cr * 0.4) + 10
             y1, y2 = max(0, int(cy - cr - pad)), min(fh, int(cy + cr + pad))
             x1, x2 = max(0, int(cx - cr - pad)), min(fw, int(cx + cr + pad))
 
@@ -539,15 +540,18 @@ def get_video_stream():
             if roi.size < 100:
                 return (t_id, [])
 
-            # --- Reverted to Sequential Implementation Logic ---
-            # Global Histogram Equalization worked best for sub-pixel accuracy.
-            # CLAHE and Adaptive Thresholding both risk amplifying texture noise 
-            # or creating binary staircases that break CCTag's sub-pixel edge detection.
-            roi_enhanced = cv2.equalizeHist(roi)
-            
-            img = np.ascontiguousarray(roi_enhanced, dtype=np.uint8)
-            
             try:
+                if not CCTAG_AVAILABLE:
+                    return (t_id, [])
+                if cctag_detector is None:
+                    cctag_detector = FastCCTagDetector(3) # 3 rings
+
+                # Pass the raw, unmodified ROI directly to CCTag.
+                # CCTag relies on highly specific sub-pixel gradient profiles.
+                # Preprocessing with equalizeHist or adaptiveThreshold destroys these 
+                # delicate gradients and causes it to fail under map projection textures.
+                img = np.ascontiguousarray(roi, dtype=np.uint8)
+                
                 raw_results = cctag_detector.detect(img, min_ident_proba=cctag_min_ident_proba, cx=img.shape[1]/2.0, cy=img.shape[0]/2.0, fx=800.0, fy=800.0, offset_x=float(x1), offset_y=float(y1))
                 return (t_id, raw_results)
             except Exception as e:
