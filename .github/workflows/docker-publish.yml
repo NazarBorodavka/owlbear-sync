@@ -41,4 +41,5 @@ jobs:
           cache-to: type=gha,mode=max
           tags: |
             ghcr.io/${{ env.OWNER_LC }}/owlbear-tracker:latest
+            ghcr.io/${{ env.OWNER_LC }}/owlbear-tracker:master
             ghcr.io/${{ env.OWNER_LC }}/owlbear-tracker:${{ github.sha }}
