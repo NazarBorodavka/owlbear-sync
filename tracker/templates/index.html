@@ -651,39 +651,69 @@
                 listEl.innerHTML = '<p class="empty-msg" style="text-align: center; padding: 20px 0; color: var(--text-muted);">No tokens detected yet.</p>';
                 return;
             }
+            
+            // Remove empty message if present
+            const emptyMsg = listEl.querySelector('.empty-msg');
+            if (emptyMsg) emptyMsg.remove();
 
-            listEl.innerHTML = '';
+            // Map existing elements
+            const existingRows = {};
+            listEl.querySelectorAll('.token-row').forEach(row => {
+                existingRows[row.dataset.id] = row;
+            });
+
+            const currentIds = new Set(tokens.map(t => t.id));
+
+            // Remove rows for tokens that disappeared
+            for (const id in existingRows) {
+                if (!currentIds.has(id)) {
+                    existingRows[id].remove();
+                }
+            }
+
             tokens.forEach(token => {
-                const row = document.createElement('div');
-                row.className = 'token-row';
-
-                const info = document.createElement('div');
-                info.className = 'token-info';
-
                 const name = token.alias || token.id;
-                const nameEl = document.createElement('span');
-                nameEl.className = 'token-alias';
-                nameEl.innerText = name;
-                nameEl.title = "Click to rename";
-                nameEl.onclick = () => updateTokenAlias(token.id, token.alias);
+                
+                if (existingRows[token.id]) {
+                    // Update existing row text if needed
+                    const nameEl = existingRows[token.id].querySelector('.token-alias');
+                    if (nameEl && nameEl.innerText !== name) {
+                        nameEl.innerText = name;
+                        nameEl.onclick = () => updateTokenAlias(token.id, token.alias);
+                    }
+                } else {
+                    // Create new row
+                    const row = document.createElement('div');
+                    row.className = 'token-row';
+                    row.dataset.id = token.id;
 
-                const idEl = document.createElement('span');
-                idEl.className = 'token-id';
-                idEl.innerText = token.id;
+                    const info = document.createElement('div');
+                    info.className = 'token-info';
 
-                info.appendChild(nameEl);
-                info.appendChild(idEl);
+                    const nameEl = document.createElement('span');
+                    nameEl.className = 'token-alias';
+                    nameEl.innerText = name;
+                    nameEl.title = "Click to rename";
+                    nameEl.onclick = () => updateTokenAlias(token.id, token.alias);
 
-                const actions = document.createElement('div');
-                const delBtn = document.createElement('button');
-                delBtn.className = 'btn-delete';
-                delBtn.innerText = 'Ignore';
-                delBtn.onclick = () => deleteToken(token.id);
+                    const idEl = document.createElement('span');
+                    idEl.className = 'token-id';
+                    idEl.innerText = token.id;
 
-                actions.appendChild(delBtn);
-                row.appendChild(info);
-                row.appendChild(actions);
-                listEl.appendChild(row);
+                    info.appendChild(nameEl);
+                    info.appendChild(idEl);
+
+                    const actions = document.createElement('div');
+                    const delBtn = document.createElement('button');
+                    delBtn.className = 'btn-delete';
+                    delBtn.innerText = 'Ignore';
+                    delBtn.onclick = () => deleteToken(token.id);
+
+                    actions.appendChild(delBtn);
+                    row.appendChild(info);
+                    row.appendChild(actions);
+                    listEl.appendChild(row);
+                }
             });
         }
 

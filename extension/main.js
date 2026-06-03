@@ -154,12 +154,27 @@ function connectSocketIO(url) {
         // 2. Sync positions
         await syncTokensWithOwlbear(tokens, items, screenWidth, screenHeight);
         
-        // 3. UI Update (Only if tokens list actually changed)
-        const newIds = tokens.map(t => t.id).sort().join(',');
-        const oldIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
+        // 3. UI Update & Auto-Mapping
+        let mappingChanged = false;
         
+        const oldIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
         currentPhysicalTokens = tokens;
-        if (newIds !== oldIds) {
+        
+        // Auto-assign virtual tokens based on physical token alias
+        currentPhysicalTokens.forEach(pt => {
+          if (pt.alias && !tokenMapping[pt.id]) {
+            const match = virtualTokens.find(vt => (vt.text && vt.text.plainText === pt.alias) || vt.name === pt.alias);
+            if (match) {
+              tokenMapping[pt.id] = match.id;
+              assignedNames[pt.id] = pt.alias;
+              mappingChanged = true;
+            }
+          }
+        });
+        
+        const newIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
+        
+        if (newIds !== oldIds || mappingChanged) {
           renderMappingUI();
         }
         
@@ -213,6 +228,11 @@ function renderMappingUI() {
       const labelStrong = existingElements[pt.id].querySelector('strong');
       if (labelStrong && labelStrong.innerText !== displayName) {
         labelStrong.innerText = displayName;
+      }
+      // Update select if auto-mapped behind the scenes
+      const selectEl = existingElements[pt.id].querySelector('select');
+      if (selectEl && tokenMapping[pt.id] && selectEl.value !== tokenMapping[pt.id]) {
+         selectEl.value = tokenMapping[pt.id];
       }
     } else {
       // Create new mapping item
@@ -283,13 +303,19 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
     // Convert physical screen pixels exactly to the underlying map grid coordinates!
     const scenePoint = await OBR.viewport.inverseTransformPoint(screenPoint);
     
-    const dist = Math.sqrt(Math.pow(targetItem.position.x - scenePoint.x, 2) + Math.pow(targetItem.position.y - scenePoint.y, 2));
+    // Check if name needs updating
+    let needsNameUpdate = false;
+    if (pt.alias) {
+      if (targetItem.text && targetItem.text.plainText !== pt.alias) needsNameUpdate = true;
+      else if (!targetItem.text && targetItem.name !== pt.alias) needsNameUpdate = true;
+    }
     
-    // Update if moved more than threshold to prevent network spam
-    if (dist > SYNC_THRESHOLD) {
+    // Update if moved more than threshold or needs name sync
+    if (dist > SYNC_THRESHOLD || needsNameUpdate) {
       return {
         id: targetItem.id,
-        position: { x: scenePoint.x, y: scenePoint.y }
+        position: { x: scenePoint.x, y: scenePoint.y },
+        alias: pt.alias
       };
     }
     return null;
@@ -308,6 +334,12 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
           const update = itemsToUpdate.find(u => u.id === items[i].id);
           if (update) {
             items[i].position = update.position;
+            if (update.alias) {
+              items[i].name = update.alias;
+              if (items[i].text) {
+                items[i].text.plainText = update.alias;
+              }
+            }
           }
         }
       }
