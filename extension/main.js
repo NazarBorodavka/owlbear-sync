@@ -31,6 +31,12 @@ document.querySelector('#app').innerHTML = `
       <p style="font-size: 0.75rem; color: #94a3b8; margin-top: 5px;">Higher FPS or lower sensitivity means smoother movement but more network traffic.</p>
     </div>
 
+    <div class="mapping-section">
+      <h3>TV Alignment</h3>
+      <p class="subtitle">Quickly align the map for a 24x13 TV grid.</p>
+      <button id="zoom-table-btn" class="secondary" style="width: 100%;">Zoom to 24x13 Grid</button>
+    </div>
+
     <div class="blackout-settings">
       <h3>Blackout Settings</h3>
       <div class="control-row">
@@ -88,6 +94,24 @@ OBR.onReady(async () => {
     console.log("Testing blackout...");
     await updateBlackout(true);
     setTimeout(() => updateBlackout(false), 3000);
+  });
+
+  // TV Alignment Zoom
+  document.getElementById('zoom-table-btn').addEventListener('click', async () => {
+    const dpi = await OBR.scene.grid.getDpi();
+    const screenWidth = await OBR.viewport.getWidth();
+    const screenHeight = await OBR.viewport.getHeight();
+    
+    // We want the viewport to show 24 squares wide and 13 squares high.
+    const scaleX = screenWidth / (24 * dpi);
+    const scaleY = screenHeight / (13 * dpi);
+    
+    // Take the minimum scale to ensure the entire 24x13 area fits
+    const targetScale = Math.min(scaleX, scaleY);
+    
+    // Set scale and center the viewport on the map origin (0,0)
+    await OBR.viewport.setScale(targetScale);
+    await OBR.viewport.setPosition({ x: 0, y: 0 });
   });
 
   // UI Listeners for Sync Performance
