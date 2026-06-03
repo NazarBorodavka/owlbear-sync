@@ -524,6 +524,14 @@
                             oninput="updateSettings()">
                         <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Threshold for circle centers. Higher values are much stricter (perfect circles only), lower values find more circles but risk false positives.</p>
                     </div>
+                    <div class="slider-container">
+                        <label><span>Tracking Deadzone (px)</span> <input type="number" id="val_hough_deadzone" value="3.0"
+                                step="0.5" class="val-input"
+                                onchange="syncSlider(this, 'hough_deadzone'); updateSettings()"></label>
+                        <input type="range" id="hough_deadzone" min="0" max="20" step="0.5" value="3.0"
+                            oninput="updateVal('hough_deadzone')">
+                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Prevents token jitter. Movements smaller than this many pixels are completely ignored.</p>
+                    </div>
                     <button class="secondary" onclick="resetDiskSettings()" style="margin-top: 10px;">Reset Disk
                         Settings</button>
                 </div>
@@ -853,6 +861,7 @@
                 manual_blank: document.getElementById('manual_blank').checked,
                 hough_min_radius: parseInt(document.getElementById('hough_min_radius').value),
                 hough_max_radius: parseInt(document.getElementById('hough_max_radius').value),
+                hough_deadzone: parseFloat(document.getElementById('hough_deadzone').value),
                 hough_param1: parseFloat(document.getElementById('hough_param1').value),
                 hough_param2: parseFloat(document.getElementById('hough_param2').value),
                 cctag_min_id: parseInt(document.getElementById('cctag_min_id').value),
@@ -891,6 +900,7 @@
         function resetDiskSettings() {
             document.getElementById('hough_min_radius').value = "30";
             document.getElementById('hough_max_radius').value = "40";
+            document.getElementById('hough_deadzone').value = "3.0";
             document.getElementById('hough_param1').value = "40";
             document.getElementById('hough_param2').value = "45";
             updateSettings();
@@ -925,6 +935,7 @@
                 manual_blank: document.getElementById('manual_blank').checked,
                 hough_min_radius: document.getElementById('hough_min_radius').value,
                 hough_max_radius: document.getElementById('hough_max_radius').value,
+                hough_deadzone: document.getElementById('hough_deadzone').value,
                 hough_param1: document.getElementById('hough_param1').value,
                 hough_param2: document.getElementById('hough_param2').value,
                 cctag_min_id: document.getElementById('cctag_min_id').value,
@@ -980,6 +991,10 @@
                     if (config.manual_blank !== undefined) document.getElementById('manual_blank').checked = config.manual_blank;
                     if (config.hough_min_radius !== undefined) document.getElementById('hough_min_radius').value = config.hough_min_radius;
                     if (config.hough_max_radius !== undefined) document.getElementById('hough_max_radius').value = config.hough_max_radius;
+                    if (config.hough_deadzone !== undefined) {
+                        document.getElementById('hough_deadzone').value = config.hough_deadzone;
+                        document.getElementById('val_hough_deadzone').value = config.hough_deadzone;
+                    }
                     if (config.hough_param1 !== undefined) document.getElementById('hough_param1').value = config.hough_param1;
                     if (config.hough_param2 !== undefined) document.getElementById('hough_param2').value = config.hough_param2;
                     // Push loaded settings to backend

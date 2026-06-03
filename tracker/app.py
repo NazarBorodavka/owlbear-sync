@@ -115,7 +115,7 @@ LEGACY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
 
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
-    global hough_param1, hough_param2, hough_min_radius, hough_max_radius
+    global hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
     global auto_blank, auto_blank_delay
     global cctag_min_id, cctag_max_id
     global token_aliases, manual_blank
@@ -147,6 +147,7 @@ def load_config_from_disk():
                 hough_param2 = c.get('hough_param2', 45)
                 hough_min_radius = c.get('hough_min_radius', 30)
                 hough_max_radius = c.get('hough_max_radius', 40)
+                hough_deadzone = float(c.get('hough_deadzone', 3.0))
                 auto_blank = c.get('auto_blank', False)
                 auto_blank_delay = int(c.get('auto_blank_delay', 10))
                 token_aliases = c.get('token_aliases', {})
@@ -195,6 +196,7 @@ def save_config_to_disk():
         'rotation': rotation, 'brightness': brightness, 'contrast': contrast, 'exposure': exposure,
         'hough_param1': hough_param1, 'hough_param2': hough_param2,
         'hough_min_radius': hough_min_radius, 'hough_max_radius': hough_max_radius,
+        'hough_deadzone': hough_deadzone,
         'auto_blank': auto_blank,
         'auto_blank_delay': auto_blank_delay,
         'cctag_min_id': cctag_min_id,
@@ -252,6 +254,7 @@ hough_param1 = 40
 hough_param2 = 30
 hough_min_radius = 30
 hough_max_radius = 40
+hough_deadzone = 3.0
 
 auto_blank = False # Toggle for anti-reflection mode
 auto_blank_delay = 10 # Frames to wait before auto-blanking
@@ -309,7 +312,7 @@ def get_video_stream():
     # Expose diagnostic copies of the latest frame
     global raw_frame_for_stream, undistorted_frame_for_stream
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
-    global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
+    global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
     global CCTAG_AVAILABLE, cctag_detector
     global src_pts, corner_idx, homography_matrix, auto_blank, auto_blank_delay, manual_blank
     global cctag_min_id, cctag_max_id
@@ -506,16 +509,27 @@ def get_video_stream():
             
             if best_id:
                 token = get_video_stream.tracked_tokens[best_id]
-                # Dynamic smoothing: snap instantly when moving fast, smooth when stationary
+                # Dynamic smoothing with deadzone: lock perfectly if stationary, snap if moved
                 dist_moved = np.hypot(token["x"] - cx, token["y"] - cy)
-                alpha = min(1.0, dist_moved / 8.0)  # full snap above 8px movement
-                alpha = max(0.3, alpha)              # always move at least 30% toward detection
-                # Track velocity (exponential moving average) for next-frame prediction
-                token["vx"] = token.get("vx", 0) * 0.5 + (cx - token["x"]) * 0.5
-                token["vy"] = token.get("vy", 0) * 0.5 + (cy - token["y"]) * 0.5
+                
+                if dist_moved < hough_deadzone:
+                    # Deadzone: completely ignore tiny jitter
+                    alpha = 0.0
+                    token["vx"] = token.get("vx", 0) * 0.5
+                    token["vy"] = token.get("vy", 0) * 0.5
+                else:
+                    # Movement: snap smoothly
+                    alpha = min(1.0, dist_moved / 8.0)  # full snap above 8px movement
+                    alpha = max(0.4, alpha)              # always move at least 40% toward detection
+                    token["vx"] = token.get("vx", 0) * 0.5 + (cx - token["x"]) * 0.5
+                    token["vy"] = token.get("vy", 0) * 0.5 + (cy - token["y"]) * 0.5
+                    
                 token["x"] = token["x"] * (1 - alpha) + cx * alpha
                 token["y"] = token["y"] * (1 - alpha) + cy * alpha
-                token["r"] = token["r"] * 0.85 + cr * 0.15
+                
+                # Apply similar deadzone for radius
+                if abs(token["r"] - cr) > (hough_deadzone * 0.5):
+                    token["r"] = token["r"] * 0.85 + cr * 0.15
                 token["missed"] = 0
                 matched_tokens.add(best_id)
             else:
@@ -1133,6 +1147,7 @@ def update_settings():
     if 'hough_param2' in data: hough_param2 = float(data['hough_param2'])
     if 'hough_min_radius' in data: hough_min_radius = int(data['hough_min_radius'])
     if 'hough_max_radius' in data: hough_max_radius = int(data['hough_max_radius'])
+    if 'hough_deadzone' in data: hough_deadzone = float(data['hough_deadzone'])
 
     # Purge tokens whose marker_id is now outside the new ID range
     if hasattr(get_video_stream, 'tracked_tokens'):
