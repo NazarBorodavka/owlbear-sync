@@ -54,7 +54,7 @@ document.querySelector('#app').innerHTML = `
 let socket = null;
 let isReady = false;
 let tokenMapping = {}; // physicalId -> virtualItemId
-let assignedNames = {}; // physicalId -> virtualName (Used to re-sync across scenes)
+let assignedNames = JSON.parse(localStorage.getItem('owlbear_assignedNames') || '{}'); // physicalId -> virtualName (Used to re-sync across scenes)
 let currentPhysicalTokens = [];
 let virtualTokens = [];
 let blackoutItemId = null;
@@ -68,14 +68,6 @@ OBR.onReady(async () => {
   isReady = true;
   document.getElementById('status').innerText = "Ready. Connect to Tracker.";
   document.getElementById('status').className = "status ready";
-  
-  // Load saved assignments from localStorage
-  try {
-    const saved = localStorage.getItem('owlbear_assignedNames');
-    if (saved) {
-      assignedNames = JSON.parse(saved);
-    }
-  } catch (e) { console.error("Could not load saved assignments", e); }
   
   // Name-Based Re-sync: Rebuild mapping whenever the scene changes
   OBR.scene.items.onChange((items) => {
@@ -97,13 +89,15 @@ OBR.onReady(async () => {
   const items = await OBR.scene.items.getItems();
   virtualTokens = items.filter(item => item.layer === "CHARACTER" || item.layer === "MOUNT");
 
-  // Rebuild token mapping from loaded assigned names
+  // Initial mapping restore
+  const newMapping = {};
   for (const [physicalId, name] of Object.entries(assignedNames)) {
     const match = virtualTokens.find(vt => (vt.text && vt.text.plainText === name) || vt.name === name);
     if (match) {
-      tokenMapping[physicalId] = match.id;
+      newMapping[physicalId] = match.id;
     }
   }
+  tokenMapping = newMapping;
 
   // Add Test Blackout listener
   document.getElementById('test-blackout-btn').addEventListener('click', async () => {
@@ -200,28 +194,18 @@ function connectSocketIO(url) {
         const oldIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
         currentPhysicalTokens = tokens;
         
-        // Auto-assign virtual tokens based on physical token alias or saved assignment
+        // Auto-assign virtual tokens based on physical token alias
         currentPhysicalTokens.forEach(pt => {
           if (pt.alias && !tokenMapping[pt.id]) {
             const match = virtualTokens.find(vt => (vt.text && vt.text.plainText === pt.alias) || vt.name === pt.alias);
             if (match) {
               tokenMapping[pt.id] = match.id;
               assignedNames[pt.id] = pt.alias;
-              mappingChanged = true;
-            }
-          } else if (assignedNames[pt.id] && !tokenMapping[pt.id]) {
-            // Restore from localStorage if we know the assigned name
-            const match = virtualTokens.find(vt => (vt.text && vt.text.plainText === assignedNames[pt.id]) || vt.name === assignedNames[pt.id]);
-            if (match) {
-              tokenMapping[pt.id] = match.id;
+              localStorage.setItem('owlbear_assignedNames', JSON.stringify(assignedNames));
               mappingChanged = true;
             }
           }
         });
-        
-        if (mappingChanged) {
-           localStorage.setItem('owlbear_assignedNames', JSON.stringify(assignedNames));
-        }
         
         const newIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
         
