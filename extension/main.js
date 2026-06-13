@@ -63,19 +63,17 @@ OBR.onReady(async () => {
   document.getElementById('status').innerText = "Ready. Connect to Tracker.";
   document.getElementById('status').className = "status ready";
   
-  // Name-Based Re-sync: Rebuild mapping whenever the scene changes
+  // Name-Based Re-sync: Update mapping whenever the scene changes
   OBR.scene.items.onChange((items) => {
     virtualTokens = items.filter(item => item.layer === "CHARACTER" || item.layer === "MOUNT");
     
-    // Look for items that match the names we assigned previously
-    const newMapping = {};
+    // Merge name-based matches into existing mapping (don't overwrite manual assignments)
     for (const [physicalId, name] of Object.entries(assignedNames)) {
       const match = virtualTokens.find(vt => (vt.text && vt.text.plainText === name) || vt.name === name);
       if (match) {
-        newMapping[physicalId] = match.id;
+        tokenMapping[physicalId] = match.id;
       }
     }
-    tokenMapping = newMapping;
     renderMappingUI();
   });
   
@@ -305,7 +303,7 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
     
     const dist = Math.sqrt(Math.pow(targetItem.position.x - scenePoint.x, 2) + Math.pow(targetItem.position.y - scenePoint.y, 2));
 
-    //gfet
+
     // Check if name needs updating
     let needsNameUpdate = false;
     if (pt.alias) {
