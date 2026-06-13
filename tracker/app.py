@@ -1199,7 +1199,12 @@ def serve_extension(filename):
     if request.method == 'OPTIONS':
         return '', 200
     ext_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'extension')
-    return send_from_directory(ext_dir, filename)
+    response = send_from_directory(ext_dir, filename)
+    # Prevent browser from caching extension files (stale JS was a persistent bug)
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
 
 if __name__ == '__main__':
     print("Starting server on port 5000...")

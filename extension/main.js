@@ -1,6 +1,8 @@
 import OBR, { buildShape } from 'https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@latest/+esm'
 import { io } from 'https://cdn.jsdelivr.net/npm/socket.io-client@latest/dist/socket.io.esm.min.js'
 
+console.log("[TokenSync] Extension loaded — v3");
+
 document.querySelector('#app').innerHTML = `
   <div class="container">
     <h2>Token Sync</h2>
