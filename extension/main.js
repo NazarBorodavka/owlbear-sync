@@ -304,7 +304,8 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
     const scenePoint = await OBR.viewport.inverseTransformPoint(screenPoint);
     
     const dist = Math.sqrt(Math.pow(targetItem.position.x - scenePoint.x, 2) + Math.pow(targetItem.position.y - scenePoint.y, 2));
-    
+
+    //gfet
     // Check if name needs updating
     let needsNameUpdate = false;
     if (pt.alias) {
