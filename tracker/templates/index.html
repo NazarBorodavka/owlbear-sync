@@ -47,8 +47,28 @@
             font-weight: 600;
             font-size: 2rem;
             letter-spacing: -0.02em;
-            margin-bottom: 30px;
+            margin-bottom: 8px;
             text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+        }
+
+        .build-info {
+            display: inline-block;
+            font-family: monospace;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--panel-border);
+            border-radius: 6px;
+            padding: 4px 10px;
+            margin-bottom: 25px;
+        }
+
+        .build-info .branch-master {
+            color: var(--success);
+        }
+
+        .build-info .branch-other {
+            color: #f59e0b;
         }
 
         h2 {
@@ -366,6 +386,7 @@
 <body>
     <div class="container">
         <h1>Owlbear Rodeo Physical Token Sync</h1>
+        <div id="buildInfo" class="build-info">Build info unavailable</div>
 
         <div class="grid">
             <div class="video-column glass-panel">
@@ -539,7 +560,6 @@
                 <div class="glass-panel">
                     <h3>CCTag Detection</h3>
                     <div id="settings_cctag" style="margin-top: 10px;">
-                        <h4>CCTag Settings</h4>
                         <div class="control-group" style="display: flex; gap: 10px; margin-top: 15px;">
                             <div style="flex: 1;">
                                 <label style="display:block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Min Tag ID</label>
@@ -547,10 +567,10 @@
                             </div>
                             <div style="flex: 1;">
                                 <label style="display:block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Max Tag ID</label>
-                                <input type="number" id="cctag_max_id" value="30" min="0" max="255" class="val-input" style="width: 100%;" onchange="updateSettings()">
+                                <input type="number" id="cctag_max_id" value="31" min="0" max="255" class="val-input" style="width: 100%;" onchange="updateSettings()">
                             </div>
                         </div>
-                        <p class="help-text" style="margin-top: 5px;">Ignore tags outside this range (useful to prevent false positives from turning into ghost tokens).</p>
+                        <p class="help-text" style="margin-top: 5px;">Ignore tags outside this range (useful to prevent false positives from turning into ghost tokens). The bundled marker set covers IDs 0-31.</p>
                         <div class="control-group" style="margin-top: 15px;">
                             <label><span>Identification Strictness (0-10)</span> <input type="number" id="val_cctag_min_ident_proba"
                                     value="4" step="1" min="0" max="10" class="val-input"
@@ -566,6 +586,14 @@
                             <input type="range" id="cctag_id_voting_decay" min="0.5" max="0.99" step="0.01" value="0.95"
                                 oninput="updateVal('cctag_id_voting_decay')">
                             <p class="help-text">Controls how long a token "remembers" its ID. High values (0.95+) prevent flickering and swapping by ignoring short-term hallucinations. Lower values make tokens recover faster if misidentified.</p>
+                        </div>
+                        <div class="control-group" style="margin-top: 15px;">
+                            <label><span>ID Switch Confidence Margin</span> <input type="number" id="val_cctag_id_switch_margin"
+                                    value="1.5" step="0.1" min="1.0" max="3.0" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_id_switch_margin'); updateSettings()"></label>
+                            <input type="range" id="cctag_id_switch_margin" min="1.0" max="3.0" step="0.1" value="1.5"
+                                oninput="updateVal('cctag_id_switch_margin')">
+                            <p class="help-text">How much more confident a new ID must be before it's allowed to replace a token's current ID. 1.0 = switches instantly (flicker-prone). Higher values (1.5-2.0) require a clear, sustained lead before flipping — this is the main knob for "ID keeps flipping" issues.</p>
                         </div>
                         <div class="control-group" style="margin-top: 15px;">
                             <label><span>Match Radius (×token r)</span> <input type="number" id="val_cctag_match_radius_mult"
@@ -869,7 +897,8 @@
                 cctag_min_ident_proba: Math.pow(10, parseFloat(document.getElementById('cctag_min_ident_proba').value) - 10),
                 cctag_id_voting_decay: parseFloat(document.getElementById('cctag_id_voting_decay').value),
                 cctag_match_radius_mult: parseFloat(document.getElementById('cctag_match_radius_mult').value),
-                cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value)
+                cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value),
+                cctag_id_switch_margin: parseFloat(document.getElementById('cctag_id_switch_margin').value)
             };
 
             // Sync numeric display inputs
@@ -891,10 +920,6 @@
             });
 
             saveConfig();
-        }
-
-        function updateSceneFilters() {
-            // Scene filters removed per user request
         }
 
         function resetDiskSettings() {
@@ -943,7 +968,8 @@
                 cctag_min_ident_proba: Math.pow(10, parseFloat(document.getElementById('cctag_min_ident_proba').value) - 10),
                 cctag_id_voting_decay: parseFloat(document.getElementById('cctag_id_voting_decay').value),
                 cctag_match_radius_mult: parseFloat(document.getElementById('cctag_match_radius_mult').value),
-                cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value)
+                cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value),
+                cctag_id_switch_margin: parseFloat(document.getElementById('cctag_id_switch_margin').value)
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -979,6 +1005,10 @@
                         document.getElementById('cctag_ghosting_frames').value = config.cctag_ghosting_frames;
                         document.getElementById('val_cctag_ghosting_frames').value = config.cctag_ghosting_frames;
                     }
+                    if (config.cctag_id_switch_margin !== undefined) {
+                        document.getElementById('cctag_id_switch_margin').value = config.cctag_id_switch_margin;
+                        document.getElementById('val_cctag_id_switch_margin').value = config.cctag_id_switch_margin;
+                    }
                     if (config.exposure !== undefined) document.getElementById('exposure').value = config.exposure;
                     if (config.contrast !== undefined) document.getElementById('contrast').value = config.contrast;
                     if (config.brightness !== undefined) document.getElementById('brightness').value = config.brightness;
@@ -997,17 +1027,100 @@
                     }
                     if (config.hough_param1 !== undefined) document.getElementById('hough_param1').value = config.hough_param1;
                     if (config.hough_param2 !== undefined) document.getElementById('hough_param2').value = config.hough_param2;
-                    // Push loaded settings to backend
-                    updateSettings();
+                    // NOTE: deliberately not pushing these back to the server here.
+                    // loadServerSettings() (called right after this) fetches the
+                    // server's authoritative current state and overwrites these
+                    // fields — pushing the possibly-stale localStorage cache first
+                    // would race with that fetch and could clobber real server
+                    // settings with an old cached copy.
                 } catch (e) {
                     console.error("Error loading config", e);
                 }
             }
         }
 
+        // Ask the server what's actually configured right now and reflect it in
+        // the UI. localStorage alone (the old approach) only reflects whatever
+        // browser last touched the settings — a fresh browser, a different
+        // machine, or a cleared cache would silently show the page's hardcoded
+        // HTML defaults instead of the real running config (including whether
+        // the camera is already connected, e.g. via startup auto-reconnect).
+        function loadServerSettings() {
+            fetch('/api/settings')
+                .then(res => res.json())
+                .then(cfg => {
+                    const buildEl = document.getElementById('buildInfo');
+                    if (buildEl && cfg.build_branch) {
+                        const branchClass = cfg.build_branch === 'master' ? 'branch-master' : 'branch-other';
+                        const shortCommit = (cfg.build_commit || 'unknown').substring(0, 7);
+                        buildEl.innerHTML = `branch: <span class="${branchClass}">${cfg.build_branch}</span> &middot; version: ${cfg.build_version || 'dev'} &middot; commit: ${shortCommit}`;
+                    }
+                    if (cfg.camera_url) document.getElementById('cameraUrl').value = cfg.camera_url;
+                    if (cfg.cctag_min_id !== undefined) document.getElementById('cctag_min_id').value = cfg.cctag_min_id;
+                    if (cfg.cctag_max_id !== undefined) document.getElementById('cctag_max_id').value = cfg.cctag_max_id;
+                    if (cfg.cctag_id_voting_decay !== undefined) {
+                        document.getElementById('cctag_id_voting_decay').value = cfg.cctag_id_voting_decay;
+                        document.getElementById('val_cctag_id_voting_decay').value = cfg.cctag_id_voting_decay;
+                    }
+                    if (cfg.cctag_match_radius_mult !== undefined) {
+                        document.getElementById('cctag_match_radius_mult').value = cfg.cctag_match_radius_mult;
+                        document.getElementById('val_cctag_match_radius_mult').value = cfg.cctag_match_radius_mult;
+                    }
+                    if (cfg.cctag_ghosting_frames !== undefined) {
+                        document.getElementById('cctag_ghosting_frames').value = cfg.cctag_ghosting_frames;
+                        document.getElementById('val_cctag_ghosting_frames').value = cfg.cctag_ghosting_frames;
+                    }
+                    if (cfg.cctag_id_switch_margin !== undefined) {
+                        document.getElementById('cctag_id_switch_margin').value = cfg.cctag_id_switch_margin;
+                        document.getElementById('val_cctag_id_switch_margin').value = cfg.cctag_id_switch_margin;
+                    }
+                    if (cfg.cctag_min_ident_proba !== undefined) {
+                        let mappedVal = cfg.cctag_min_ident_proba;
+                        if (mappedVal < 1) mappedVal = Math.max(0, Math.round(10 + Math.log10(mappedVal)));
+                        document.getElementById('cctag_min_ident_proba').value = mappedVal;
+                        document.getElementById('val_cctag_min_ident_proba').value = mappedVal;
+                    }
+                    if (cfg.hough_min_radius !== undefined) document.getElementById('hough_min_radius').value = cfg.hough_min_radius;
+                    if (cfg.hough_max_radius !== undefined) document.getElementById('hough_max_radius').value = cfg.hough_max_radius;
+                    if (cfg.hough_param1 !== undefined) document.getElementById('hough_param1').value = cfg.hough_param1;
+                    if (cfg.hough_param2 !== undefined) document.getElementById('hough_param2').value = cfg.hough_param2;
+                    if (cfg.hough_deadzone !== undefined) {
+                        document.getElementById('hough_deadzone').value = cfg.hough_deadzone;
+                        document.getElementById('val_hough_deadzone').value = cfg.hough_deadzone;
+                    }
+                    if (cfg.distortion_k1 !== undefined) document.getElementById('distortion_k1').value = cfg.distortion_k1;
+                    if (cfg.zoom !== undefined) document.getElementById('zoom').value = cfg.zoom;
+                    if (cfg.offset_x !== undefined) document.getElementById('offset_x').value = cfg.offset_x;
+                    if (cfg.offset_y !== undefined) document.getElementById('offset_y').value = cfg.offset_y;
+                    if (cfg.rotation !== undefined) document.getElementById('rotation').value = cfg.rotation;
+                    if (cfg.exposure !== undefined) document.getElementById('exposure').value = cfg.exposure;
+                    if (cfg.contrast !== undefined) document.getElementById('contrast').value = cfg.contrast;
+                    if (cfg.brightness !== undefined) document.getElementById('brightness').value = cfg.brightness;
+                    if (cfg.show_overlay !== undefined) document.getElementById('show_overlay').checked = cfg.show_overlay;
+                    if (cfg.auto_blank !== undefined) document.getElementById('auto_blank').checked = cfg.auto_blank;
+                    if (cfg.auto_blank_delay !== undefined) {
+                        document.getElementById('auto_blank_delay').value = cfg.auto_blank_delay;
+                        document.getElementById('val_auto_blank_delay').value = cfg.auto_blank_delay;
+                    }
+                    if (cfg.manual_blank !== undefined) document.getElementById('manual_blank').checked = cfg.manual_blank;
+
+                    // Reflect an already-running stream (e.g. from startup auto-reconnect)
+                    // instead of showing "Disconnected" until someone manually re-clicks Connect.
+                    if (cfg.connected) {
+                        document.getElementById('videoFeed').src = '/video_feed?' + new Date().getTime();
+                        document.getElementById('videoFeed').style.display = 'block';
+                        document.getElementById('videoPlaceholder').style.display = 'none';
+                        document.getElementById('camStatus').innerText = "Connected";
+                        document.getElementById('camStatus').className = "status success";
+                    }
+                })
+                .catch(err => console.error('Could not load server settings, falling back to local cache only.', err));
+        }
+
         // Load config on page load
         window.addEventListener('DOMContentLoaded', () => {
             loadConfig();
+            loadServerSettings();
             updateAreaIndicators();
             // Query calibration status and update UI so user knows calibration is applied
             try { caliStatusCalib(); } catch (e) { /* ignore if not available */ }

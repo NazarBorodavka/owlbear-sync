@@ -76,6 +76,15 @@ class IPCameraCapture:
 app = Flask(__name__, template_folder='templates', static_folder=None)
 app.config['JSON_SORT_KEYS'] = False
 
+# Build identity, baked in at image build time by the CI workflow (see
+# .github/workflows/docker-publish.yml) via Docker build-args. Defaults below
+# only apply to a manual `docker build`/local run outside CI. Surfaced in the
+# dashboard so it's obvious at a glance whether the server is running the
+# build you expect.
+BUILD_VERSION = os.environ.get('BUILD_VERSION', 'dev')
+BUILD_BRANCH = os.environ.get('BUILD_BRANCH', 'local')
+BUILD_COMMIT = os.environ.get('BUILD_COMMIT', 'unknown')
+
 @app.after_request
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -117,8 +126,9 @@ def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
     global auto_blank, auto_blank_delay
-    global cctag_min_id, cctag_max_id
-    global token_aliases, manual_blank
+    global cctag_min_id, cctag_max_id, cctag_min_ident_proba, cctag_id_voting_decay
+    global cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
+    global token_aliases, manual_blank, camera_url
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
     global src_pts, corner_idx, homography_matrix
     for config_path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
@@ -128,11 +138,13 @@ def load_config_from_disk():
             with open(config_path, 'r') as f:
                 c = json.load(f)
                 cctag_min_id = int(c.get('cctag_min_id', 0))
-                cctag_max_id = int(c.get('cctag_max_id', 9))
+                cctag_max_id = int(c.get('cctag_max_id', 31))
                 cctag_min_ident_proba = float(c.get('cctag_min_ident_proba', 1e-6))
                 cctag_id_voting_decay = float(c.get('cctag_id_voting_decay', 0.95))
                 cctag_match_radius_mult = float(c.get('cctag_match_radius_mult', 2.0))
                 cctag_ghosting_frames = int(c.get('cctag_ghosting_frames', 30))
+                cctag_id_switch_margin = float(c.get('cctag_id_switch_margin', 1.5))
+                camera_url = c.get('camera_url', camera_url)
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
                 distortion_k1 = c.get('distortion_k1', 0.0)
@@ -205,7 +217,9 @@ def save_config_to_disk():
         'cctag_id_voting_decay': cctag_id_voting_decay,
         'cctag_match_radius_mult': cctag_match_radius_mult,
         'cctag_ghosting_frames': cctag_ghosting_frames,
+        'cctag_id_switch_margin': cctag_id_switch_margin,
         'token_aliases': token_aliases,
+        'camera_url': camera_url,
         'password': USER_DATA.get("admin", "admin"),
         'calibration_model': calibration_model,
         'corner_idx': corner_idx,
@@ -262,13 +276,17 @@ flip_x = False
 flip_y = False
 
 cctag_min_id = 0
-cctag_max_id = 9
+cctag_max_id = 31  # Full size of the pre-generated 3-crown marker set in tags/cctag/
 cctag_min_ident_proba = 1e-6
 cctag_id_voting_decay = 0.95
 # Multiplier on token radius for CCTag→Hough proximity matching.
 # 2.0 = match if CCTag center is within 2 radii of a Hough circle center.
 cctag_match_radius_mult = 2.0
 cctag_ghosting_frames = 30
+# A challenger ID must out-vote the currently-assigned ID by this ratio before
+# it's allowed to take over. Prevents an established token's label from
+# flip-flopping on frame-to-frame noise near the decision boundary.
+cctag_id_switch_margin = 1.5
 manual_blank = False
 
 # Performance optimization: Cache for software exposure table
@@ -596,9 +614,16 @@ def get_video_stream():
                 except Exception:
                     cctag_results = []
 
-                # Match each CCTag result to the nearest tracked token by Euclidean distance
-                matched_cctag = set()
-                for res in cctag_results:
+                # Build every plausible (detection, token) pairing, then assign
+                # globally in ascending-distance order. A pure per-result greedy
+                # scan (the old approach) let processing order decide who claims
+                # a token when two detections both fall in its catchment radius —
+                # with tokens this close together at this resolution that produced
+                # nondeterministic swaps. Sorting all candidates first and
+                # assigning closest-first is a cheap stand-in for a proper
+                # Hungarian assignment that removes that order-dependence.
+                candidate_pairs = []
+                for ridx, res in enumerate(cctag_results):
                     rid = int(res.get('idx', -1))
                     dm = float(res.get('decision_margin', 0))
                     rx, ry = float(res.get('x', 0)), float(res.get('y', 0))
@@ -606,31 +631,44 @@ def get_video_stream():
                     if not (cctag_min_id <= rid <= cctag_max_id) or dm <= 0:
                         continue
 
-                    # Find the closest Hough-tracked token
-                    best_t_id = None
-                    best_dist = float('inf')
                     for t_id, t_data in get_video_stream.tracked_tokens.items():
                         d = np.hypot(t_data["x"] - rx, t_data["y"] - ry)
                         # Accept if CCTag center falls within cctag_match_radius_mult × token radius.
                         # Higher = more forgiving matching for large/far tokens.
-                        if d < t_data["r"] * cctag_match_radius_mult and d < best_dist:
-                            best_dist = d
-                            best_t_id = t_id
+                        if d < t_data["r"] * cctag_match_radius_mult:
+                            candidate_pairs.append((d, ridx, t_id, rid, dm))
 
-                    if best_t_id is not None and best_t_id not in matched_cctag:
-                        t_data = get_video_stream.tracked_tokens[best_t_id]
-                        # Accumulate votes
-                        votes = t_data.setdefault("id_votes", {})
-                        # Decay old votes
-                        for k in list(votes.keys()):
-                            votes[k] *= cctag_id_voting_decay
-                            if votes[k] < 0.01:  # Drop very stale votes (lower threshold = longer memory)
-                                del votes[k]
-                        votes[rid] = votes.get(rid, 0) + dm
-                        # Best vote wins
-                        best_rid = max(votes.items(), key=lambda x: x[1])[0]
+                candidate_pairs.sort(key=lambda p: p[0])
+
+                matched_cctag = set()
+                matched_results = set()
+                for d, ridx, t_id, rid, dm in candidate_pairs:
+                    if t_id in matched_cctag or ridx in matched_results:
+                        continue
+                    matched_cctag.add(t_id)
+                    matched_results.add(ridx)
+
+                    t_data = get_video_stream.tracked_tokens[t_id]
+                    # Accumulate votes
+                    votes = t_data.setdefault("id_votes", {})
+                    # Decay old votes
+                    for k in list(votes.keys()):
+                        votes[k] *= cctag_id_voting_decay
+                        if votes[k] < 0.01:  # Drop very stale votes (lower threshold = longer memory)
+                            del votes[k]
+                    votes[rid] = votes.get(rid, 0) + dm
+
+                    # Hysteresis: only let a challenger ID displace the token's
+                    # currently-assigned ID once it clearly outscores it. Without
+                    # this, two IDs with near-equal vote totals near the noise
+                    # floor cause the displayed ID to flip every time a marginal
+                    # detection nudges the ranking — the "keeps flipping" symptom.
+                    current_id = t_data.get("marker_id")
+                    best_rid, best_vote = max(votes.items(), key=lambda x: x[1])
+                    if current_id is None or current_id not in votes:
                         t_data["marker_id"] = best_rid
-                        matched_cctag.add(best_t_id)
+                    elif best_rid != current_id and best_vote > votes.get(current_id, 0) * cctag_id_switch_margin:
+                        t_data["marker_id"] = best_rid
 
                 # Tokens not matched this round: decay their votes but keep their ID
                 for t_id, t_data in get_video_stream.tracked_tokens.items():
@@ -877,36 +915,50 @@ def diagnostic_page():
 </body></html>'''
     return html
 
-@app.route('/api/connect', methods=['POST'])
-def connect_camera():
+def _connect_to_camera(url):
+    """Open a camera/stream source and start the background processing thread
+    if it isn't already running. Returns (success: bool, error: str|None).
+    Shared by the /api/connect route and the startup auto-reconnect below so
+    the tracker resumes on its own after a container restart instead of
+    sitting idle until someone opens the dashboard and clicks Connect."""
     global camera_url, cap, is_running
-    data = request.json
-    camera_url = data.get('url', '')
-    
+    camera_url = url
+
     with camera_lock:
         if cap is not None:
             cap.release()
-            
+
         # Use 0 for local webcam if url is empty or '0'
         try:
             source = int(camera_url)
         except (ValueError, TypeError):
             source = camera_url
-            
+
         if isinstance(source, str) and (source.startswith('http') or source.startswith('rtsp') or source.startswith('rtmp')):
             cap = IPCameraCapture(source)
         else:
             cap = cv2.VideoCapture(source)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            
+
         if not cap.isOpened():
-            return jsonify({"success": False, "error": "Could not open camera"})
-            
+            return False, "Could not open camera"
+
     if not is_running:
         is_running = True
         threading.Thread(target=get_video_stream, daemon=True).start()
-        
-    return jsonify({"success": True})
+
+    return True, None
+
+
+@app.route('/api/connect', methods=['POST'])
+def connect_camera():
+    data = request.json
+    url = data.get('url', '')
+    success, error = _connect_to_camera(url)
+    if success:
+        save_config_to_disk()
+        return jsonify({"success": True})
+    return jsonify({"success": False, "error": error})
 
 @app.route('/api/calibrate', methods=['POST'])
 def calibrate():
@@ -1097,6 +1149,40 @@ def camera_calibration_status():
         "model": calibration_model
     })
 
+@app.route('/api/settings', methods=['GET'])
+@auth.login_required
+def get_settings():
+    """Return the server's current authoritative settings.
+
+    The dashboard used to rely solely on the browser's localStorage to
+    repopulate its fields on load, so a fresh browser/machine (or localStorage
+    just getting cleared) would silently display the page's hardcoded HTML
+    defaults instead of what's actually running server-side — including
+    camera_url, which previously wasn't persisted at all. This lets the UI
+    ask the server what's really configured instead of guessing.
+    """
+    return jsonify({
+        "build_version": BUILD_VERSION,
+        "build_branch": BUILD_BRANCH,
+        "build_commit": BUILD_COMMIT,
+        "camera_url": camera_url,
+        "connected": cap is not None and cap.isOpened(),
+        "distortion_k1": distortion_k1, "zoom": zoom_level, "offset_x": offset_x, "offset_y": offset_y,
+        "rotation": rotation, "brightness": brightness, "contrast": contrast, "exposure": exposure,
+        "show_overlay": show_overlay, "auto_blank": auto_blank, "auto_blank_delay": auto_blank_delay,
+        "manual_blank": manual_blank, "flip_x": flip_x, "flip_y": flip_y,
+        "hough_param1": hough_param1, "hough_param2": hough_param2,
+        "hough_min_radius": hough_min_radius, "hough_max_radius": hough_max_radius,
+        "hough_deadzone": hough_deadzone,
+        "cctag_min_id": cctag_min_id, "cctag_max_id": cctag_max_id,
+        "cctag_min_ident_proba": cctag_min_ident_proba,
+        "cctag_id_voting_decay": cctag_id_voting_decay,
+        "cctag_match_radius_mult": cctag_match_radius_mult,
+        "cctag_ghosting_frames": cctag_ghosting_frames,
+        "cctag_id_switch_margin": cctag_id_switch_margin,
+    })
+
+
 @app.route('/api/settings', methods=['POST'])
 @auth.login_required
 def update_settings():
@@ -1105,7 +1191,7 @@ def update_settings():
     global auto_blank, token_aliases
     global camera_url, manual_blank, flip_x, flip_y
     global CCTAG_AVAILABLE, cctag_min_id, cctag_max_id, cctag_min_ident_proba
-    global cctag_id_voting_decay, cctag_match_radius_mult, cctag_ghosting_frames
+    global cctag_id_voting_decay, cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
 
     data = request.json
     if 'camera_url' in data: camera_url = data['camera_url']
@@ -1126,6 +1212,9 @@ def update_settings():
         except Exception: pass
     if 'cctag_ghosting_frames' in data:
         try: cctag_ghosting_frames = int(data['cctag_ghosting_frames'])
+        except Exception: pass
+    if 'cctag_id_switch_margin' in data:
+        try: cctag_id_switch_margin = float(data['cctag_id_switch_margin'])
         except Exception: pass
     if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
     if 'zoom' in data: zoom_level = float(data['zoom'])
@@ -1168,6 +1257,7 @@ def update_settings():
 
 
 @app.route('/api/token/alias', methods=['POST'])
+@auth.login_required
 def set_token_alias():
     data = request.json
     token_id = data.get('id')
@@ -1178,6 +1268,7 @@ def set_token_alias():
     return jsonify({"success": True})
 
 @app.route('/api/token/delete', methods=['POST'])
+@auth.login_required
 def delete_token():
     data = request.json
     token_id = data.get('id')
@@ -1188,6 +1279,7 @@ def delete_token():
     return jsonify({"success": True})
 
 @app.route('/api/token/reset', methods=['POST'])
+@auth.login_required
 def reset_tokens():
     global ignored_tokens, token_aliases
     ignored_tokens = set()
@@ -1207,6 +1299,12 @@ def serve_extension(filename):
     return response
 
 if __name__ == '__main__':
+    if camera_url:
+        print(f"Auto-connecting to saved camera: {camera_url}", flush=True)
+        ok, err = _connect_to_camera(camera_url)
+        if not ok:
+            print(f"Auto-connect failed ({err}); use the dashboard to connect manually.", flush=True)
+
     print("Starting server on port 5000...")
     # Eventlet is the async mode recommended for SocketIO in production
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)

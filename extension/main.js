@@ -403,5 +403,3 @@ async function updateBlackout(active, items) {
     console.error("Error updating blackout:", e);
   }
 }
-
-// updateSceneFilters removed per user request

@@ -2,7 +2,7 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "**" ]
 
 jobs:
   build:
@@ -31,6 +31,23 @@ jobs:
         env:
           OWNER: "${{ github.repository_owner }}"
 
+      # Derives image tags from the branch that triggered the build, so every
+      # branch gets its own "latest for that branch" tag (e.g. `master`,
+      # `runetag`) plus a per-build tag with the run number baked in
+      # (e.g. `master-42`). Only the default branch also gets the bare
+      # `latest` tag, so pushing to a feature branch can never accidentally
+      # move what `docker-compose.yml` pulls by default.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ env.OWNER_LC }}/owlbear-tracker
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=raw,value={{branch}}-${{ github.run_number }}
+            type=sha,format=short
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -39,7 +56,9 @@ jobs:
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          tags: |
-            ghcr.io/${{ env.OWNER_LC }}/owlbear-tracker:latest
-            ghcr.io/${{ env.OWNER_LC }}/owlbear-tracker:master
-            ghcr.io/${{ env.OWNER_LC }}/owlbear-tracker:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ github.run_number }}
+            BUILD_BRANCH=${{ github.ref_name }}
+            BUILD_COMMIT=${{ github.sha }}
