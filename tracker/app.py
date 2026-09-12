@@ -1,9 +1,24 @@
+import os
+
+# Must be set before the first cv2.VideoCapture() call — OpenCV's FFmpeg
+# backend reads this env var at stream-open time. Without it, FFmpeg
+# internally buffers several seconds of video to smooth out network jitter,
+# which is exactly wrong for a live tracking feed: it's the main cause of
+# the multi-second lag between real token movement and what shows up here.
+# tcp transport trades a little latency for much better reliability over
+# WiFi than udp (dropped/reordered UDP packets otherwise show up as stalls
+# or corrupted frames, which looks like "low fps"). Override via the
+# environment (e.g. in docker-compose.yml) if your network needs udp.
+os.environ.setdefault(
+    'OPENCV_FFMPEG_CAPTURE_OPTIONS',
+    'rtsp_transport;tcp|fflags;nobuffer|flags;low_delay'
+)
+
 import cv2
 import numpy as np
 import time
 import concurrent.futures
 import threading
-import os
 import json
 import collections
 from flask import Flask, render_template, Response, request, jsonify, send_from_directory
@@ -35,14 +50,21 @@ except Exception as e:
 class IPCameraCapture:
     def __init__(self, url):
         self.url = url
-        self.cap = cv2.VideoCapture(url)
+        # Force the FFmpeg backend explicitly so OPENCV_FFMPEG_CAPTURE_OPTIONS
+        # (set above) is guaranteed to apply, rather than whatever backend
+        # OpenCV would otherwise auto-select for the URL.
+        self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         # Use deque with maxlen=1 for atomic "latest frame" access
         self.frame_buffer = collections.deque(maxlen=1)
         self.is_running = True
-        
-        # Tapo/RTSP specific optimizations
+
+        # NOTE: CAP_PROP_BUFFERSIZE is not honored by OpenCV's FFmpeg backend
+        # for network streams (only by a handful of local-capture backends),
+        # so it does nothing for RTSP here — the actual buffering knobs are
+        # the OPENCV_FFMPEG_CAPTURE_OPTIONS env var set above. Left as a
+        # harmless no-op in case a future OpenCV build changes that.
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        
+
         self.thread = threading.Thread(target=self._reader, daemon=True)
         self.thread.start()
 
@@ -825,17 +847,36 @@ def get_video_stream():
 
 
 
+# JPEG quality for the live preview streams. OpenCV's default (95) costs
+# noticeably more encode time and bandwidth than a live tracking preview
+# needs — this is not a recording, just a monitor view.
+STREAM_JPEG_QUALITY = 80
+_JPEG_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, STREAM_JPEG_QUALITY]
+
+
 def generate_frames():
     global current_frame
     while True:
+        # Grab a reference (not a copy) under the lock. get_video_stream()
+        # always publishes a brand-new array (`current_frame = frame.copy()`)
+        # rather than mutating the existing one in place, so once we hold a
+        # reference here it can never change underneath us — this makes the
+        # lock's critical section effectively free. Encoding is the
+        # expensive part (single-digit-to-tens of ms for a 1080p JPEG), so it
+        # happens after releasing the lock — doing it while holding the lock
+        # was blocking the capture thread from publishing new frames and made
+        # the whole pipeline (including settings changes, which don't touch
+        # this lock but were queued behind the same non-threaded dev server
+        # handling this long-lived connection) feel sluggish.
         with frame_lock:
-            if current_frame is None:
-                # Need to yield *something* so the stream keeps connection alive
-                time.sleep(0.1)
-                continue
-            ret, buffer = cv2.imencode('.jpg', current_frame)
-            frame_bytes = buffer.tobytes()
-            
+            frame_ref = current_frame
+        if frame_ref is None:
+            # Need to yield *something* so the stream keeps connection alive
+            time.sleep(0.1)
+            continue
+        ret, buffer = cv2.imencode('.jpg', frame_ref, _JPEG_PARAMS)
+        frame_bytes = buffer.tobytes()
+
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         time.sleep(0.03) # Limit framerate to browser to save bandwidth
@@ -844,15 +885,12 @@ def generate_raw_frames():
     global raw_frame_for_stream
     while True:
         try:
-            if raw_frame_for_stream is None:
-                time.sleep(0.1)
-                continue
             with frame_lock:
-                rf = raw_frame_for_stream.copy() if raw_frame_for_stream is not None else None
+                rf = raw_frame_for_stream
             if rf is None:
                 time.sleep(0.1)
                 continue
-            ret, buffer = cv2.imencode('.jpg', rf)
+            ret, buffer = cv2.imencode('.jpg', rf, _JPEG_PARAMS)
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
@@ -864,15 +902,12 @@ def generate_undistorted_frames():
     global undistorted_frame_for_stream
     while True:
         try:
-            if undistorted_frame_for_stream is None:
-                time.sleep(0.1)
-                continue
             with frame_lock:
-                uf = undistorted_frame_for_stream.copy() if undistorted_frame_for_stream is not None else None
+                uf = undistorted_frame_for_stream
             if uf is None:
                 time.sleep(0.1)
                 continue
-            ret, buffer = cv2.imencode('.jpg', uf)
+            ret, buffer = cv2.imencode('.jpg', uf, _JPEG_PARAMS)
             frame_bytes = buffer.tobytes()
             yield (b'--frame\r\n'
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
@@ -1307,4 +1342,10 @@ if __name__ == '__main__':
 
     print("Starting server on port 5000...")
     # Eventlet is the async mode recommended for SocketIO in production
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+    # threaded=True is required here: /video_feed is a long-lived streaming
+    # response, and without a threaded server every other request (settings
+    # changes, calibration clicks, the token list) queues up behind it and
+    # only gets served whenever the stream generator happens to yield —
+    # which is exactly the "UI updates slowly while the feed is open"
+    # symptom this fixes.
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True, threaded=True)
