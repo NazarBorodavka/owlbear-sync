@@ -141,6 +141,13 @@
             font-weight: 500;
         }
 
+        .video-hint {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            margin-top: 15px;
+            margin-bottom: 0;
+        }
+
         button,
         input[type="text"] {
             padding: 10px 14px;
@@ -176,6 +183,11 @@
         button:hover {
             background: var(--accent-hover);
             transform: translateY(-1px);
+        }
+
+        button.secondary {
+            background: rgba(255, 255, 255, 0.06);
+            color: #e2e8f0;
         }
 
         button.secondary:hover {
@@ -279,22 +291,166 @@
             border: 0;
             height: 1px;
             background: rgba(255, 255, 255, 0.08);
-            margin: 0;
+            margin: 20px 0;
         }
 
-        /* Sliders */
-        .slider-container {
-            margin: 12px 0;
+        /* --- Collapsible panels --- */
+        .panel > summary {
+            list-style: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-weight: 500;
+            font-size: 1.1rem;
+            color: #e2e8f0;
+            outline: none;
+            user-select: none;
         }
 
-        .slider-container label {
+        .panel > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .panel > summary::marker {
+            content: "";
+        }
+
+        .panel > summary:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 4px;
+            border-radius: 4px;
+        }
+
+        .panel-subtitle {
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            font-weight: 400;
+            margin-top: 2px;
+        }
+
+        .chevron {
+            width: 9px;
+            height: 9px;
+            flex-shrink: 0;
+            margin-left: 12px;
+            border-right: 2px solid var(--text-muted);
+            border-bottom: 2px solid var(--text-muted);
+            transform: rotate(45deg);
+            transition: transform 0.15s ease;
+        }
+
+        .panel[open] > summary .chevron {
+            transform: rotate(-135deg);
+        }
+
+        .panel-body {
+            margin-top: 18px;
+        }
+
+        .section-desc {
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            line-height: 1.5;
+            margin: 0 0 16px 0;
+        }
+
+        .subsection-title {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #e2e8f0;
+            margin: 0 0 10px 0;
+        }
+
+        .button-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .button-grid button {
+            font-size: 0.85rem;
+            padding: 8px;
+        }
+
+        /* --- Info icon + tooltip --- */
+        .info-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text-muted);
+            border: 1px solid var(--panel-border);
+            font-size: 0.68rem;
+            font-style: italic;
+            font-family: Georgia, 'Times New Roman', serif;
+            font-weight: 700;
+            cursor: help;
+            padding: 0;
+            width: 16px;
+            flex-shrink: 0;
+            line-height: 1;
+            transition: background 0.15s ease, color 0.15s ease;
+        }
+
+        .info-icon:hover,
+        .info-icon:focus-visible {
+            background: var(--accent);
+            color: white;
+            outline: none;
+        }
+
+        #tooltipPopup {
+            position: fixed;
+            max-width: 260px;
+            background: #0b1220;
+            border: 1px solid var(--panel-border);
+            color: var(--text-main);
+            font-size: 0.78rem;
+            line-height: 1.5;
+            padding: 10px 12px;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+            z-index: 1000;
+            display: none;
+            pointer-events: none;
+        }
+
+        /* --- Form fields (sliders, checkboxes) --- */
+        .field {
+            margin: 14px 0;
+        }
+
+        .field.indent {
+            margin-left: 28px;
+            margin-top: 10px;
+        }
+
+        .field-row {
             display: flex;
             justify-content: space-between;
             align-items: center;
             margin-bottom: 6px;
+        }
+
+        .field-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
             font-size: 0.85rem;
             color: var(--text-muted);
             font-weight: 500;
+        }
+
+        .field-label-sm {
+            display: block;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 4px;
         }
 
         input[type=range] {
@@ -326,6 +482,35 @@
             margin: 0;
         }
 
+        .checkbox-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 12px;
+            cursor: pointer;
+        }
+
+        .checkbox-row input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: var(--accent);
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+
+        .checkbox-row span {
+            color: #e2e8f0;
+            font-size: 0.95rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .checkbox-row.warning span {
+            color: #f87171;
+            font-weight: 600;
+        }
+
         /* Tokens List */
         .token-list {
             list-style: none;
@@ -333,32 +518,6 @@
             margin: 0;
             max-height: 250px;
             overflow-y: auto;
-        }
-
-        .token-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: rgba(0, 0, 0, 0.2);
-            padding: 10px 14px;
-            margin-bottom: 8px;
-            border-radius: 8px;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-        }
-
-        .token-item .id {
-            font-weight: 600;
-            font-size: 0.85rem;
-            color: #e2e8f0;
-        }
-
-        .token-item .color-tag {
-            font-size: 0.75rem;
-            font-weight: 600;
-            background: var(--accent);
-            color: white;
-            padding: 2px 8px;
-            border-radius: 12px;
         }
 
         /* Scrollbar styling */
@@ -395,7 +554,7 @@
                 <div id="videoPlaceholder">
                     Camera stream will appear here.
                 </div>
-                <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 15px; margin-bottom: 0;">
+                <p class="video-hint">
                     Click directly on the video feed to set the 4 calibration corners (Top-Left, Top-Right,
                     Bottom-Right, Bottom-Left).
                 </p>
@@ -403,265 +562,410 @@
 
             <div class="settings-column">
 
-                <div class="glass-panel">
-                    <h2>Connection</h2>
-                    <label
-                        style="display:block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Camera
-                        Source URL</label>
-                    <input type="text" id="cameraUrl" placeholder="rtsp://user:pass@IP:port/stream1"
-                        onchange="saveConfig()">
-                    <button onclick="connectCamera()">Connect to Camera</button>
-                    <p id="camStatus" class="status neutral">Disconnected</p>
-                </div>
+                <details class="panel glass-panel" data-panel="connection" open>
+                    <summary><span>Camera Connection</span><span class="chevron"></span></summary>
+                    <div class="panel-body">
+                        <label class="field-label-sm" for="cameraUrl">Camera Stream URL</label>
+                        <input type="text" id="cameraUrl" placeholder="rtsp://user:pass@IP:port/stream1"
+                            onchange="saveConfig()">
+                        <button onclick="connectCamera()">Connect to Camera</button>
+                        <p id="camStatus" class="status neutral">Disconnected</p>
+                    </div>
+                </details>
 
-                <div class="glass-panel">
-                    <h3>Video Preprocessing</h3>
-                    <div class="slider-container">
-                        <label><span>Fisheye Correction</span> <input type="number" id="val_distortion_k1" value="0.0"
-                                step="0.01" class="val-input"
-                                onchange="syncSlider(this, 'distortion_k1'); updateSettings()"></label>
-                        <input type="range" id="distortion_k1" min="-1" max="1" step="0.01" value="0.0"
-                            oninput="updateSettings()">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Adjusts lens distortion. Negative values fix barrel distortion (bulging), positive values fix pincushion distortion.</p>
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Zoom</span> <input type="number" id="val_zoom" value="1.0" step="0.05"
-                                class="val-input" onchange="syncSlider(this, 'zoom'); updateSettings()"></label>
-                        <input type="range" id="zoom" min="0.5" max="3.0" step="0.05" value="1.0"
-                            oninput="updateSettings()">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Digitally zooms the camera feed to crop out surrounding background.</p>
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Pan X</span> <input type="number" id="val_offset_x" value="0.0" step="0.01"
-                                class="val-input" onchange="syncSlider(this, 'offset_x'); updateSettings()"></label>
-                        <input type="range" id="offset_x" min="-1" max="1" step="0.01" value="0"
-                            oninput="updateSettings()">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Shifts the visible frame horizontally.</p>
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Pan Y</span> <input type="number" id="val_offset_y" value="0.0" step="0.01"
-                                class="val-input" onchange="syncSlider(this, 'offset_y'); updateSettings()"></label>
-                        <input type="range" id="offset_y" min="-1" max="1" step="0.01" value="0"
-                            oninput="updateSettings()">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Shifts the visible frame vertically.</p>
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Rotation</span> <input type="number" id="val_rotation" value="0" step="1"
-                                class="val-input" onchange="syncSlider(this, 'rotation'); updateSettings()"></label>
-                        <input type="range" id="rotation" min="-180" max="180" step="1" value="0"
-                            oninput="updateSettings()">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Rotates the camera feed. Useful if your camera is mounted upside down or at an angle.</p>
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Exposure (Gamma)</span> <input type="number" id="val_exposure" value="1.0"
-                                step="0.1" class="val-input"
-                                onchange="syncSlider(this, 'exposure'); updateSettings()"></label>
-                        <input type="range" id="exposure" min="0.1" max="3.0" step="0.1" value="1.0"
-                            oninput="updateSettings()">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Adjusts non-linear brightness (gamma). Useful for enhancing dark camera feeds without washing out bright spots.</p>
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Contrast</span> <input type="number" id="val_contrast" value="1.0" step="0.1"
-                                class="val-input" onchange="syncSlider(this, 'contrast'); updateSettings()"></label>
-                        <input type="range" id="contrast" min="0.1" max="3.0" step="0.1" value="1.0"
-                            oninput="updateSettings()">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Adjusts the difference between light and dark areas. Higher contrast makes edges sharper.</p>
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Brightness</span> <input type="number" id="val_brightness" value="0" step="1"
-                                class="val-input" onchange="syncSlider(this, 'brightness'); updateSettings()"></label>
-                        <input type="range" id="brightness" min="-100" max="100" step="1" value="0"
-                            oninput="updateSettings()">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Adjusts the overall lightness of the image.</p>
-                    </div>
+                <details class="panel glass-panel" data-panel="calibration" open>
+                    <summary><span>Calibration</span><span class="chevron"></span></summary>
+                    <div class="panel-body">
+                        <h4 class="subsection-title">Play Area Corners</h4>
+                        <p id="trackingStatus" class="status neutral" style="margin-top:0;">Tracking Active</p>
+                        <p id="calibStatus" class="status neutral">Corners marked: 0/4</p>
+                        <button class="secondary" onclick="resetCalibration()">Reset Corners</button>
+                        <div class="info-box">
+                            <strong>How to calibrate:</strong> click the 4 corners of the projected play area
+                            directly on the video feed above, in order (top-left &rarr; top-right &rarr;
+                            bottom-right &rarr; bottom-left). This tells the tracker how to map camera pixels onto
+                            the Owlbear scene.
+                        </div>
 
-                    <div class="slider-container"
-                        style="display: flex; align-items: center; gap: 10px; margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--panel-border);">
-                        <input type="checkbox" id="show_overlay" checked onchange="updateSettings()"
-                            style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;">
-                        <label for="show_overlay"
-                            style="margin: 0; cursor: pointer; color: #e2e8f0; font-size: 0.95rem;">Show tracking
-                            overlay on video</label>
-                    </div>
+                        <hr>
 
-                    <div class="slider-container"
-                        style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
-                        <input type="checkbox" id="auto_blank" onchange="updateSettings()"
-                            style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;">
-                        <label for="auto_blank"
-                            style="margin: 0; cursor: pointer; color: #e2e8f0; font-size: 0.95rem;">Auto-Blank Projector
-                            (when tokens lost)</label>
+                        <h4 class="subsection-title">Lens Distortion (Optional)</h4>
+                        <p class="section-desc">
+                            Only needed if your camera has a noticeably wide or fisheye lens and straight lines
+                            look curved near the edges. Uses a printed chessboard pattern held in front of the
+                            camera at a few different angles.
+                        </p>
+                        <div class="button-grid">
+                            <button class="secondary" onclick="caliStartCalib()">Start</button>
+                            <button class="secondary" onclick="caliAddFrame()">Add Snapshot</button>
+                            <button class="secondary" onclick="caliFinishCalib()">Finish</button>
+                            <button class="secondary" onclick="caliResetCalib()">Reset</button>
+                            <button class="secondary" onclick="caliStatusCalib()">Status</button>
+                            <button class="secondary" onclick="caliOpenDiag()">Diagnostic View</button>
+                        </div>
+                        <p id="caliMsg" class="status neutral" style="min-height: 20px;"></p>
                     </div>
+                </details>
 
-                    <div class="slider-container" style="margin-top: 10px; padding-left: 28px;">
-                        <label><span>Auto-Blank Delay (frames)</span> <input type="number" id="val_auto_blank_delay" value="10" step="1" min="0" max="150" class="val-input" onchange="syncSlider(this, 'auto_blank_delay'); updateSettings()"></label>
-                        <input type="range" id="auto_blank_delay" min="0" max="150" step="1" value="10" oninput="updateVal('auto_blank_delay')">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">How long a token must be missing before triggering blackout. 30 frames is ~1 second.</p>
-                    </div>
+                <details class="panel glass-panel" data-panel="display" open>
+                    <summary><span>Display &amp; Blackout</span><span class="chevron"></span></summary>
+                    <div class="panel-body">
+                        <label class="checkbox-row">
+                            <input type="checkbox" id="show_overlay" checked onchange="updateSettings()">
+                            <span>Show tracking overlay on video
+                                <button type="button" class="info-icon" tabindex="0"
+                                    data-tip="Draws detection circles, IDs, and the size guide on this preview only. Never affects what's sent to Owlbear.">i</button>
+                            </span>
+                        </label>
 
-                    <div class="slider-container"
-                        style="display: flex; align-items: center; gap: 10px; margin-top: 10px;">
-                        <input type="checkbox" id="manual_blank" onchange="updateSettings()"
-                            style="width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;">
-                        <label for="manual_blank"
-                            style="margin: 0; cursor: pointer; color: #e2e8f0; font-size: 0.95rem; font-weight: 600; color: #f87171;">FORCE
-                            BLACKOUT (For Calibration)</label>
-                    </div>
+                        <label class="checkbox-row">
+                            <input type="checkbox" id="auto_blank" onchange="updateSettings()">
+                            <span>Auto-blank projector when a token goes missing
+                                <button type="button" class="info-icon" tabindex="0"
+                                    data-tip="Automatically blacks out the projected map if a tracked token disappears, so players can't see the map underneath while you fix a dropped or lost token.">i</button>
+                            </span>
+                        </label>
 
-                    <button class="secondary" onclick="resetSettings()" style="margin-top: 10px;">Reset
-                        Adjustments</button>
-                </div>
-
-                <div class="glass-panel">
-                    <h3>Disk Detection Settings</h3>
-                    <p class="subtitle">Fine-tune the circular base detection.</p>
-                    <div class="slider-container">
-                        <label><span>Min Radius</span> <input type="number" id="val_hough_min_radius" value="30"
-                                step="1" class="val-input"
-                                onchange="syncSlider(this, 'hough_min_radius'); updateSettings()"></label>
-                        <input type="range" id="hough_min_radius" min="10" max="100" step="1" value="30"
-                            oninput="updateSettings()">
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Max Radius</span> <input type="number" id="val_hough_max_radius" value="40"
-                                step="1" class="val-input"
-                                onchange="syncSlider(this, 'hough_max_radius'); updateSettings()"></label>
-                        <input type="range" id="hough_max_radius" min="10" max="150" step="1" value="40"
-                            oninput="updateSettings()">
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Sensitivity (Param 1)</span> <input type="number" id="val_hough_param1" value="40"
-                                step="1" class="val-input"
-                                onchange="syncSlider(this, 'hough_param1'); updateSettings()"></label>
-                        <input type="range" id="hough_param1" min="10" max="100" step="1" value="40"
-                            oninput="updateSettings()">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Sets the upper threshold for the internal Canny edge detector. Higher values result in fewer edges and less noise, but might miss faint disks.</p>
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Center Match (Param 2)</span> <input type="number" id="val_hough_param2" value="45"
-                                step="1" class="val-input"
-                                onchange="syncSlider(this, 'hough_param2'); updateSettings()"></label>
-                        <input type="range" id="hough_param2" min="10" max="100" step="1" value="45"
-                            oninput="updateSettings()">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Threshold for circle centers. Higher values are much stricter (perfect circles only), lower values find more circles but risk false positives.</p>
-                    </div>
-                    <div class="slider-container">
-                        <label><span>Tracking Deadzone (px)</span> <input type="number" id="val_hough_deadzone" value="3.0"
-                                step="0.5" class="val-input"
-                                onchange="syncSlider(this, 'hough_deadzone'); updateSettings()"></label>
-                        <input type="range" id="hough_deadzone" min="0" max="20" step="0.5" value="3.0"
-                            oninput="updateVal('hough_deadzone')">
-                        <p class="help-text" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; margin-bottom: 0;">Prevents token jitter. Movements smaller than this many pixels are completely ignored.</p>
-                    </div>
-                    <button class="secondary" onclick="resetDiskSettings()" style="margin-top: 10px;">Reset Disk
-                        Settings</button>
-                </div>
-
-                <div class="glass-panel">
-                    <h3>CCTag Detection</h3>
-                    <div id="settings_cctag" style="margin-top: 10px;">
-                        <div class="control-group" style="display: flex; gap: 10px; margin-top: 15px;">
-                            <div style="flex: 1;">
-                                <label style="display:block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Min Tag ID</label>
-                                <input type="number" id="cctag_min_id" value="0" min="0" max="255" class="val-input" style="width: 100%;" onchange="updateSettings()">
+                        <div class="field indent">
+                            <div class="field-row">
+                                <span class="field-label">Auto-Blank Delay (frames)
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How many frames a token must be missing before blackout triggers. At ~30fps, 30 frames is about 1 second. Raise this if brief occlusions, like a hand passing over the table, trigger blackout too eagerly.">i</button>
+                                </span>
+                                <input type="number" id="val_auto_blank_delay" value="10" step="1" min="0" max="150"
+                                    class="val-input" onchange="syncSlider(this, 'auto_blank_delay'); updateSettings()">
                             </div>
-                            <div style="flex: 1;">
-                                <label style="display:block; font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">Max Tag ID</label>
-                                <input type="number" id="cctag_max_id" value="31" min="0" max="255" class="val-input" style="width: 100%;" onchange="updateSettings()">
+                            <input type="range" id="auto_blank_delay" min="0" max="150" step="1" value="10"
+                                oninput="updateVal('auto_blank_delay')">
+                        </div>
+
+                        <label class="checkbox-row warning">
+                            <input type="checkbox" id="manual_blank" onchange="updateSettings()">
+                            <span>Force blackout (for calibration)
+                                <button type="button" class="info-icon" tabindex="0"
+                                    data-tip="Manually blacks out the projected map regardless of tracking state. Turn this on while you adjust tokens or calibration so players don't see what you're doing.">i</button>
+                            </span>
+                        </label>
+                    </div>
+                </details>
+
+                <details class="panel glass-panel" data-panel="image-adjust">
+                    <summary>
+                        <span>Image Adjustments</span>
+                        <span class="chevron"></span>
+                    </summary>
+                    <div class="panel-body">
+                        <p class="section-desc">
+                            Cosmetic corrections applied to the feed before detection runs. Most setups can leave
+                            these at their defaults — only touch them if the camera is misaligned, distorted, or
+                            the lighting is poor.
+                        </p>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Fisheye Correction
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Corrects lens curvature. If straight lines near the edge of the frame bulge outward, use a negative value. If they curve inward, use a positive value. Most cameras need 0.">i</button>
+                                </span>
+                                <input type="number" id="val_distortion_k1" value="0.0" step="0.01" class="val-input"
+                                    onchange="syncSlider(this, 'distortion_k1'); updateSettings()">
+                            </div>
+                            <input type="range" id="distortion_k1" min="-1" max="1" step="0.01" value="0.0"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Zoom
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Crops in on the center of the frame. Use this if the camera sees more background than just the play area.">i</button>
+                                </span>
+                                <input type="number" id="val_zoom" value="1.0" step="0.05" class="val-input"
+                                    onchange="syncSlider(this, 'zoom'); updateSettings()">
+                            </div>
+                            <input type="range" id="zoom" min="0.5" max="3.0" step="0.05" value="1.0"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Pan X
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Shifts the visible frame left/right. Use together with Zoom to re-center the play area after cropping in.">i</button>
+                                </span>
+                                <input type="number" id="val_offset_x" value="0.0" step="0.01" class="val-input"
+                                    onchange="syncSlider(this, 'offset_x'); updateSettings()">
+                            </div>
+                            <input type="range" id="offset_x" min="-1" max="1" step="0.01" value="0"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Pan Y
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Shifts the visible frame up/down. Use together with Zoom to re-center the play area after cropping in.">i</button>
+                                </span>
+                                <input type="number" id="val_offset_y" value="0.0" step="0.01" class="val-input"
+                                    onchange="syncSlider(this, 'offset_y'); updateSettings()">
+                            </div>
+                            <input type="range" id="offset_y" min="-1" max="1" step="0.01" value="0"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Rotation
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Rotates the whole feed. Use this if the camera is mounted upside-down or at an angle relative to the table.">i</button>
+                                </span>
+                                <input type="number" id="val_rotation" value="0" step="1" class="val-input"
+                                    onchange="syncSlider(this, 'rotation'); updateSettings()">
+                            </div>
+                            <input type="range" id="rotation" min="-180" max="180" step="1" value="0"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Exposure (Gamma)
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Brightens or darkens midtones without blowing out highlights or crushing shadows. Raise this if the image looks too dark under dim lighting.">i</button>
+                                </span>
+                                <input type="number" id="val_exposure" value="1.0" step="0.1" class="val-input"
+                                    onchange="syncSlider(this, 'exposure'); updateSettings()">
+                            </div>
+                            <input type="range" id="exposure" min="0.1" max="3.0" step="0.1" value="1.0"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Contrast
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Increases or decreases the difference between light and dark areas. Higher contrast can make token edges easier to detect, but too high washes out detail.">i</button>
+                                </span>
+                                <input type="number" id="val_contrast" value="1.0" step="0.1" class="val-input"
+                                    onchange="syncSlider(this, 'contrast'); updateSettings()">
+                            </div>
+                            <input type="range" id="contrast" min="0.1" max="3.0" step="0.1" value="1.0"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Brightness
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Shifts the overall lightness of the image up or down.">i</button>
+                                </span>
+                                <input type="number" id="val_brightness" value="0" step="1" class="val-input"
+                                    onchange="syncSlider(this, 'brightness'); updateSettings()">
+                            </div>
+                            <input type="range" id="brightness" min="-100" max="100" step="1" value="0"
+                                oninput="updateSettings()">
+                        </div>
+
+                        <button class="secondary" onclick="resetSettings()" style="margin-top: 10px;">Reset
+                            Adjustments</button>
+                    </div>
+                </details>
+
+                <details class="panel glass-panel" data-panel="disk-detection">
+                    <summary>
+                        <span>Token Detection &mdash; Base/Disk</span>
+                        <span class="chevron"></span>
+                    </summary>
+                    <div class="panel-body">
+                        <p class="section-desc">
+                            Controls how the camera finds each token's circular base, before it even tries to read
+                            the tag on top. Compare the size guide circles drawn on the video overlay to your
+                            physical tokens and match Min/Max Radius to them.
+                        </p>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Min Radius
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="The smallest pixel radius a token base is allowed to be. Compare to the size guide circles on the video preview and match to your smallest physical token.">i</button>
+                                </span>
+                                <input type="number" id="val_hough_min_radius" value="30" step="1" class="val-input"
+                                    onchange="syncSlider(this, 'hough_min_radius'); updateSettings()">
+                            </div>
+                            <input type="range" id="hough_min_radius" min="10" max="100" step="1" value="30"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Max Radius
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="The largest pixel radius a token base is allowed to be. Set it a little larger than your tokens actually measure, to allow for tokens sitting slightly closer to the lens.">i</button>
+                                </span>
+                                <input type="number" id="val_hough_max_radius" value="40" step="1" class="val-input"
+                                    onchange="syncSlider(this, 'hough_max_radius'); updateSettings()">
+                            </div>
+                            <input type="range" id="hough_max_radius" min="10" max="150" step="1" value="40"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Edge Sensitivity
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Internal edge-detection threshold. Higher values ignore faint or noisy edges but might miss dim/low-contrast token bases. Lower this if bases in dim areas aren't being found at all.">i</button>
+                                </span>
+                                <input type="number" id="val_hough_param1" value="40" step="1" class="val-input"
+                                    onchange="syncSlider(this, 'hough_param1'); updateSettings()">
+                            </div>
+                            <input type="range" id="hough_param1" min="10" max="100" step="1" value="40"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Shape Strictness
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How close to a perfect circle a shape must be to count as a token base. Higher values are stricter and reduce false positives; lower values find more shapes but risk mistaking other round objects for tokens.">i</button>
+                                </span>
+                                <input type="number" id="val_hough_param2" value="45" step="1" class="val-input"
+                                    onchange="syncSlider(this, 'hough_param2'); updateSettings()">
+                            </div>
+                            <input type="range" id="hough_param2" min="10" max="100" step="1" value="45"
+                                oninput="updateSettings()">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Tracking Deadzone (px)
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Ignores movements smaller than this many pixels, so a stationary token doesn't visibly jitter from camera noise. Raise this if idle tokens wobble on the map.">i</button>
+                                </span>
+                                <input type="number" id="val_hough_deadzone" value="3.0" step="0.5" class="val-input"
+                                    onchange="syncSlider(this, 'hough_deadzone'); updateSettings()">
+                            </div>
+                            <input type="range" id="hough_deadzone" min="0" max="20" step="0.5" value="3.0"
+                                oninput="updateVal('hough_deadzone')">
+                        </div>
+                        <button class="secondary" onclick="resetDiskSettings()" style="margin-top: 10px;">Reset to
+                            Defaults</button>
+                    </div>
+                </details>
+
+                <details class="panel glass-panel" data-panel="tag-id">
+                    <summary>
+                        <span>Token Detection &mdash; Tag ID</span>
+                        <span class="chevron"></span>
+                    </summary>
+                    <div class="panel-body">
+                        <p class="section-desc">
+                            Controls how confidently the system reads each token's printed ID tag (CCTag markers)
+                            once its base has already been found. This is the main place to tune if token IDs are
+                            being misread or keep flipping between two tokens.
+                        </p>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Tag ID Range
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="Detections outside this range are ignored — useful for filtering out false-positive reads that would otherwise create 'ghost' tokens. The bundled marker set covers IDs 0-31.">i</button>
+                                </span>
+                            </div>
+                            <div style="display: flex; gap: 10px;">
+                                <div style="flex: 1;">
+                                    <label class="field-label-sm" for="cctag_min_id">Min</label>
+                                    <input type="number" id="cctag_min_id" value="0" min="0" max="255"
+                                        class="val-input" style="width: 100%;" onchange="updateSettings()">
+                                </div>
+                                <div style="flex: 1;">
+                                    <label class="field-label-sm" for="cctag_max_id">Max</label>
+                                    <input type="number" id="cctag_max_id" value="31" min="0" max="255"
+                                        class="val-input" style="width: 100%;" onchange="updateSettings()">
+                                </div>
                             </div>
                         </div>
-                        <p class="help-text" style="margin-top: 5px;">Ignore tags outside this range (useful to prevent false positives from turning into ghost tokens). The bundled marker set covers IDs 0-31.</p>
-                        <div class="control-group" style="margin-top: 15px;">
-                            <label><span>Identification Strictness (0-10)</span> <input type="number" id="val_cctag_min_ident_proba"
-                                    value="4" step="1" min="0" max="10" class="val-input"
-                                    oninput="syncSlider(this, 'cctag_min_ident_proba'); updateSettings()"></label>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Identification Strictness (0-10)
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How confident a tag reading must be to count. '4' is a good default. Raise this toward 8-10 if tokens are being misidentified; lower it toward 0 if valid tags aren't being read at all (e.g. in poor lighting).">i</button>
+                                </span>
+                                <input type="number" id="val_cctag_min_ident_proba" value="4" step="1" min="0"
+                                    max="10" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_min_ident_proba'); updateSettings()">
+                            </div>
                             <input type="range" id="cctag_min_ident_proba" min="0" max="10" step="1" value="4"
                                 oninput="updateVal('cctag_min_ident_proba')">
-                            <p class="help-text">Filters false positives. '4' is standard. Higher values (e.g. 8) are strictly accurate but may miss faint tags. Lower values (e.g. 0) detect very faint tags but may misidentify them.</p>
                         </div>
-                        <div class="control-group" style="margin-top: 15px;">
-                            <label><span>ID Voting Decay</span> <input type="number" id="val_cctag_id_voting_decay"
-                                    value="0.95" step="0.01" min="0.5" max="0.99" class="val-input"
-                                    oninput="syncSlider(this, 'cctag_id_voting_decay'); updateSettings()"></label>
-                            <input type="range" id="cctag_id_voting_decay" min="0.5" max="0.99" step="0.01" value="0.95"
-                                oninput="updateVal('cctag_id_voting_decay')">
-                            <p class="help-text">Controls how long a token "remembers" its ID. High values (0.95+) prevent flickering and swapping by ignoring short-term hallucinations. Lower values make tokens recover faster if misidentified.</p>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">ID Voting Decay
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How long a token 'remembers' recent tag readings. Higher values (0.95+) smooth over brief bad reads and prevent flickering. Lower values make a token switch to a newly-read ID faster, at the cost of being more sensitive to noise.">i</button>
+                                </span>
+                                <input type="number" id="val_cctag_id_voting_decay" value="0.95" step="0.01" min="0.5"
+                                    max="0.99" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_id_voting_decay'); updateSettings()">
+                            </div>
+                            <input type="range" id="cctag_id_voting_decay" min="0.5" max="0.99" step="0.01"
+                                value="0.95" oninput="updateVal('cctag_id_voting_decay')">
                         </div>
-                        <div class="control-group" style="margin-top: 15px;">
-                            <label><span>ID Switch Confidence Margin</span> <input type="number" id="val_cctag_id_switch_margin"
-                                    value="1.5" step="0.1" min="1.0" max="3.0" class="val-input"
-                                    oninput="syncSlider(this, 'cctag_id_switch_margin'); updateSettings()"></label>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">ID Switch Confidence Margin
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How much more confident a new ID must be before it's allowed to replace a token's current ID. 1.0 switches instantly (flicker-prone). Higher values (1.5-2.0) require a clear, sustained lead before flipping — this is the main knob if IDs keep swapping between two nearby tokens.">i</button>
+                                </span>
+                                <input type="number" id="val_cctag_id_switch_margin" value="1.5" step="0.1" min="1.0"
+                                    max="3.0" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_id_switch_margin'); updateSettings()">
+                            </div>
                             <input type="range" id="cctag_id_switch_margin" min="1.0" max="3.0" step="0.1" value="1.5"
                                 oninput="updateVal('cctag_id_switch_margin')">
-                            <p class="help-text">How much more confident a new ID must be before it's allowed to replace a token's current ID. 1.0 = switches instantly (flicker-prone). Higher values (1.5-2.0) require a clear, sustained lead before flipping — this is the main knob for "ID keeps flipping" issues.</p>
                         </div>
-                        <div class="control-group" style="margin-top: 15px;">
-                            <label><span>Match Radius (×token r)</span> <input type="number" id="val_cctag_match_radius_mult"
-                                    value="2.0" step="0.1" min="0.5" max="5.0" class="val-input"
-                                    oninput="syncSlider(this, 'cctag_match_radius_mult'); updateSettings()"></label>
-                            <input type="range" id="cctag_match_radius_mult" min="0.5" max="5.0" step="0.1" value="2.0"
-                                oninput="updateVal('cctag_match_radius_mult')">
-                            <p class="help-text">How far a CCTag detection can be from a tracked circle to be considered the same token. Increase if tokens are large or the camera is at an angle.</p>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Match Radius (&times; token radius)
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How far a tag reading can be from a tracked base's center (as a multiple of that base's own radius) and still count as the same token. Increase this if the camera is at a steep angle, causing the tag to appear offset from the base center.">i</button>
+                                </span>
+                                <input type="number" id="val_cctag_match_radius_mult" value="2.0" step="0.1" min="0.5"
+                                    max="5.0" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_match_radius_mult'); updateSettings()">
+                            </div>
+                            <input type="range" id="cctag_match_radius_mult" min="0.5" max="5.0" step="0.1"
+                                value="2.0" oninput="updateVal('cctag_match_radius_mult')">
                         </div>
-                        <div class="control-group" style="margin-top: 15px;">
-                            <label><span>Ghosting Persistence</span> <input type="number" id="val_cctag_ghosting_frames"
-                                    value="30" step="1" min="1" max="90" class="val-input"
-                                    oninput="syncSlider(this, 'cctag_ghosting_frames'); updateSettings()"></label>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Ghosting Persistence (frames)
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How many frames a token stays tracked with its last known position/ID while its tag is temporarily hidden, e.g. by a hand or another token. 30 frames is roughly 1 second at 30fps.">i</button>
+                                </span>
+                                <input type="number" id="val_cctag_ghosting_frames" value="30" step="1" min="1"
+                                    max="90" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_ghosting_frames'); updateSettings()">
+                            </div>
                             <input type="range" id="cctag_ghosting_frames" min="1" max="90" step="1" value="30"
                                 oninput="updateVal('cctag_ghosting_frames')">
-                            <p class="help-text">Number of frames a token survives while physically hidden/occluded (e.g. by a hand). 30 frames is roughly 1 second. High values prevent tokens from vanishing during interaction.</p>
                         </div>
-                        <div class="control-group" style="margin-top: 15px;">
-                            <label><span>Fixed Family</span>
-                                <input type="text" id="cctag_family_display" class="val-input" value="3 Crowns"
-                                    readonly style="width: 100%; text-align: left; opacity: 0.85;">
-                            </label>
-                            <p class="help-text">This build uses CCTag (3 Crowns) for robust detection.</p>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Marker Type
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="This build is compiled for CCTag 3-crown markers only. Using a different marker family requires rebuilding the Docker image.">i</button>
+                                </span>
+                            </div>
+                            <input type="text" id="cctag_family_display" class="val-input" value="CCTag (3 Crowns)"
+                                readonly style="width: 100%; text-align: left; opacity: 0.85;">
                         </div>
                     </div>
-                </div>
+                </details>
 
-                <div class="glass-panel">
-                    <h3>Active Physical Tokens</h3>
-                    <div id="token-list" class="token-list">
-                        <p class="empty-msg" style="text-align: center; padding: 20px 0; color: var(--text-muted);">No
-                            tokens detected yet.</p>
+                <details class="panel glass-panel" data-panel="tokens" open>
+                    <summary><span>Active Physical Tokens</span><span class="chevron"></span></summary>
+                    <div class="panel-body">
+                        <div id="token-list" class="token-list">
+                            <p class="empty-msg" style="text-align: center; padding: 20px 0; color: var(--text-muted);">
+                                No tokens detected yet.</p>
+                        </div>
+                        <button class="secondary danger" onclick="resetTokens()"
+                            style="margin-top: 20px; width: 100%;">Reset All Names & Deletions</button>
                     </div>
-                    <button class="secondary danger" onclick="resetTokens()"
-                        style="margin-top: 20px; width: 100%;">Reset All Names & Deletions</button>
-                </div>
+                </details>
 
-                <div class="glass-panel">
-                    <h3>Calibration</h3>
-                    <p id="trackingStatus" class="status neutral" style="margin-bottom: 5px;">Tracking Active</p>
-                    <p id="calibStatus" class="status neutral">Corners marked: 0/4</p>
-                    <button class="secondary" onclick="resetCalibration()">Reset Corners</button>
-                    <hr style="margin: 15px 0">
-                    <h4 style="margin-top: 15px; font-size: 0.95rem; margin-bottom: 10px;">Camera Calibration (Fisheye)</h4>
-                    <p style="font-size: 0.85rem; color: var(--text-muted); margin: 0 0 12px 0;">Automatically correct lens distortion using a chessboard pattern.</p>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px;">
-                        <button class="secondary" onclick="caliStartCalib()" style="font-size: 0.85rem; padding: 8px;">Start Calib</button>
-                        <button class="secondary" onclick="caliAddFrame()" style="font-size: 0.85rem; padding: 8px;">Add Snapshot</button>
-                        <button class="secondary" onclick="caliFinishCalib()" style="font-size: 0.85rem; padding: 8px;">Finish</button>
-                        <button class="secondary" onclick="caliResetCalib()" style="font-size: 0.85rem; padding: 8px;">Reset</button>
-                        <button class="secondary" onclick="caliStatusCalib()" style="font-size: 0.85rem; padding: 8px;">Status</button>
-                        <button class="secondary" onclick="caliOpenDiag()" style="font-size: 0.85rem; padding: 8px;">Diagnostic</button>
-                    </div>
-                    <p id="caliMsg" class="status neutral" style="font-size: 0.8rem; margin: 8px 0 0 0; min-height: 20px;"></p>
-                    <div class="info-box">
-                        <strong>How to calibrate:</strong><br>
-                        Click the 4 corners of the projected grid on the video. The system needs this to map the
-                        physical angle to a flat digital grid.
-                    </div>
-                </div>
             </div>
         </div>
     </div>
 
-    <script>
-        // Set WebSocket URL helper
-        const wsUrlStr = `ws://${window.location.hostname}:5000`;
+    <div id="tooltipPopup"></div>
 
+    <script>
         // Setup Socket.IO for token updates
         const socket = io();
         socket.on('tokens_update', function (data) {
@@ -687,7 +991,7 @@
                 listEl.innerHTML = '<p class="empty-msg" style="text-align: center; padding: 20px 0; color: var(--text-muted);">No tokens detected yet.</p>';
                 return;
             }
-            
+
             // Remove empty message if present
             const emptyMsg = listEl.querySelector('.empty-msg');
             if (emptyMsg) emptyMsg.remove();
@@ -709,7 +1013,7 @@
 
             tokens.forEach(token => {
                 const name = token.alias || token.id;
-                
+
                 if (existingRows[token.id]) {
                     // Update existing row text if needed
                     const nameEl = existingRows[token.id].querySelector('.token-alias');
@@ -846,11 +1150,69 @@
                 });
         });
 
-        // --- Configuration Persistence & Sliders ---
+        // --- Collapsible panels: remember open/closed state per panel ---
+        function initPanels() {
+            document.querySelectorAll('details.panel[data-panel]').forEach(d => {
+                const key = 'panelOpen_' + d.dataset.panel;
+                const saved = localStorage.getItem(key);
+                if (saved !== null) d.open = saved === '1';
+                d.addEventListener('toggle', () => {
+                    localStorage.setItem(key, d.open ? '1' : '0');
+                });
+            });
+        }
+
+        // --- Info icon tooltips (hover for mouse, tap for touch, focus for keyboard) ---
+        function initTooltips() {
+            const tip = document.getElementById('tooltipPopup');
+            let owner = null;
+
+            function place(btn) {
+                tip.textContent = btn.dataset.tip;
+                tip.style.display = 'block';
+                const rect = btn.getBoundingClientRect();
+                const tw = tip.offsetWidth;
+                let left = rect.left + rect.width / 2 - tw / 2;
+                left = Math.max(8, Math.min(left, window.innerWidth - tw - 8));
+                tip.style.left = left + 'px';
+                tip.style.top = (rect.bottom + 8) + 'px';
+                owner = btn;
+            }
+
+            function hide() {
+                tip.style.display = 'none';
+                owner = null;
+            }
+
+            document.addEventListener('mouseover', (e) => {
+                const btn = e.target.closest('.info-icon');
+                if (btn) place(btn);
+            });
+            document.addEventListener('mouseout', (e) => {
+                const btn = e.target.closest('.info-icon');
+                if (btn) hide();
+            });
+            document.addEventListener('focusin', (e) => {
+                const btn = e.target.closest('.info-icon');
+                if (btn) place(btn);
+            });
+            document.addEventListener('focusout', (e) => {
+                const btn = e.target.closest('.info-icon');
+                if (btn) hide();
+            });
+            document.addEventListener('click', (e) => {
+                const btn = e.target.closest('.info-icon');
+                if (btn) {
+                    e.preventDefault();
+                    if (owner === btn) hide(); else place(btn);
+                } else if (owner) {
+                    hide();
+                }
+            });
+        }
 
         function syncSlider(inputEl, sliderId) {
             document.getElementById(sliderId).value = inputEl.value;
-            if (sliderId.includes('area')) updateAreaIndicators();
         }
 
         function updateVal(id) {
@@ -861,9 +1223,6 @@
                 else displayEl.innerText = val;
             }
             updateSettings();
-        }
-
-        function updateAreaIndicators() {
         }
 
         // Debounced settings sender — prevents flooding server with requests on slider drag
@@ -1119,9 +1478,10 @@
 
         // Load config on page load
         window.addEventListener('DOMContentLoaded', () => {
+            initPanels();
+            initTooltips();
             loadConfig();
             loadServerSettings();
-            updateAreaIndicators();
             // Query calibration status and update UI so user knows calibration is applied
             try { caliStatusCalib(); } catch (e) { /* ignore if not available */ }
         });
