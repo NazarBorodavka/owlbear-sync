@@ -156,6 +156,19 @@ BUILD_VERSION = os.environ.get('BUILD_VERSION', 'dev')
 BUILD_BRANCH = os.environ.get('BUILD_BRANCH', 'local')
 BUILD_COMMIT = os.environ.get('BUILD_COMMIT', 'unknown')
 
+@app.route('/api/build_info', methods=['GET'])
+def get_build_info():
+    """Public (no login) build identity, so the Owlbear extension — which
+    has no admin credentials of its own — can show which build it's talking
+    to. Lets you confirm the extension isn't running stale cached JS: if the
+    displayed commit doesn't match what you just pushed, the browser is
+    serving an old main.js, not the server."""
+    return jsonify({
+        "build_version": BUILD_VERSION,
+        "build_branch": BUILD_BRANCH,
+        "build_commit": BUILD_COMMIT,
+    })
+
 @app.after_request
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'

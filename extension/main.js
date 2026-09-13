@@ -9,6 +9,7 @@ import { io } from 'https://cdn.jsdelivr.net/npm/socket.io-client@4.8.3/dist/soc
 document.querySelector('#app').innerHTML = `
   <div class="container">
     <h2>Token Sync</h2>
+    <div id="build-info" class="build-info">Not connected</div>
     <div class="connection-box">
       <input type="text" id="ws-url" value="http://localhost:5000/" placeholder="Tracker URL (e.g. http://localhost:5000/)" />
       <button id="connect-btn">Connect</button>
@@ -45,7 +46,7 @@ document.querySelector('#app').innerHTML = `
           <option value="white">White</option>
         </select>
       </div>
-      <button id="test-blackout-btn" class="secondary">Test Blackout (3s)</button>
+      <button id="test-blackout-btn" class="secondary">Test Blackout (1s)</button>
     </div>
   </div>
 `
@@ -58,8 +59,16 @@ let currentPhysicalTokens = [];
 let virtualTokens = [];
 let isUpdating = false;
 let lastUpdateTime = 0;
-let THROTTLE_MS = 100; 
+let THROTTLE_MS = 100;
 let SYNC_THRESHOLD = 3;
+// The periodic tokens_update handler below calls updateBlackout() on every
+// tick using the tracker's real blank_screen state. Without a guard, that
+// would immediately stomp on a manual "Test Blackout" click — the overlay
+// would get added, then removed again on the very next tick (as little as
+// ~100ms later), which is why the test only ever flashed for a few frames
+// instead of holding for its full duration.
+let manualBlackoutUntil = 0; // Date.now()-based deadline; 0 = no active override
+let lastServerBlankScreen = false;
 
 OBR.onReady(async () => {
   isReady = true;
@@ -86,9 +95,25 @@ OBR.onReady(async () => {
 
   // Add Test Blackout listener
   document.getElementById('test-blackout-btn').addEventListener('click', async () => {
-    console.log("Testing blackout...");
+    const TEST_DURATION_MS = 1000;
+    manualBlackoutUntil = Date.now() + TEST_DURATION_MS;
     await updateBlackout(true);
-    setTimeout(() => updateBlackout(false), 3000);
+    setTimeout(async () => {
+      manualBlackoutUntil = 0;
+      // Hand control back to whatever the tracker actually wants right now,
+      // rather than unconditionally turning the overlay off — if a real
+      // blackout started during the test window, this keeps it on.
+      await updateBlackout(lastServerBlankScreen);
+    }, TEST_DURATION_MS);
+  });
+
+  // Re-apply color immediately when changed, so switching the dropdown has
+  // a visible effect right away instead of waiting for the next
+  // activate/deactivate transition (which might not happen for a while).
+  document.getElementById('blackout-color').addEventListener('change', async () => {
+    if (Date.now() < manualBlackoutUntil || lastServerBlankScreen) {
+      await updateBlackout(true);
+    }
   });
 
   // UI Listeners for Sync Performance
@@ -110,12 +135,30 @@ document.getElementById('connect-btn').addEventListener('click', () => {
 });
 
 
+// Shows which build of the tracker (and by extension, which build of this
+// extension's own served files, since both are baked into the same Docker
+// image) is actually running — so a mismatch against what you just pushed
+// tells you the browser is holding onto stale cached JS, not the server.
+function fetchBuildInfo(url) {
+  const buildEl = document.getElementById('build-info');
+  fetch(new URL('api/build_info', url).toString())
+    .then(res => res.json())
+    .then(info => {
+      const commit = (info.build_commit || 'unknown').substring(0, 7);
+      buildEl.innerText = `tracker: ${info.build_branch || 'unknown'} · v${info.build_version || 'dev'} · ${commit}`;
+    })
+    .catch(() => {
+      buildEl.innerText = 'Build info unavailable';
+    });
+}
+
 function connectSocketIO(url) {
   if (socket) socket.disconnect();
-  
+
   document.getElementById('status').innerText = "Connecting...";
   document.getElementById('status').className = "status ready";
-  
+  fetchBuildInfo(url);
+
   try {
     socket = io(url);
     
@@ -141,6 +184,7 @@ function connectSocketIO(url) {
       try {
         const tokens = data.tokens || [];
         const blankScreen = data.blank_screen || false;
+        lastServerBlankScreen = blankScreen;
 
         // Fetch items and viewport details concurrently to reduce latency
         const [items, screenWidth, screenHeight] = await Promise.all([
@@ -149,9 +193,12 @@ function connectSocketIO(url) {
           OBR.viewport.getHeight()
         ]);
 
-        // 1. Prioritize blackout (Critical for projector setup)
-        await updateBlackout(blankScreen, items);
-        
+        // 1. Prioritize blackout (Critical for projector setup) — unless a
+        // manual test is currently overriding it (see test-blackout-btn).
+        if (Date.now() >= manualBlackoutUntil) {
+          await updateBlackout(blankScreen, items);
+        }
+
         // 2. Sync positions
         await syncTokensWithOwlbear(tokens, items, screenWidth, screenHeight);
         
@@ -377,10 +424,15 @@ async function updateBlackout(active, items) {
       console.log("Removing blackout overlay...");
       await OBR.scene.items.deleteItems(["blackout-overlay"]);
     } else if (active && hasItem) {
-      // If active and exists, ensure color matches (in case it was changed)
+      // If active and exists, ensure color matches (in case it was changed).
+      // Color lives at item.style.fillColor, not item.fillColor — the SDK's
+      // Shape type has no top-level fillColor property, so setting it there
+      // silently did nothing. This was the actual "always black" bug: once
+      // an overlay existed, its color could never be changed again, only
+      // whatever it was first created with.
       await OBR.scene.items.updateItems(["blackout-overlay"], (items) => {
         for (let item of items) {
-          item.fillColor = color;
+          item.style.fillColor = color;
         }
       });
     }

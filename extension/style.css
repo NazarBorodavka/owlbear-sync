@@ -19,9 +19,16 @@ body {
 
 h2 {
   margin-top: 0;
-  margin-bottom: 16px;
+  margin-bottom: 4px;
   font-size: 1.2rem;
   color: #fff;
+}
+
+.build-info {
+  font-family: monospace;
+  font-size: 0.72rem;
+  color: #888;
+  margin-bottom: 12px;
 }
 
 h3 {
