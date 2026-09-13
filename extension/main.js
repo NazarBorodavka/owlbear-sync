@@ -42,8 +42,8 @@ document.querySelector('#app').innerHTML = `
       <div class="control-row">
         <label>Color:</label>
         <select id="blackout-color">
-          <option value="black">Black</option>
-          <option value="white">White</option>
+          <option value="#000000">Black</option>
+          <option value="#ffffff">White</option>
         </select>
       </div>
       <button id="test-blackout-btn" class="secondary">Test Blackout (1s)</button>
@@ -397,39 +397,63 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
   }
 }
 
+// Remembers the scene's real fog color from just before we first touch it,
+// so turning blackout off can restore it — see the note below on why we
+// have to touch scene.fog at all.
+let savedFogColor = null;
+
 async function updateBlackout(active, items) {
   try {
-    const color = document.getElementById('blackout-color').value || "black";
+    // Hex, not the CSS keyword "black"/"white": nothing in the SDK actually
+    // validates this string (checked the bundled source — it's a raw
+    // assignment), but the Owlbear app's own color handling almost
+    // certainly expects hex like a native color picker would produce, and
+    // silently falls back to a default (black) on anything else.
+    const color = document.getElementById('blackout-color').value || "#000000";
     if (!items) {
       items = await OBR.scene.items.getItems();
     }
     const hasItem = items.some(i => i.id === "blackout-overlay");
 
     if (active && !hasItem) {
-      console.log(`Adding ${color} blackout overlay...`);
+      // Confirmed by testing: a shape on the "FOG" layer is rendered using
+      // the scene's shared fog color (OBR.scene.fog), not its own
+      // style.fillColor — the SDK type technically has fillColor on Shape,
+      // but the app ignores it for this layer. FOG is still the right layer
+      // to use (it's the one confirmed to stack above tokens/map to
+      // actually hide them), so we drive the real fog color instead of
+      // fighting it. Saved/restored around the blackout's lifetime so this
+      // doesn't permanently change fog color for anyone using OBR's actual
+      // dynamic fog-of-war for unrelated reasons.
+      if (savedFogColor === null) {
+        savedFogColor = await OBR.scene.fog.getColor();
+      }
+      await OBR.scene.fog.setColor(color);
+
       const item = buildShape()
         .shapeType("RECTANGLE")
-        .width(500000) 
+        .width(500000)
         .height(500000)
         .position({ x: -250000, y: -250000 })
         .fillColor(color)
         .fillOpacity(1.0)
         .strokeWidth(0)
-        .layer("FOG") 
+        .layer("FOG")
         .locked(true)
         .id("blackout-overlay")
         .build();
       await OBR.scene.items.addItems([item]);
     } else if (!active && hasItem) {
-      console.log("Removing blackout overlay...");
       await OBR.scene.items.deleteItems(["blackout-overlay"]);
+      if (savedFogColor !== null) {
+        await OBR.scene.fog.setColor(savedFogColor);
+        savedFogColor = null;
+      }
     } else if (active && hasItem) {
-      // If active and exists, ensure color matches (in case it was changed).
-      // Color lives at item.style.fillColor, not item.fillColor — the SDK's
-      // Shape type has no top-level fillColor property, so setting it there
-      // silently did nothing. This was the actual "always black" bug: once
-      // an overlay existed, its color could never be changed again, only
-      // whatever it was first created with.
+      // Already active — just the color changed. Update both the real fog
+      // color (what's actually visible) and the shape's own style (kept in
+      // sync for correctness even though the app doesn't render it here).
+      await OBR.scene.fog.setColor(color);
       await OBR.scene.items.updateItems(["blackout-overlay"], (items) => {
         for (let item of items) {
           item.style.fillColor = color;
