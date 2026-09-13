@@ -494,6 +494,15 @@ def get_video_stream():
             
         fail_count = 0
 
+        # Phase timing: accumulated per 10s window and logged alongside the
+        # [Capture]/[Perf] fps lines, so a single log dump can show exactly
+        # which phase the ~333ms/frame is going into instead of guessing.
+        if not hasattr(get_video_stream, "_phase_times"):
+            get_video_stream._phase_times = {"pre": 0.0, "hough": 0.0, "cctag": 0.0, "render": 0.0, "lock": 0.0}
+            get_video_stream._phase_last_report = time.time()
+            get_video_stream._phase_frames = 0
+        _t_pre_start = time.time()
+
         # Preprocessing: Apply Distortion Correction, Zoom, Pan, Rotation, Colors
         h, w = frame.shape[:2]
         # Store raw frame for diagnostic streaming (before any processing)
@@ -578,7 +587,10 @@ def get_video_stream():
             mask = np.zeros_like(gray)
             cv2.fillPoly(mask, [np.int32(src_pts)], 255)
             gray = cv2.bitwise_and(gray, mask)
-        
+
+        get_video_stream._phase_times["pre"] += time.time() - _t_pre_start
+        _t_hough_start = time.time()
+
         # --- Optimized Circle Detection (Downsampled) ---
         # Always run disk detection so AprilTag mode can be constrained to disks.
         circles = None
@@ -681,6 +693,9 @@ def get_video_stream():
                 t["y"] += t["vy"]
                 if t["missed"] > cctag_ghosting_frames:
                     del get_video_stream.tracked_tokens[token_id]
+
+        get_video_stream._phase_times["hough"] += time.time() - _t_hough_start
+        _t_cctag_start = time.time()
 
         # --- SLOW RECOGNIZER: Full-Frame CCTag ---
         # CRITICAL INSIGHT from diagnostics:
@@ -822,6 +837,9 @@ def get_video_stream():
             gray_copy = gray.copy()  # Must copy; camera thread overwrites gray continuously
             get_video_stream.cctag_future = cctag_executor.submit(_detect_full_frame, gray_copy)
 
+        get_video_stream._phase_times["cctag"] += time.time() - _t_cctag_start
+        _t_render_start = time.time()
+
         # --- Render and Prepare Payloads ---
         detected_tokens = []
         
@@ -932,28 +950,39 @@ def get_video_stream():
                 if corner_idx == 4 and i == 3:
                     cv2.line(frame, (int(src_pts[3][0]), int(src_pts[3][1])), (int(src_pts[0][0]), int(src_pts[0][1])), (255, 0, 0), 2)
 
+        get_video_stream._phase_times["render"] += time.time() - _t_render_start
+        _t_lock_start = time.time()
+
         with frame_lock:
             current_frame = frame.copy()
 
-        # Processing-loop throughput, separate from the capture thread's own
-        # fps log: capture has already been confirmed to hit real-time fps
-        # independently, so if THIS number is much lower, the bottleneck is
-        # the per-frame image processing/emit work above, not RTSP ingest.
-        if not hasattr(get_video_stream, "_perf_frames"):
-            get_video_stream._perf_frames = 0
-            get_video_stream._perf_last_report = time.time()
-        get_video_stream._perf_frames += 1
-        _perf_elapsed = time.time() - get_video_stream._perf_last_report
+        get_video_stream._phase_times["lock"] += time.time() - _t_lock_start
+
+        # Processing-loop throughput plus a per-phase breakdown, so a single
+        # log dump shows exactly where frame time is going instead of
+        # needing another round of guessing. Capture has already been
+        # confirmed to hit real-time fps independently (see [Capture]
+        # above), so if this fps is much lower, the bottleneck is
+        # necessarily one of the phases below.
+        get_video_stream._phase_frames += 1
+        _perf_elapsed = time.time() - get_video_stream._phase_last_report
         if _perf_elapsed >= 10.0:
-            _fps = get_video_stream._perf_frames / _perf_elapsed
+            _fps = get_video_stream._phase_frames / _perf_elapsed
+            _n = max(1, get_video_stream._phase_frames)
+            _pt = get_video_stream._phase_times
             print(
-                f"[Perf] Processing loop ~{_fps:.1f} fps ({get_video_stream._perf_frames} frames in {_perf_elapsed:.1f}s). "
-                f"Compare to the [Capture] line above — if capture is healthy but this is much lower, "
-                f"the bottleneck is per-frame processing/socketio.emit, not the RTSP feed.",
+                f"[Perf] Processing loop ~{_fps:.1f} fps ({get_video_stream._phase_frames} frames in {_perf_elapsed:.1f}s). "
+                f"Per-frame breakdown — preprocess(undistort/warp/color): {_pt['pre']/_n*1000:.0f}ms, "
+                f"hough+tracking: {_pt['hough']/_n*1000:.0f}ms, "
+                f"cctag submit/collect (not the 300ms detection itself, that's on a separate thread): {_pt['cctag']/_n*1000:.0f}ms, "
+                f"render/draw/emit: {_pt['render']/_n*1000:.0f}ms, "
+                f"lock+copy: {_pt['lock']/_n*1000:.0f}ms",
                 flush=True,
             )
-            get_video_stream._perf_frames = 0
-            get_video_stream._perf_last_report = time.time()
+            get_video_stream._phase_frames = 0
+            get_video_stream._phase_last_report = time.time()
+            for _k in get_video_stream._phase_times:
+                get_video_stream._phase_times[_k] = 0.0
 
         # Throttle loop to maintain ~30 FPS target
         elapsed = time.time() - loop_start
