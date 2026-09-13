@@ -12,9 +12,16 @@ import os
 #    That's a fixed ~5s handicap baked in at connection time that a
 #    real-time decoder can never claw back, since it can only consume
 #    incoming data at the same rate the camera produces it. RTSP doesn't
-#    need this: codec parameters are already negotiated via SDP during the
-#    RTSP handshake, so there's nothing to "analyze" — safe to cut both
-#    values to nearly nothing.
+#    need the full 5s/5MB: codec parameters are already negotiated via SDP
+#    during the RTSP handshake. But cutting these all the way to 0/32 bytes
+#    (an earlier version of this) turned out too aggressive in practice —
+#    that's barely enough data to detect stream parameters under any real
+#    jitter, and when the probe comes up short (worse network conditions,
+#    a reconnect at an inopportune moment) the stream either fails to open
+#    or "opens" but never produces a decodable frame, which looked like the
+#    feed randomly not showing up / erroring to connect. 100ms/32KB below
+#    is a middle ground: still a tiny fraction of FFmpeg's defaults, but
+#    enough headroom to reliably parse SPS/PPS under normal jitter.
 # 2. fflags/flags low-latency hints: tell FFmpeg not to hold frames back
 #    trying to smooth over network jitter, which is the right tradeoff for
 #    a live feed (a slightly rougher feed beats a smooth-but-stale one).
@@ -34,7 +41,7 @@ import os
 # in docker-compose.yml) if a specific camera needs different settings.
 os.environ.setdefault(
     'OPENCV_FFMPEG_CAPTURE_OPTIONS',
-    'rtsp_transport;udp|fflags;nobuffer|flags;low_delay|analyzeduration;0|probesize;32'
+    'rtsp_transport;udp|fflags;nobuffer|flags;low_delay|analyzeduration;100000|probesize;32768'
 )
 
 import cv2
@@ -79,6 +86,7 @@ class IPCameraCapture:
         self.cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         # Use deque with maxlen=1 for atomic "latest frame" access
         self.frame_buffer = collections.deque(maxlen=1)
+        self.last_frame_time = 0
         self.is_running = True
 
         # NOTE: CAP_PROP_BUFFERSIZE is not honored by OpenCV's FFmpeg backend
@@ -109,6 +117,7 @@ class IPCameraCapture:
                 time.sleep(0.1)
                 continue
             self.frame_buffer.append(frame)
+            self.last_frame_time = time.time()
 
             frame_count += 1
             now = time.time()
@@ -126,7 +135,13 @@ class IPCameraCapture:
                 last_report = now
 
     def read(self):
-        if not self.frame_buffer:
+        # Treat the buffered frame as stale (stream almost certainly dead)
+        # once nothing new has arrived for a few seconds, rather than
+        # reporting success forever off a frozen last frame. Without this,
+        # a stream that dies mid-session never trips the caller's fail_count
+        # reconnect logic — this deque always has *a* frame to hand back
+        # even when the actual RTSP connection is long gone.
+        if not self.frame_buffer or (time.time() - self.last_frame_time) > 5.0:
             return False, None
         return True, self.frame_buffer[0]
 

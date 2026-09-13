@@ -31,6 +31,20 @@ jobs:
         env:
           OWNER: "${{ github.repository_owner }}"
 
+      # Turns the raw, ever-growing run number (currently in the hundreds)
+      # into a cleaner "1.05"-style display version: major = run_number/100,
+      # minor = run_number%100, zero-padded to 2 digits. This only changes
+      # what's *displayed* (BUILD_VERSION shown in the dashboard/extension,
+      # and the app store's x-casaos.version) — the actual GHCR image tag
+      # stays the plain run-number-based master-N below, since that just
+      # needs to be unique and match what the store's compose file points
+      # at, not look clean.
+      - name: Compute display version
+        run: |
+          N=${{ github.run_number }}
+          printf -v VER "%d.%02d" $((N/100)) $((N%100))
+          echo "DISPLAY_VERSION=$VER" >> "$GITHUB_ENV"
+
       # Derives image tags from the branch that triggered the build, so every
       # branch gets its own "latest for that branch" tag (e.g. `master`,
       # `runetag`) plus a per-build tag with the run number baked in
@@ -59,7 +73,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BUILD_VERSION=${{ github.run_number }}
+            BUILD_VERSION=${{ env.DISPLAY_VERSION }}
             BUILD_BRANCH=${{ github.ref_name }}
             BUILD_COMMIT=${{ github.sha }}
 
@@ -84,4 +98,4 @@ jobs:
           token: ${{ secrets.STORE_DISPATCH_TOKEN }}
           repository: NazarBorodavka/owlbear-sync-store
           event-type: new-image
-          client-payload: '{"tag": "master-${{ github.run_number }}", "version": "${{ github.run_number }}", "date": "${{ env.BUILD_DATE }}"}'
+          client-payload: '{"tag": "master-${{ github.run_number }}", "version": "${{ env.DISPLAY_VERSION }}", "date": "${{ env.BUILD_DATE }}"}'
