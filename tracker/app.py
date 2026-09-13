@@ -1342,10 +1342,10 @@ if __name__ == '__main__':
 
     print("Starting server on port 5000...")
     # Eventlet is the async mode recommended for SocketIO in production
-    # threaded=True is required here: /video_feed is a long-lived streaming
-    # response, and without a threaded server every other request (settings
-    # changes, calibration clicks, the token list) queues up behind it and
-    # only gets served whenever the stream generator happens to yield —
-    # which is exactly the "UI updates slowly while the feed is open"
-    # symptom this fixes.
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True, threaded=True)
+    # Flask-SocketIO's 'threading' async_mode (the default here) already runs
+    # the dev server with threaded=True internally — passing it again raises
+    # "got multiple values for keyword argument 'threaded'". Concurrency for
+    # /video_feed (a long-lived streaming response) alongside quick requests
+    # like settings changes is therefore already handled; the lock-contention
+    # fix in generate_frames()/etc. above is what actually needed changing.
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
