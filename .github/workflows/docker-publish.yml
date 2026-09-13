@@ -62,3 +62,26 @@ jobs:
             BUILD_VERSION=${{ github.run_number }}
             BUILD_BRANCH=${{ github.ref_name }}
             BUILD_COMMIT=${{ github.sha }}
+
+      - name: Compute build date
+        if: github.ref == 'refs/heads/master'
+        run: echo "BUILD_DATE=$(date -u +%F)" >> "$GITHUB_ENV"
+
+      # Tells the separate owlbear-sync-store repo about this new build so it
+      # can bump its pinned image tag and trigger a store rebuild — this is
+      # what makes ZimaOS/CasaOS show "Update available" instead of needing a
+      # manual uninstall/reinstall. Only fires for master (the branch that
+      # actually reaches the app store). Needs a fine-grained PAT scoped to
+      # owlbear-sync-store saved as the STORE_DISPATCH_TOKEN secret, since the
+      # default GITHUB_TOKEN can't reach across repos (see that repo's
+      # README). continue-on-error so a missing/expired token there doesn't
+      # fail the image publish itself.
+      - name: Notify app store of new build
+        if: github.ref == 'refs/heads/master'
+        continue-on-error: true
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.STORE_DISPATCH_TOKEN }}
+          repository: NazarBorodavka/owlbear-sync-store
+          event-type: new-image
+          client-payload: '{"tag": "master-${{ github.run_number }}", "version": "${{ github.run_number }}", "date": "${{ env.BUILD_DATE }}"}'

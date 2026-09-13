@@ -1,26 +1,40 @@
 import os
 
 # Must be set before the first cv2.VideoCapture() call — OpenCV's FFmpeg
-# backend reads this env var at stream-open time. Without it, FFmpeg
-# internally buffers several seconds of video to smooth out network jitter,
-# which is exactly wrong for a live tracking feed.
+# backend reads this env var at stream-open time. These address two
+# independent, generic sources of RTSP latency that apply to any IP camera,
+# not just a specific model:
 #
-# udp, not tcp: Tapo cameras have well-documented RTSP-over-TCP reliability
-# problems (stalls/dropped frames), and TCP's retransmit-and-block behavior
-# means one delayed packet stalls everything queued behind it — a first
-# attempt at this used tcp and made both latency and effective fps
-# measurably worse on this exact camera. udp just drops a bad packet and
-# moves on, which is what you want for a live feed on a local network where
-# NAT traversal isn't a concern anyway.
+# 1. analyzeduration/probesize: FFmpeg's defaults (5,000,000 microseconds /
+#    5MB) tell it to spend up to 5 SECONDS reading and analyzing the stream
+#    before it considers playback "started" — every frame received during
+#    that window is queued internally and played back before anything live.
+#    That's a fixed ~5s handicap baked in at connection time that a
+#    real-time decoder can never claw back, since it can only consume
+#    incoming data at the same rate the camera produces it. RTSP doesn't
+#    need this: codec parameters are already negotiated via SDP during the
+#    RTSP handshake, so there's nothing to "analyze" — safe to cut both
+#    values to nearly nothing.
+# 2. fflags/flags low-latency hints: tell FFmpeg not to hold frames back
+#    trying to smooth over network jitter, which is the right tradeoff for
+#    a live feed (a slightly rougher feed beats a smooth-but-stale one).
 #
-# Override via the environment (e.g. `environment:` in docker-compose.yml)
-# if this doesn't suit your network — e.g. to go back to tcp, or to try
-# `rtsp_transport;udp|fflags;nobuffer|flags;low_delay|max_delay;500000` if
-# udp alone is still choppy (max_delay in microseconds gives FFmpeg a little
-# jitter tolerance instead of none).
+# rtsp_transport is left as udp: TCP's retransmit-and-block behavior means
+# one delayed/lost packet stalls everything queued behind it, whereas udp
+# just drops the bad packet and moves on — generally the better choice for
+# a live feed on a local network where NAT traversal isn't a concern.
+#
+# If decode still can't keep up in real time with whatever camera/resolution
+# ends up connected (a weak CPU decoding 4K H264 being the likely failure
+# mode), no amount of these flags will help — the fix at that point is
+# lowering the camera's own configured resolution/bitrate/framerate (in the
+# camera's admin UI) until decode time per frame is comfortably under the
+# frame interval, since a live stream can never be read faster than it's
+# produced. Override any of this via the environment (e.g. `environment:`
+# in docker-compose.yml) if a specific camera needs different settings.
 os.environ.setdefault(
     'OPENCV_FFMPEG_CAPTURE_OPTIONS',
-    'rtsp_transport;udp|fflags;nobuffer|flags;low_delay'
+    'rtsp_transport;udp|fflags;nobuffer|flags;low_delay|analyzeduration;0|probesize;32'
 )
 
 import cv2
@@ -78,12 +92,38 @@ class IPCameraCapture:
         self.thread.start()
 
     def _reader(self):
+        # A live RTSP stream can only ever be read as fast as the camera
+        # produces it — cap.read() blocks on the network+decode for each
+        # frame. If that combined cost exceeds the camera's actual frame
+        # interval, this loop falls permanently behind (delay grows and
+        # never recovers, since there's no way to read "faster than
+        # real-time"). This periodic log makes that measurable instead of
+        # guessed at: compare it to the fps configured in the camera's own
+        # admin UI. Applies to any camera/resolution, which matters more
+        # once a higher-resolution stream means more decode work per frame.
+        frame_count = 0
+        last_report = time.time()
         while self.is_running:
             ret, frame = self.cap.read()
             if not ret:
                 time.sleep(0.1)
                 continue
             self.frame_buffer.append(frame)
+
+            frame_count += 1
+            now = time.time()
+            elapsed = now - last_report
+            if elapsed >= 10.0:
+                fps = frame_count / elapsed
+                print(
+                    f"[Capture] Decoding ~{fps:.1f} fps ({frame_count} frames in {elapsed:.1f}s). "
+                    f"If this is well below the camera's configured fps, decode can't keep up in "
+                    f"real time and the feed will keep drifting further behind live — lower the "
+                    f"camera's own resolution/bitrate/fps until this matches.",
+                    flush=True,
+                )
+                frame_count = 0
+                last_report = now
 
     def read(self):
         if not self.frame_buffer:
