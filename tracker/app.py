@@ -3,15 +3,24 @@ import os
 # Must be set before the first cv2.VideoCapture() call — OpenCV's FFmpeg
 # backend reads this env var at stream-open time. Without it, FFmpeg
 # internally buffers several seconds of video to smooth out network jitter,
-# which is exactly wrong for a live tracking feed: it's the main cause of
-# the multi-second lag between real token movement and what shows up here.
-# tcp transport trades a little latency for much better reliability over
-# WiFi than udp (dropped/reordered UDP packets otherwise show up as stalls
-# or corrupted frames, which looks like "low fps"). Override via the
-# environment (e.g. in docker-compose.yml) if your network needs udp.
+# which is exactly wrong for a live tracking feed.
+#
+# udp, not tcp: Tapo cameras have well-documented RTSP-over-TCP reliability
+# problems (stalls/dropped frames), and TCP's retransmit-and-block behavior
+# means one delayed packet stalls everything queued behind it — a first
+# attempt at this used tcp and made both latency and effective fps
+# measurably worse on this exact camera. udp just drops a bad packet and
+# moves on, which is what you want for a live feed on a local network where
+# NAT traversal isn't a concern anyway.
+#
+# Override via the environment (e.g. `environment:` in docker-compose.yml)
+# if this doesn't suit your network — e.g. to go back to tcp, or to try
+# `rtsp_transport;udp|fflags;nobuffer|flags;low_delay|max_delay;500000` if
+# udp alone is still choppy (max_delay in microseconds gives FFmpeg a little
+# jitter tolerance instead of none).
 os.environ.setdefault(
     'OPENCV_FFMPEG_CAPTURE_OPTIONS',
-    'rtsp_transport;tcp|fflags;nobuffer|flags;low_delay'
+    'rtsp_transport;udp|fflags;nobuffer|flags;low_delay'
 )
 
 import cv2
