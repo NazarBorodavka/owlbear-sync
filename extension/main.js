@@ -6,8 +6,6 @@
 import OBR, { buildShape } from 'https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm'
 import { io } from 'https://cdn.jsdelivr.net/npm/socket.io-client@4.8.3/dist/socket.io.esm.min.js'
 
-console.log("[TokenSync] Extension loaded — v4 (debug)");
-
 document.querySelector('#app').innerHTML = `
   <div class="container">
     <h2>Token Sync</h2>
@@ -58,8 +56,6 @@ let tokenMapping = {}; // physicalId -> virtualItemId
 let assignedNames = {}; // physicalId -> virtualName (Used to re-sync across scenes)
 let currentPhysicalTokens = [];
 let virtualTokens = [];
-let blackoutItemId = null;
-let filterItemId = null;
 let isUpdating = false;
 let lastUpdateTime = 0;
 let THROTTLE_MS = 100; 
@@ -145,18 +141,14 @@ function connectSocketIO(url) {
       try {
         const tokens = data.tokens || [];
         const blankScreen = data.blank_screen || false;
-        
-        console.log(`[Sync] Received ${tokens.length} tokens, mappings: ${JSON.stringify(tokenMapping)}`);
-        
+
         // Fetch items and viewport details concurrently to reduce latency
         const [items, screenWidth, screenHeight] = await Promise.all([
           OBR.scene.items.getItems(),
           OBR.viewport.getWidth(),
           OBR.viewport.getHeight()
         ]);
-        
-        console.log(`[Sync] OBR: ${items.length} scene items, viewport ${screenWidth}x${screenHeight}`);
-        
+
         // 1. Prioritize blackout (Critical for projector setup)
         await updateBlackout(blankScreen, items);
         
@@ -298,29 +290,21 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
   // Run all inverseTransformPoint queries concurrently
   const transformPromises = physicalTokens.map(async (pt) => {
     const virtualId = tokenMapping[pt.id];
-    if (!virtualId) {
-      console.log(`[Sync] ${pt.id}: no mapping, skipping`);
-      return null;
-    }
-    
+    if (!virtualId) return null;
+
     const targetItem = items.find(item => item.id === virtualId);
-    if (!targetItem) {
-      console.log(`[Sync] ${pt.id}: mapped to ${virtualId} but item NOT FOUND in scene`);
-      return null;
-    }
-    
+    if (!targetItem) return null;
+
     // Map normalized [0,1] token coordinates directly to the Owlbear Viewport pixel size
     const screenPoint = {
       x: pt.x * screenWidth,
       y: pt.y * screenHeight
     };
-    
+
     // Convert physical screen pixels exactly to the underlying map grid coordinates!
     const scenePoint = await OBR.viewport.inverseTransformPoint(screenPoint);
-    
-    const dist = Math.sqrt(Math.pow(targetItem.position.x - scenePoint.x, 2) + Math.pow(targetItem.position.y - scenePoint.y, 2));
 
-    console.log(`[Sync] ${pt.id} → screen(${screenPoint.x.toFixed(0)},${screenPoint.y.toFixed(0)}) → scene(${scenePoint.x.toFixed(0)},${scenePoint.y.toFixed(0)}) | current(${targetItem.position.x.toFixed(0)},${targetItem.position.y.toFixed(0)}) | dist=${dist.toFixed(1)} threshold=${SYNC_THRESHOLD}`);
+    const dist = Math.sqrt(Math.pow(targetItem.position.x - scenePoint.x, 2) + Math.pow(targetItem.position.y - scenePoint.y, 2));
 
     // Check if name needs updating
     let needsNameUpdate = false;
@@ -328,27 +312,24 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
       if (targetItem.text && targetItem.text.plainText !== pt.alias) needsNameUpdate = true;
       else if (!targetItem.text && targetItem.name !== pt.alias) needsNameUpdate = true;
     }
-    
+
     // Update if moved more than threshold or needs name sync
     if (dist > SYNC_THRESHOLD || needsNameUpdate) {
-      console.log(`[Sync] ${pt.id}: WILL UPDATE (dist=${dist.toFixed(1)} > ${SYNC_THRESHOLD} || nameUpdate=${needsNameUpdate})`);
       return {
         id: targetItem.id,
         position: { x: scenePoint.x, y: scenePoint.y },
         alias: pt.alias
       };
     }
-    console.log(`[Sync] ${pt.id}: below threshold, skipping`);
     return null;
   });
-  
+
   const results = await Promise.all(transformPromises);
   results.forEach(res => {
     if (res) itemsToUpdate.push(res);
   });
-  
+
   if (itemsToUpdate.length > 0) {
-    console.log(`[Sync] Updating ${itemsToUpdate.length} items in OBR...`);
     await OBR.scene.items.updateItems(
       itemsToUpdate.map(i => i.id),
       (items) => {
@@ -366,7 +347,6 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
         }
       }
     );
-    console.log(`[Sync] Update complete.`);
   }
 }
 
