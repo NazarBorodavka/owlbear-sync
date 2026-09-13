@@ -3,3 +3,10 @@ Flask==3.0.2
 Flask-SocketIO==5.3.6
 Flask-HTTPAuth==4.8.0
 numpy>=1.24.0,<1.27
+# Required for Flask-SocketIO's 'threading' async_mode to serve real
+# WebSocket connections over Werkzeug's dev server. Without it, Engine.IO
+# silently falls back to HTTP long-polling for every client — confirmed in
+# logs as "transport=polling" on every connection — which means every
+# tokens_update emit costs a full HTTP request/response cycle per client
+# instead of a few bytes over an already-open connection.
+simple-websocket==1.1.0

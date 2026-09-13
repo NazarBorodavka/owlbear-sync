@@ -155,7 +155,16 @@ class IPCameraCapture:
         return self.read()
 
     def release(self):
+        # Must wait for _reader() to actually exit its loop before touching
+        # self.cap — it may be blocked inside self.cap.read() on the
+        # background thread right now, and calling .release() on the same
+        # OpenCV/FFmpeg object concurrently from this thread is a use-after-
+        # free race at the C++ level. That's what "double free or
+        # corruption" crashing the whole process on reconnect was: this used
+        # to flip is_running and release() in the same breath, without ever
+        # confirming the reader thread had noticed and stopped first.
         self.is_running = False
+        self.thread.join(timeout=2.0)
         self.cap.release()
 
 # Initialize Flask app
@@ -891,12 +900,22 @@ def get_video_stream():
         # --- Final Blackout Decision ---
         blackout_active = manual_blank or (auto_blank and any_missed)
 
-        # Send data to websocket clients
+        # Send data to websocket clients. This runs synchronously on the
+        # same thread that does all the per-frame image processing above —
+        # if socket.io is stuck on http polling (no websocket upgrade) or is
+        # holding onto stale sessions from a crash/reconnect, this call
+        # itself could be where frame-to-frame time is actually going,
+        # rather than the image processing. Logged whenever it's slow
+        # enough to plausibly explain a multi-second, low-fps feed.
+        _emit_start = time.time()
         socketio.emit('tokens_update', {
             "tokens": detected_tokens,
             "blank_screen": blackout_active
         })
-            
+        _emit_dt = time.time() - _emit_start
+        if _emit_dt > 0.05:
+            print(f"[Perf] socketio.emit() took {_emit_dt*1000:.0f}ms this frame", flush=True)
+
         # Draw radius guide and calibration corners
         if show_overlay:
             # Radius Guide (Top-Left)
@@ -915,7 +934,27 @@ def get_video_stream():
 
         with frame_lock:
             current_frame = frame.copy()
-            
+
+        # Processing-loop throughput, separate from the capture thread's own
+        # fps log: capture has already been confirmed to hit real-time fps
+        # independently, so if THIS number is much lower, the bottleneck is
+        # the per-frame image processing/emit work above, not RTSP ingest.
+        if not hasattr(get_video_stream, "_perf_frames"):
+            get_video_stream._perf_frames = 0
+            get_video_stream._perf_last_report = time.time()
+        get_video_stream._perf_frames += 1
+        _perf_elapsed = time.time() - get_video_stream._perf_last_report
+        if _perf_elapsed >= 10.0:
+            _fps = get_video_stream._perf_frames / _perf_elapsed
+            print(
+                f"[Perf] Processing loop ~{_fps:.1f} fps ({get_video_stream._perf_frames} frames in {_perf_elapsed:.1f}s). "
+                f"Compare to the [Capture] line above — if capture is healthy but this is much lower, "
+                f"the bottleneck is per-frame processing/socketio.emit, not the RTSP feed.",
+                flush=True,
+            )
+            get_video_stream._perf_frames = 0
+            get_video_stream._perf_last_report = time.time()
+
         # Throttle loop to maintain ~30 FPS target
         elapsed = time.time() - loop_start
         if elapsed < frame_interval:
