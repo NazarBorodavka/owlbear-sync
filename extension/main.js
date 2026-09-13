@@ -1,5 +1,10 @@
-import OBR, { buildShape } from 'https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@latest/+esm'
-import { io } from 'https://cdn.jsdelivr.net/npm/socket.io-client@latest/dist/socket.io.esm.min.js'
+// Pinned to specific versions rather than @latest: an extension loaded
+// straight from a CDN on every page load has no build step to catch a
+// breaking (or malicious) change in an upstream package before it reaches
+// users — @latest means anyone able to publish to either package can affect
+// this extension the moment they do. Bump these deliberately when needed.
+import OBR, { buildShape } from 'https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm'
+import { io } from 'https://cdn.jsdelivr.net/npm/socket.io-client@4.8.3/dist/socket.io.esm.min.js'
 
 console.log("[TokenSync] Extension loaded — v4 (debug)");
 
