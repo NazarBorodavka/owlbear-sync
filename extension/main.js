@@ -27,8 +27,8 @@ document.querySelector('#app').innerHTML = `
     <div class="mapping-section">
       <h3>Sync Performance</h3>
       <div class="control-row">
-        <label>Sync Rate (FPS): <span id="fps-val">10</span></label>
-        <input type="range" id="sync-fps" min="1" max="30" value="10">
+        <label>Sync Rate (FPS): <span id="fps-val">15</span></label>
+        <input type="range" id="sync-fps" min="1" max="30" value="15">
       </div>
       <div class="control-row">
         <label>Sensitivity (px): <span id="sens-val">3</span></label>
@@ -59,7 +59,11 @@ let currentPhysicalTokens = [];
 let virtualTokens = [];
 let isUpdating = false;
 let lastUpdateTime = 0;
-let THROTTLE_MS = 100;
+// Was 100ms (10fps) — slower than the camera itself (15fps ~= 66ms/frame),
+// meaning the extension was artificially adding latency below what the
+// backend can already deliver. Matches the camera's real rate now instead
+// of a leftover conservative default from before the CPU limit was fixed.
+let THROTTLE_MS = 66;
 let SYNC_THRESHOLD = 3;
 // The periodic tokens_update handler below calls updateBlackout() on every
 // tick using the tracker's real blank_screen state. Without a guard, that
@@ -160,8 +164,13 @@ function connectSocketIO(url) {
   fetchBuildInfo(url);
 
   try {
-    socket = io(url);
-    
+    // Engine.IO defaults to starting every connection on HTTP polling and
+    // only upgrading to WebSocket after an extra round-trip. Listing
+    // websocket first tries it immediately, falling back to polling only if
+    // it's genuinely unavailable — skips that handshake delay on every
+    // connect/reconnect on a LAN setup like this one.
+    socket = io(url, { transports: ['websocket', 'polling'] });
+
     socket.on('connect', () => {
       document.getElementById('status').innerText = "Connected to Tracker";
       document.getElementById('status').className = "status connected";
@@ -176,7 +185,7 @@ function connectSocketIO(url) {
       if (!isReady) return;
       
       const now = Date.now();
-      if (now - lastUpdateTime < THROTTLE_MS) return; // Throttle to 10 FPS
+      if (now - lastUpdateTime < THROTTLE_MS) return; // Throttle to the configured sync rate
       
       if (isUpdating) return; // Skip if we're still processing the previous frame
       isUpdating = true;

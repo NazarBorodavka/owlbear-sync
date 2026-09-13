@@ -966,8 +966,11 @@
     <div id="tooltipPopup"></div>
 
     <script>
-        // Setup Socket.IO for token updates
-        const socket = io();
+        // Setup Socket.IO for token updates. transports lists websocket
+        // first so it's tried immediately instead of Engine.IO's default of
+        // always starting on HTTP polling and upgrading later — falls back
+        // to polling if websocket genuinely isn't available.
+        const socket = io({ transports: ['websocket', 'polling'] });
         socket.on('tokens_update', function (data) {
             // Data is now {tokens: [], blank_screen: bool, scene_filters: {}}
             updateTokenListUI(data.tokens);

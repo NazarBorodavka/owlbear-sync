@@ -123,14 +123,9 @@ class IPCameraCapture:
             now = time.time()
             elapsed = now - last_report
             if elapsed >= 10.0:
-                fps = frame_count / elapsed
-                print(
-                    f"[Capture] Decoding ~{fps:.1f} fps ({frame_count} frames in {elapsed:.1f}s). "
-                    f"If this is well below the camera's configured fps, decode can't keep up in "
-                    f"real time and the feed will keep drifting further behind live — lower the "
-                    f"camera's own resolution/bitrate/fps until this matches.",
-                    flush=True,
-                )
+                # Compare against the camera's own configured fps: well
+                # below it means decode can't keep up in real time.
+                print(f"[Capture] ~{frame_count / elapsed:.1f} fps", flush=True)
                 frame_count = 0
                 last_report = now
 
@@ -167,6 +162,15 @@ class IPCameraCapture:
         self.thread.join(timeout=2.0)
         self.cap.release()
 
+# Werkzeug logs every single HTTP request at INFO level by default,
+# including each socket.io long-poll (multiple per second per connected
+# client) — this was drowning out the actual [Capture]/[Perf]/[TRACKER]
+# lines that matter. Real errors (500s, tracebacks) are logged separately by
+# Flask's own error handling, so raising this to WARNING only silences the
+# routine "200 OK" access log, not genuine problems.
+import logging
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
 # Initialize Flask app
 app = Flask(__name__, template_folder='templates', static_folder=None)
 app.config['JSON_SORT_KEYS'] = False
@@ -201,6 +205,19 @@ def add_cors_headers(response):
     return response
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# requirements.txt lists simple-websocket, but the deployed logs still show
+# every client on transport=polling — confirm at startup whether it's
+# actually present in this image rather than assume the requirements.txt
+# change took effect. Without it, python-engineio has no way to serve a real
+# WebSocket over Werkzeug's dev server and silently stays on HTTP
+# long-polling for every message, which costs a full request/response cycle
+# per client per emit instead of a few bytes over an already-open socket.
+try:
+    import simple_websocket  # noqa: F401
+    print("[OK] simple-websocket available — Socket.IO clients can upgrade to real WebSocket connections.", flush=True)
+except ImportError as e:
+    print(f"[WARN] simple-websocket NOT available ({e}) — Socket.IO clients will stay on HTTP long-polling for every message.", flush=True)
 
 # Simple HTTP Basic Auth (used by route decorators)
 auth = HTTPBasicAuth()
@@ -419,6 +436,11 @@ settings_dirty = True
 # For diagnostic overlay: keep a raw and undistorted copy of the latest frame
 raw_frame_for_stream = None
 undistorted_frame_for_stream = None
+# Only pay for these full-frame copies when someone's actually watching the
+# /diagnostic page — they were happening unconditionally every single frame
+# regardless of viewers, which is pure waste on a CPU-constrained host.
+diag_raw_viewers = 0
+diag_undistort_viewers = 0
 
 # Camera calibration state (fisheye model)
 camera_matrix = None
@@ -445,26 +467,28 @@ def get_video_stream():
     global camera_matrix, dist_coeffs, calibration_model
 
     fail_count = 0
-    
+    last_processed_frame_time = 0
+
     # 30 FPS target for fluid tracking
-    frame_interval = 0.033 
-    last_marker_ids = set()
-    
+    frame_interval = 0.033
+
     while is_running:
         loop_start = time.time()
-        
+
         success = False
         frame = None
-        
+        frame_time = None
+
         with camera_lock:
             if cap is not None and cap.isOpened():
-                # To prevent OpenCV from buffering and causing slow-motion lag, 
+                # To prevent OpenCV from buffering and causing slow-motion lag,
                 # we grab frames rapidly to clear the buffer, then retrieve the latest one.
                 # Since OpenCV doesn't easily let us bypass the TCP buffer, grabbing 2-3 extra frames catches us up.
                 for _ in range(4):
                     cap.grab()
                 success, frame = cap.retrieve()
-            
+                frame_time = getattr(cap, 'last_frame_time', None)
+
         if not success or frame is None:
             fail_count += 1
             if fail_count % 30 == 0:
@@ -491,8 +515,22 @@ def get_video_stream():
             else:
                 time.sleep(0.1)
             continue
-            
+
         fail_count = 0
+
+        # Now that processing is fast (post CPU-limit-fix, often faster than
+        # the camera's own fps), retrieve() frequently keeps handing back
+        # the same still-buffered frame between real camera updates —
+        # IPCameraCapture's deque holds the latest frame until a new one
+        # arrives, so a faster loop just re-reads it. Reprocessing identical
+        # pixel data wastes the CPU headroom we just freed up and emits
+        # redundant socketio 'tokens_update' events with unchanged
+        # positions, adding pointless network chatter on top of it. Skip
+        # straight to a short sleep until a genuinely new frame lands.
+        if frame_time is not None and frame_time == last_processed_frame_time:
+            time.sleep(0.005)
+            continue
+        last_processed_frame_time = frame_time
 
         # Phase timing: accumulated per 10s window and logged alongside the
         # [Capture]/[Perf] fps lines, so a single log dump can show exactly
@@ -505,11 +543,13 @@ def get_video_stream():
 
         # Preprocessing: Apply Distortion Correction, Zoom, Pan, Rotation, Colors
         h, w = frame.shape[:2]
-        # Store raw frame for diagnostic streaming (before any processing)
-        try:
-            raw_frame_for_stream = frame.copy()
-        except Exception:
-            raw_frame_for_stream = None
+        # Store raw frame for diagnostic streaming (before any processing) —
+        # only if someone's actually watching /diagnostic right now.
+        if diag_raw_viewers > 0:
+            try:
+                raw_frame_for_stream = frame.copy()
+            except Exception:
+                raw_frame_for_stream = None
         
         # 1. Distortion Correction via precomputed maps.
         # Prefer a full camera calibration when available. Fall back to single-k1 model.
@@ -537,10 +577,11 @@ def get_video_stream():
                     undistort_map2 = None
             if undistort_map1 is not None:
                 frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
-                try:
-                    undistorted_frame_for_stream = frame.copy()
-                except Exception:
-                    undistorted_frame_for_stream = None
+                if diag_undistort_viewers > 0:
+                    try:
+                        undistorted_frame_for_stream = frame.copy()
+                    except Exception:
+                        undistorted_frame_for_stream = None
         elif distortion_k1 != 0.0:
             # Legacy single-coefficient radial distortion correction
             if settings_dirty or undistort_map1 is None:
@@ -552,10 +593,11 @@ def get_video_stream():
                 undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(tmp_cam, dist, None, new_camera_matrix, (w, h), cv2.CV_32FC1)
                 settings_dirty = False
             frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
-            try:
-                undistorted_frame_for_stream = frame.copy()
-            except Exception:
-                undistorted_frame_for_stream = None
+            if diag_undistort_viewers > 0:
+                try:
+                    undistorted_frame_for_stream = frame.copy()
+                except Exception:
+                    undistorted_frame_for_stream = None
             
         # 2. Optimized Zoom, Pan, Rotation (Merged into one warp)
         if zoom_level != 1.0 or offset_x != 0.0 or offset_y != 0.0 or rotation != 0.0:
@@ -911,9 +953,18 @@ def get_video_stream():
                     any_missed = True
                     break
         
-        if any_missed:
+        # Log only on state transitions, not every frame — this used to fire
+        # unthrottled on every single loop iteration for as long as any
+        # token stayed missing, which could mean hundreds of identical
+        # lines for one blackout event.
+        if not hasattr(get_video_stream, "_was_missing_tokens"):
+            get_video_stream._was_missing_tokens = False
+        if any_missed and not get_video_stream._was_missing_tokens:
             missed_ids = [tid for tid, td in get_video_stream.tracked_tokens.items() if td["missed"] > auto_blank_delay]
-            print(f"DEBUG: Blackout active! Missing tokens: {missed_ids}")
+            print(f"[TRACKER] Auto-blank triggered, missing: {missed_ids}", flush=True)
+        elif not any_missed and get_video_stream._was_missing_tokens:
+            print("[TRACKER] Auto-blank cleared", flush=True)
+        get_video_stream._was_missing_tokens = any_missed
 
         # --- Final Blackout Decision ---
         blackout_active = manual_blank or (auto_blank and any_missed)
@@ -932,7 +983,7 @@ def get_video_stream():
         })
         _emit_dt = time.time() - _emit_start
         if _emit_dt > 0.05:
-            print(f"[Perf] socketio.emit() took {_emit_dt*1000:.0f}ms this frame", flush=True)
+            print(f"[Perf] slow emit: {_emit_dt*1000:.0f}ms", flush=True)
 
         # Draw radius guide and calibration corners
         if show_overlay:
@@ -958,12 +1009,11 @@ def get_video_stream():
 
         get_video_stream._phase_times["lock"] += time.time() - _t_lock_start
 
-        # Processing-loop throughput plus a per-phase breakdown, so a single
-        # log dump shows exactly where frame time is going instead of
-        # needing another round of guessing. Capture has already been
-        # confirmed to hit real-time fps independently (see [Capture]
-        # above), so if this fps is much lower, the bottleneck is
-        # necessarily one of the phases below.
+        # Processing-loop throughput plus a per-phase breakdown (pre =
+        # undistort/warp/color, cctag = submit/collect bookkeeping only, not
+        # the ~300ms detection itself which runs on a separate thread).
+        # Compare against [Capture]'s fps: if this is much lower, the
+        # bottleneck is one of these phases, not the RTSP feed.
         get_video_stream._phase_frames += 1
         _perf_elapsed = time.time() - get_video_stream._phase_last_report
         if _perf_elapsed >= 10.0:
@@ -971,12 +1021,10 @@ def get_video_stream():
             _n = max(1, get_video_stream._phase_frames)
             _pt = get_video_stream._phase_times
             print(
-                f"[Perf] Processing loop ~{_fps:.1f} fps ({get_video_stream._phase_frames} frames in {_perf_elapsed:.1f}s). "
-                f"Per-frame breakdown — preprocess(undistort/warp/color): {_pt['pre']/_n*1000:.0f}ms, "
-                f"hough+tracking: {_pt['hough']/_n*1000:.0f}ms, "
-                f"cctag submit/collect (not the 300ms detection itself, that's on a separate thread): {_pt['cctag']/_n*1000:.0f}ms, "
-                f"render/draw/emit: {_pt['render']/_n*1000:.0f}ms, "
-                f"lock+copy: {_pt['lock']/_n*1000:.0f}ms",
+                f"[Perf] ~{_fps:.1f} fps | "
+                f"pre={_pt['pre']/_n*1000:.0f}ms hough={_pt['hough']/_n*1000:.0f}ms "
+                f"cctag={_pt['cctag']/_n*1000:.0f}ms render={_pt['render']/_n*1000:.0f}ms "
+                f"lock={_pt['lock']/_n*1000:.0f}ms",
                 flush=True,
             )
             get_video_stream._phase_frames = 0
@@ -1027,37 +1075,48 @@ def generate_frames():
         time.sleep(0.03) # Limit framerate to browser to save bandwidth
 
 def generate_raw_frames():
-    global raw_frame_for_stream
-    while True:
-        try:
-            with frame_lock:
-                rf = raw_frame_for_stream
-            if rf is None:
+    global raw_frame_for_stream, diag_raw_viewers
+    diag_raw_viewers += 1
+    try:
+        while True:
+            try:
+                with frame_lock:
+                    rf = raw_frame_for_stream
+                if rf is None:
+                    time.sleep(0.1)
+                    continue
+                ret, buffer = cv2.imencode('.jpg', rf, _JPEG_PARAMS)
+                frame_bytes = buffer.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            except Exception:
                 time.sleep(0.1)
-                continue
-            ret, buffer = cv2.imencode('.jpg', rf, _JPEG_PARAMS)
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        except Exception:
-            time.sleep(0.1)
+    finally:
+        # Runs when the client disconnects (generator is garbage-collected/
+        # closed) — stops get_video_stream from paying for this copy once
+        # nobody's watching.
+        diag_raw_viewers -= 1
 
 
 def generate_undistorted_frames():
-    global undistorted_frame_for_stream
-    while True:
-        try:
-            with frame_lock:
-                uf = undistorted_frame_for_stream
-            if uf is None:
+    global undistorted_frame_for_stream, diag_undistort_viewers
+    diag_undistort_viewers += 1
+    try:
+        while True:
+            try:
+                with frame_lock:
+                    uf = undistorted_frame_for_stream
+                if uf is None:
+                    time.sleep(0.1)
+                    continue
+                ret, buffer = cv2.imencode('.jpg', uf, _JPEG_PARAMS)
+                frame_bytes = buffer.tobytes()
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+            except Exception:
                 time.sleep(0.1)
-                continue
-            ret, buffer = cv2.imencode('.jpg', uf, _JPEG_PARAMS)
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        except Exception:
-            time.sleep(0.1)
+    finally:
+        diag_undistort_viewers -= 1
 
 @app.route('/')
 @auth.login_required
