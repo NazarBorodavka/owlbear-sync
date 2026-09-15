@@ -249,11 +249,11 @@ LEGACY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
 
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
-    global hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
+    global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
     global auto_blank, auto_blank_delay
     global cctag_min_id, cctag_max_id, cctag_min_ident_proba, cctag_id_voting_decay
     global cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
-    global token_aliases, manual_blank, camera_url
+    global token_aliases, manual_blank, camera_url, show_overlay, flip_x, flip_y
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
     global src_pts, corner_idx, homography_matrix
     for config_path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
@@ -280,6 +280,8 @@ def load_config_from_disk():
                 brightness = c.get('brightness', 0.0)
                 contrast = c.get('contrast', 1.0)
                 exposure = c.get('exposure', 1.0)
+                hough_dp = float(c.get('hough_dp', 1.2))
+                hough_min_dist = int(c.get('hough_min_dist', 20))
                 hough_param1 = c.get('hough_param1', 40)
                 hough_param2 = c.get('hough_param2', 45)
                 hough_min_radius = c.get('hough_min_radius', 30)
@@ -287,6 +289,9 @@ def load_config_from_disk():
                 hough_deadzone = float(c.get('hough_deadzone', 3.0))
                 auto_blank = c.get('auto_blank', False)
                 auto_blank_delay = int(c.get('auto_blank_delay', 10))
+                show_overlay = c.get('show_overlay', True)
+                flip_x = c.get('flip_x', False)
+                flip_y = c.get('flip_y', False)
                 token_aliases = c.get('token_aliases', {})
                 print(f"Loaded config from disk: {config_path}")
                 # Load camera calibration if present
@@ -331,11 +336,15 @@ def save_config_to_disk():
     c = {
         'distortion_k1': distortion_k1, 'zoom_level': zoom_level, 'offset_x': offset_x, 'offset_y': offset_y,
         'rotation': rotation, 'brightness': brightness, 'contrast': contrast, 'exposure': exposure,
+        'hough_dp': hough_dp, 'hough_min_dist': hough_min_dist,
         'hough_param1': hough_param1, 'hough_param2': hough_param2,
         'hough_min_radius': hough_min_radius, 'hough_max_radius': hough_max_radius,
         'hough_deadzone': hough_deadzone,
         'auto_blank': auto_blank,
         'auto_blank_delay': auto_blank_delay,
+        'show_overlay': show_overlay,
+        'flip_x': flip_x,
+        'flip_y': flip_y,
         'cctag_min_id': cctag_min_id,
         'cctag_max_id': cctag_max_id,
         'cctag_min_ident_proba': cctag_min_ident_proba,
@@ -422,6 +431,10 @@ last_exposure = -1.0
 src_pts = np.zeros((4, 2), dtype=np.float32)
 corner_idx = 0
 homography_matrix = None
+# Cached play-area mask (see get_video_stream) — only needs rebuilding when
+# the corners themselves change, not every single frame.
+corner_mask = None
+corner_mask_dirty = True
 
 # Add locks for thread-safe frame reading
 frame_lock = threading.Lock()
@@ -432,6 +445,13 @@ undistort_map1 = None
 undistort_map2 = None
 undistort_model = None
 settings_dirty = True
+
+# Undistort map + zoom/pan/rotation composed into a single remap (see
+# get_video_stream) — cached separately from undistort_map1/2 since it also
+# depends on the affine params, not just the calibration.
+combined_map1 = None
+combined_map2 = None
+combined_map_params = None
 
 # For diagnostic overlay: keep a raw and undistorted copy of the latest frame
 raw_frame_for_stream = None
@@ -457,12 +477,14 @@ load_config_from_disk()
 
 def get_video_stream():
     global cap, is_running, current_frame, camera_url, undistort_map1, undistort_map2, settings_dirty, undistort_model
+    global combined_map1, combined_map2, combined_map_params
     # Expose diagnostic copies of the latest frame
     global raw_frame_for_stream, undistorted_frame_for_stream
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
     global CCTAG_AVAILABLE, cctag_detector
     global src_pts, corner_idx, homography_matrix, auto_blank, auto_blank_delay, manual_blank
+    global corner_mask, corner_mask_dirty
     global cctag_min_id, cctag_max_id
     global camera_matrix, dist_coeffs, calibration_model
 
@@ -596,13 +618,6 @@ def get_video_stream():
                     undistort_map1 = None
                     undistort_map2 = None
                     get_video_stream._undistort_failed = True
-            if undistort_map1 is not None:
-                frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
-                if diag_undistort_viewers > 0:
-                    try:
-                        undistorted_frame_for_stream = frame.copy()
-                    except Exception:
-                        undistorted_frame_for_stream = None
         elif distortion_k1 != 0.0:
             # Legacy single-coefficient radial distortion correction
             if settings_dirty or undistort_map1 is None:
@@ -613,15 +628,41 @@ def get_video_stream():
                 new_camera_matrix, _ = cv2.getOptimalNewCameraMatrix(tmp_cam, dist, (w, h), 1.0)
                 undistort_map1, undistort_map2 = cv2.initUndistortRectifyMap(tmp_cam, dist, None, new_camera_matrix, (w, h), cv2.CV_32FC1)
                 settings_dirty = False
+
+        # 2. Zoom, Pan, Rotation — combined with undistortion into a single
+        # remap() where possible instead of two full-frame passes
+        # (remap-for-undistort, then a separate warpAffine). The trick: an
+        # affine warp of an *image* and an affine warp of a *coordinate map*
+        # are the same operation, so warping the undistort map through the
+        # same matrix used for zoom/pan/rotation produces one combined map
+        # that bakes in both corrections. Only rebuilt when the underlying
+        # undistort map actually changes (its object identity changes when
+        # recomputed above) or zoom/pan/rotation themselves change — not
+        # every frame.
+        _needs_affine = zoom_level != 1.0 or offset_x != 0.0 or offset_y != 0.0 or rotation != 0.0
+        if undistort_map1 is not None and _needs_affine:
+            _combo_key = (id(undistort_map1), zoom_level, offset_x, offset_y, rotation, w, h)
+            if combined_map_params != _combo_key:
+                M = cv2.getRotationMatrix2D((w / 2, h / 2), rotation, zoom_level)
+                M[0, 2] += offset_x * w
+                M[1, 2] += offset_y * h
+                combined_map1 = cv2.warpAffine(undistort_map1, M, (w, h), flags=cv2.INTER_LINEAR)
+                combined_map2 = cv2.warpAffine(undistort_map2, M, (w, h), flags=cv2.INTER_LINEAR)
+                combined_map_params = _combo_key
+            frame = cv2.remap(frame, combined_map1, combined_map2, cv2.INTER_LINEAR)
+            if diag_undistort_viewers > 0:
+                try:
+                    undistorted_frame_for_stream = frame.copy()
+                except Exception:
+                    undistorted_frame_for_stream = None
+        elif undistort_map1 is not None:
             frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
             if diag_undistort_viewers > 0:
                 try:
                     undistorted_frame_for_stream = frame.copy()
                 except Exception:
                     undistorted_frame_for_stream = None
-            
-        # 2. Optimized Zoom, Pan, Rotation (Merged into one warp)
-        if zoom_level != 1.0 or offset_x != 0.0 or offset_y != 0.0 or rotation != 0.0:
+        elif _needs_affine:
             M = cv2.getRotationMatrix2D((w / 2, h / 2), rotation, zoom_level)
             M[0, 2] += offset_x * w
             M[1, 2] += offset_y * h
@@ -645,11 +686,17 @@ def get_video_stream():
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
         # --- Apply Calibration Mask ---
-        # If the user has set the 4 calibration corners, ignore anything outside that area
+        # If the user has set the 4 calibration corners, ignore anything
+        # outside that area. Rebuilt only when the corners actually change
+        # (or the frame size changes, e.g. after a camera swap) instead of
+        # reallocating and redrawing a full-resolution mask every frame —
+        # the corners are static almost all the time.
         if corner_idx == 4:
-            mask = np.zeros_like(gray)
-            cv2.fillPoly(mask, [np.int32(src_pts)], 255)
-            gray = cv2.bitwise_and(gray, mask)
+            if corner_mask_dirty or corner_mask is None or corner_mask.shape != gray.shape:
+                corner_mask = np.zeros_like(gray)
+                cv2.fillPoly(corner_mask, [np.int32(src_pts)], 255)
+                corner_mask_dirty = False
+            gray = cv2.bitwise_and(gray, corner_mask)
 
         get_video_stream._phase_times["pre"] += time.time() - _t_pre_start
         _t_hough_start = time.time()
@@ -1222,29 +1269,31 @@ def connect_camera():
 
 @app.route('/api/calibrate', methods=['POST'])
 def calibrate():
-    global src_pts, corner_idx, homography_matrix
+    global src_pts, corner_idx, homography_matrix, corner_mask_dirty
     data = request.json
     action = data.get('action')
-    
+
     if action == 'add_point':
         x = data.get('x')
         y = data.get('y')
         if corner_idx < 4:
             src_pts[corner_idx] = [x, y]
             corner_idx += 1
-            
+            corner_mask_dirty = True
+
         if corner_idx == 4:
             # Map to a standard square 0.0 to 1.0 space
             dst_pts = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
             homography_matrix, _ = cv2.findHomography(src_pts, dst_pts)
             save_config_to_disk()
-            
+
         return jsonify({"success": True, "corners": corner_idx})
-        
+
     elif action == 'reset':
         corner_idx = 0
         src_pts = np.zeros((4, 2), dtype=np.float32)
         homography_matrix = None
+        corner_mask_dirty = True
         save_config_to_disk()
         return jsonify({"success": True})
 
@@ -1442,6 +1491,7 @@ def get_settings():
         "rotation": rotation, "brightness": brightness, "contrast": contrast, "exposure": exposure,
         "show_overlay": show_overlay, "auto_blank": auto_blank, "auto_blank_delay": auto_blank_delay,
         "manual_blank": manual_blank, "flip_x": flip_x, "flip_y": flip_y,
+        "hough_dp": hough_dp, "hough_min_dist": hough_min_dist,
         "hough_param1": hough_param1, "hough_param2": hough_param2,
         "hough_min_radius": hough_min_radius, "hough_max_radius": hough_max_radius,
         "hough_deadzone": hough_deadzone,
@@ -1458,8 +1508,8 @@ def get_settings():
 @auth.login_required
 def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
-    global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius
-    global auto_blank, token_aliases
+    global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
+    global auto_blank, auto_blank_delay, token_aliases
     global camera_url, manual_blank, flip_x, flip_y
     global CCTAG_AVAILABLE, cctag_min_id, cctag_max_id, cctag_min_ident_proba
     global cctag_id_voting_decay, cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
