@@ -1388,6 +1388,7 @@ def camera_calibration_finish():
 @auth.login_required
 def camera_calibration_reset():
     global calib_mode, calib_objpoints, calib_imgpoints, calibration_model, undistort_map1, undistort_map2, undistort_model
+    global camera_matrix, dist_coeffs, settings_dirty
     calib_mode = False
     calib_objpoints = []
     calib_imgpoints = []
@@ -1395,6 +1396,16 @@ def camera_calibration_reset():
     undistort_map1 = None
     undistort_map2 = None
     undistort_model = None
+    # This never actually cleared the calibration data itself — only
+    # auxiliary state — so get_video_stream()'s `if camera_matrix is not
+    # None and dist_coeffs is not None:` check stayed true forever and kept
+    # undistorting with the old data. It also never persisted to disk, so
+    # even that partial reset didn't survive a restart, which is why the
+    # dashboard reported "calibrated" again after a refresh.
+    camera_matrix = None
+    dist_coeffs = None
+    settings_dirty = True
+    save_config_to_disk()
     return jsonify({"success": True})
 
 

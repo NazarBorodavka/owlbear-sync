@@ -1603,6 +1603,10 @@
                 .then(d => {
                     msg.innerText = 'Calibration data reset.';
                     msg.className = 'status neutral';
+                    // Re-query status immediately so the panel reflects
+                    // "Not calibrated" right away instead of only after a
+                    // page refresh.
+                    caliStatusCalib();
                 })
                 .catch(e => {
                     msg.innerText = 'Error: ' + e.message;
