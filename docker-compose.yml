@@ -9,3 +9,17 @@ services:
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
+      # Optional: hardware-accelerated RTSP decode via Intel Quick Sync
+      # (VAAPI), for hosts with a compatible Intel iGPU. Off by default —
+      # only helps if your camera's stream is CPU-expensive to decode in
+      # software (e.g. a high-resolution H.265/HEVC stream) and you're
+      # seeing sustained high CPU usage from the tracker container. Falls
+      # back to normal software decode automatically if the device below
+      # isn't present or hardware decode fails for any reason, so it's safe
+      # to leave enabled even if you're not sure your hardware supports it.
+      # - TRACKER_USE_VAAPI=1
+    # Uncomment together with TRACKER_USE_VAAPI=1 above — passes the Intel
+    # GPU's render node through to the container. Find yours with
+    # `ls /dev/dri` on the host if it's not /dev/dri/renderD128.
+    # devices:
+    #   - /dev/dri:/dev/dri

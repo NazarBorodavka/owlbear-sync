@@ -51,6 +51,8 @@ import concurrent.futures
 import threading
 import json
 import collections
+import subprocess
+import shutil
 from flask import Flask, render_template, Response, request, jsonify, send_from_directory
 from flask_socketio import SocketIO
 from flask_httpauth import HTTPBasicAuth
@@ -161,6 +163,163 @@ class IPCameraCapture:
         self.is_running = False
         self.thread.join(timeout=2.0)
         self.cap.release()
+
+
+class IPCameraCaptureVAAPI:
+    """Alternate RTSP capture path using a real system `ffmpeg` subprocess
+    with Intel VAAPI hardware decode (e.g. Quick Sync on Iris Xe), for hosts
+    with a compatible iGPU. Bypasses cv2.VideoCapture entirely: the FFmpeg
+    bundled inside the opencv-python-headless wheel is a generic prebuilt
+    binary with no VAAPI support compiled in, which is a hard limitation of
+    that PyPI wheel, not something togglable at runtime — so hardware decode
+    has to happen in a separate, real ffmpeg process instead, with decoded
+    frames piped back in as raw video.
+
+    Opt-in only (TRACKER_USE_VAAPI=1) and every failure mode here — missing
+    device, ffmpeg/ffprobe not found, can't determine stream resolution,
+    subprocess dies — raises, which _connect_to_camera() catches to fall
+    back to the normal software-decode IPCameraCapture. A misconfigured or
+    absent GPU should never be able to leave the tracker fully broken.
+
+    Provides the exact same read()/isOpened()/grab()/retrieve()/release()
+    interface as IPCameraCapture, so it's a drop-in choice at connect time.
+    """
+
+    def __init__(self, url, device=None):
+        self.url = url
+        self.device = device or os.environ.get('TRACKER_VAAPI_DEVICE', '/dev/dri/renderD128')
+        self.frame_buffer = collections.deque(maxlen=1)
+        self.last_frame_time = 0
+        self.is_running = True
+        self.proc = None
+        self._opened = False
+
+        if shutil.which('ffmpeg') is None or shutil.which('ffprobe') is None:
+            raise RuntimeError("ffmpeg/ffprobe not found on PATH — rebuild the Docker image to include them")
+        if not os.path.exists(self.device):
+            raise RuntimeError(f"VAAPI device {self.device} not found — is /dev/dri passed through in docker-compose.yml?")
+
+        self.width, self.height = self._probe_resolution(url)
+        # NV12: 1 byte/pixel luma plane + 0.5 byte/pixel interleaved chroma
+        # plane — this is VAAPI's native decode surface format, so
+        # hwdownload below needs no real conversion, just a GPU->CPU copy.
+        self._frame_bytes = self.width * self.height * 3 // 2
+
+        ffmpeg_cmd = [
+            'ffmpeg', '-loglevel', 'warning',
+            '-hwaccel', 'vaapi', '-hwaccel_device', self.device, '-hwaccel_output_format', 'vaapi',
+            '-rtsp_transport', 'udp',
+            '-analyzeduration', '100000', '-probesize', '32768',
+            '-fflags', 'nobuffer', '-flags', 'low_delay',
+            '-i', url,
+            '-vf', 'hwdownload,format=nv12',
+            '-f', 'rawvideo', '-pix_fmt', 'nv12', '-an', '-sn',
+            'pipe:1',
+        ]
+        self.proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**7)
+        self._opened = True
+
+        self.thread = threading.Thread(target=self._reader, daemon=True)
+        self.thread.start()
+
+    def _probe_resolution(self, url):
+        ffprobe_cmd = [
+            'ffprobe', '-v', 'error', '-rtsp_transport', 'udp',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=width,height',
+            '-of', 'csv=p=0',
+            url,
+        ]
+        result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, timeout=10)
+        parts = result.stdout.strip().split(',')
+        if len(parts) != 2:
+            raise RuntimeError(
+                f"ffprobe couldn't determine stream resolution "
+                f"(stdout: {result.stdout.strip()!r}, stderr: {result.stderr.strip()[:200]!r})"
+            )
+        return int(parts[0]), int(parts[1])
+
+    def _read_exact(self, n):
+        """Read exactly n bytes from the ffmpeg subprocess's stdout, or None
+        on EOF (process exited/pipe closed)."""
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self.proc.stdout.read(n - len(buf))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _reader(self):
+        frame_count = 0
+        last_report = time.time()
+        while self.is_running:
+            raw = self._read_exact(self._frame_bytes)
+            if raw is None:
+                break
+            nv12 = np.frombuffer(raw, dtype=np.uint8).reshape((self.height * 3 // 2, self.width))
+            frame = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
+            self.frame_buffer.append(frame)
+            self.last_frame_time = time.time()
+
+            frame_count += 1
+            now = time.time()
+            elapsed = now - last_report
+            if elapsed >= 10.0:
+                print(f"[Capture/VAAPI] ~{frame_count / elapsed:.1f} fps", flush=True)
+                frame_count = 0
+                last_report = now
+        self._opened = False
+
+    def read(self):
+        # Same staleness check as IPCameraCapture — see that class for why.
+        if not self.frame_buffer or (time.time() - self.last_frame_time) > 5.0:
+            return False, None
+        return True, self.frame_buffer[0]
+
+    def isOpened(self):
+        return self._opened and self.proc is not None and self.proc.poll() is None
+
+    def grab(self):
+        return True
+
+    def retrieve(self):
+        return self.read()
+
+    def release(self):
+        self.is_running = False
+        if self.proc is not None:
+            # Terminating first unblocks _reader()'s pending blocking read on
+            # the pipe (it sees EOF and exits its loop) before we join it —
+            # joining first would deadlock against a process we haven't
+            # asked to stop yet.
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+        if hasattr(self, 'thread'):
+            self.thread.join(timeout=2.0)
+
+
+def _open_ip_camera(source):
+    """Open an RTSP/HTTP camera source, using hardware-accelerated VAAPI
+    decode if TRACKER_USE_VAAPI is enabled and actually works, falling back
+    to the normal software-decode IPCameraCapture otherwise. Shared by the
+    initial connect and the automatic reconnect-on-failure path so both
+    respect the same setting instead of only one of them."""
+    if os.environ.get('TRACKER_USE_VAAPI', '0').lower() in ('1', 'true', 'yes'):
+        try:
+            capture = IPCameraCaptureVAAPI(source)
+            print("[OK] Hardware-accelerated (VAAPI) capture active.", flush=True)
+            return capture
+        except Exception as e:
+            print(f"[WARN] VAAPI hardware decode unavailable ({e}) — falling back to software decode.", flush=True)
+    return IPCameraCapture(source)
+
 
 # Werkzeug logs every single HTTP request at INFO level by default,
 # including each socket.io long-poll (multiple per second per connected
@@ -527,11 +686,11 @@ def get_video_stream():
                         source = camera_url
                     
                     if isinstance(source, str) and (source.startswith('http') or source.startswith('rtsp') or source.startswith('rtmp')):
-                        cap = IPCameraCapture(source)
+                        cap = _open_ip_camera(source)
                     else:
                         cap = cv2.VideoCapture(source)
                         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                        
+
                 fail_count = 0
                 time.sleep(1)
             else:
@@ -1242,7 +1401,7 @@ def _connect_to_camera(url):
             source = camera_url
 
         if isinstance(source, str) and (source.startswith('http') or source.startswith('rtsp') or source.startswith('rtmp')):
-            cap = IPCameraCapture(source)
+            cap = _open_ip_camera(source)
         else:
             cap = cv2.VideoCapture(source)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)

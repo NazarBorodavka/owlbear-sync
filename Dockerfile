@@ -3,7 +3,18 @@ FROM python:3.12-slim-bookworm
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
-# Install dependencies for CCTag runtime and build.
+# Install dependencies for CCTag runtime and build, plus a real system
+# ffmpeg + Intel VAAPI stack for optional hardware-accelerated RTSP decode
+# (see IPCameraCaptureVAAPI in tracker/app.py). This is unrelated to the
+# FFmpeg bundled inside the opencv-python-headless wheel that cv2.VideoCapture
+# uses by default — that bundled build is a generic binary with no VAAPI
+# support compiled in, which is a hard limitation of the PyPI wheel, not
+# something togglable at runtime. Debian's own ffmpeg package *does* support
+# VAAPI, so the hardware-accel path shells out to it directly instead.
+# These packages are always installed (small, harmless if unused) — actually
+# using hardware decode still requires opting in via TRACKER_USE_VAAPI and
+# passing /dev/dri through in docker-compose.yml, since not every host has
+# an Intel iGPU.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -11,6 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libboost-all-dev \
     libtbb-dev \
     libeigen3-dev \
+    ffmpeg \
+    vainfo \
+    intel-media-va-driver \
+    libva2 \
+    libva-drm2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY tracker/requirements.txt ./tracker/
