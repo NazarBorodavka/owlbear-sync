@@ -587,6 +587,21 @@
                             the Owlbear scene.
                         </div>
 
+                        <label class="checkbox-row">
+                            <input type="checkbox" id="flip_x" onchange="updateSettings()">
+                            <span>Mirror X
+                                <button type="button" class="info-icon" tabindex="0"
+                                    data-tip="Flips left/right after the corner mapping is applied. Use this if tokens track correctly but move the opposite horizontal direction from the physical token — no need to re-click the corners.">i</button>
+                            </span>
+                        </label>
+                        <label class="checkbox-row">
+                            <input type="checkbox" id="flip_y" onchange="updateSettings()">
+                            <span>Mirror Y
+                                <button type="button" class="info-icon" tabindex="0"
+                                    data-tip="Flips up/down after the corner mapping is applied. Use this if tokens track correctly but move the opposite vertical direction from the physical token — no need to re-click the corners. If tokens are mirrored on BOTH axes at once, that's a 180° rotation — turn both Mirror X and Mirror Y on together rather than one or the other.">i</button>
+                            </span>
+                        </label>
+
                         <hr>
 
                         <h4 class="subsection-title">Lens Distortion (Optional)</h4>
@@ -1230,12 +1245,33 @@
 
         // Debounced settings sender — prevents flooding server with requests on slider drag
         let _settingsTimer = null;
+        // _sendSettings() reads and POSTs every field's current DOM value in
+        // one shot, not just the one that changed. On page load, DOM values
+        // start out from localStorage (loadConfig(), synchronous) and only
+        // get overwritten with the server's real values once
+        // loadServerSettings()'s fetch resolves (async — can take a moment).
+        // If a slider gets touched in that window, _sendSettings() would
+        // read the stale localStorage/HTML-default values still sitting in
+        // every *other* field and push them all to the server, overwriting
+        // otherwise-correct settings with old ones — exactly the "changing
+        // one slider reset everything else" symptom. Block sending until
+        // the server's authoritative state has actually landed.
+        let _serverSettingsLoaded = false;
         function updateSettings() {
             if (_settingsTimer) clearTimeout(_settingsTimer);
             _settingsTimer = setTimeout(_sendSettings, 120);
         }
 
         function _sendSettings() {
+            if (!_serverSettingsLoaded) {
+                // Don't drop the interaction — retry shortly. By then
+                // loadServerSettings() should have populated every other
+                // field with the real server state, so this send will
+                // correctly carry forward the user's actual change alongside
+                // accurate values for everything else.
+                _settingsTimer = setTimeout(_sendSettings, 100);
+                return;
+            }
             const config = {
                 distortion_k1: parseFloat(document.getElementById('distortion_k1').value),
                 zoom: parseFloat(document.getElementById('zoom').value),
@@ -1249,6 +1285,8 @@
                 auto_blank: document.getElementById('auto_blank').checked,
                 auto_blank_delay: parseInt(document.getElementById('auto_blank_delay').value),
                 manual_blank: document.getElementById('manual_blank').checked,
+                flip_x: document.getElementById('flip_x').checked,
+                flip_y: document.getElementById('flip_y').checked,
                 hough_min_radius: parseInt(document.getElementById('hough_min_radius').value),
                 hough_max_radius: parseInt(document.getElementById('hough_max_radius').value),
                 hough_deadzone: parseFloat(document.getElementById('hough_deadzone').value),
@@ -1320,6 +1358,8 @@
                 auto_blank: document.getElementById('auto_blank').checked,
                 auto_blank_delay: parseInt(document.getElementById('auto_blank_delay').value),
                 manual_blank: document.getElementById('manual_blank').checked,
+                flip_x: document.getElementById('flip_x').checked,
+                flip_y: document.getElementById('flip_y').checked,
                 hough_min_radius: document.getElementById('hough_min_radius').value,
                 hough_max_radius: document.getElementById('hough_max_radius').value,
                 hough_deadzone: document.getElementById('hough_deadzone').value,
@@ -1381,6 +1421,8 @@
                         document.getElementById('val_auto_blank_delay').value = config.auto_blank_delay;
                     }
                     if (config.manual_blank !== undefined) document.getElementById('manual_blank').checked = config.manual_blank;
+                    if (config.flip_x !== undefined) document.getElementById('flip_x').checked = config.flip_x;
+                    if (config.flip_y !== undefined) document.getElementById('flip_y').checked = config.flip_y;
                     if (config.hough_min_radius !== undefined) document.getElementById('hough_min_radius').value = config.hough_min_radius;
                     if (config.hough_max_radius !== undefined) document.getElementById('hough_max_radius').value = config.hough_max_radius;
                     if (config.hough_deadzone !== undefined) {
@@ -1465,6 +1507,8 @@
                         document.getElementById('val_auto_blank_delay').value = cfg.auto_blank_delay;
                     }
                     if (cfg.manual_blank !== undefined) document.getElementById('manual_blank').checked = cfg.manual_blank;
+                    if (cfg.flip_x !== undefined) document.getElementById('flip_x').checked = cfg.flip_x;
+                    if (cfg.flip_y !== undefined) document.getElementById('flip_y').checked = cfg.flip_y;
 
                     // Reflect an already-running stream (e.g. from startup auto-reconnect)
                     // instead of showing "Disconnected" until someone manually re-clicks Connect.
@@ -1475,8 +1519,16 @@
                         document.getElementById('camStatus').innerText = "Connected";
                         document.getElementById('camStatus').className = "status success";
                     }
+                    _serverSettingsLoaded = true;
                 })
-                .catch(err => console.error('Could not load server settings, falling back to local cache only.', err));
+                .catch(err => {
+                    console.error('Could not load server settings, falling back to local cache only.', err);
+                    // Still unblock sending — we have no better data than
+                    // whatever loadConfig() already put in the DOM, and
+                    // blocking forever would make the page unusable if the
+                    // server is genuinely unreachable.
+                    _serverSettingsLoaded = true;
+                });
         }
 
         // Load config on page load

@@ -555,7 +555,21 @@ def get_video_stream():
         # Prefer a full camera calibration when available. Fall back to single-k1 model.
         if camera_matrix is not None and dist_coeffs is not None:
             model = calibration_model or ('fisheye' if getattr(dist_coeffs, 'size', 0) == 4 else 'standard')
-            if settings_dirty or undistort_map1 is None or undistort_model != model:
+            _needs_recompute = settings_dirty or undistort_map1 is None or undistort_model != model
+            # If the last attempt failed and nothing's changed since, don't
+            # retry this expensive computation every single frame forever —
+            # e.g. a saved calibration fitted to a *different* camera's
+            # resolution than what's currently connected (easy to hit right
+            # after swapping cameras) can make this fail or silently produce
+            # a wrong map every time, which used to cost this recompute on
+            # every frame with no way to notice why.
+            _cooldown_active = (
+                undistort_map1 is None
+                and getattr(get_video_stream, '_undistort_failed', False)
+                and (time.time() - getattr(get_video_stream, '_undistort_last_attempt', 0)) < 5.0
+            )
+            if _needs_recompute and not _cooldown_active:
+                get_video_stream._undistort_last_attempt = time.time()
                 try:
                     if model == 'standard':
                         dist = np.array(dist_coeffs, dtype=np.float64).reshape(-1, 1)
@@ -571,10 +585,17 @@ def get_video_stream():
                             cam, dist, np.eye(3), new_cam, (w, h), cv2.CV_32FC1)
                     undistort_model = model
                     settings_dirty = False
-                except Exception:
-                    # If fisheye module or functions are not available, skip calibration
+                    get_video_stream._undistort_failed = False
+                except Exception as e:
+                    print(
+                        f"[WARN] Undistort map recompute failed: {e}. If you recently switched "
+                        f"cameras, the saved lens calibration is likely fitted to the old camera's "
+                        f"resolution — reset and redo it in the dashboard's Calibration panel.",
+                        flush=True,
+                    )
                     undistort_map1 = None
                     undistort_map2 = None
+                    get_video_stream._undistort_failed = True
             if undistort_map1 is not None:
                 frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
                 if diag_undistort_viewers > 0:
@@ -1455,7 +1476,17 @@ def update_settings():
     if 'cctag_id_switch_margin' in data:
         try: cctag_id_switch_margin = float(data['cctag_id_switch_margin'])
         except Exception: pass
-    if 'distortion_k1' in data: distortion_k1 = float(data['distortion_k1'])
+    if 'distortion_k1' in data:
+        distortion_k1 = float(data['distortion_k1'])
+        # Only the legacy single-coefficient undistort map depends on this
+        # value — everything else in this endpoint (Hough params, CCTag
+        # thresholds, brightness, etc.) has nothing to do with the undistort
+        # map. This used to be set unconditionally for every settings POST,
+        # forcing a full map recompute (cv2.fisheye.initUndistortRectifyMap
+        # — genuinely expensive at higher resolutions) on the very next
+        # frame after *any* slider change, calibration-related or not.
+        global settings_dirty
+        settings_dirty = True
     if 'zoom' in data: zoom_level = float(data['zoom'])
     if 'offset_x' in data: offset_x = float(data['offset_x'])
     if 'offset_y' in data: offset_y = float(data['offset_y'])
@@ -1490,8 +1521,6 @@ def update_settings():
             get_video_stream.last_marker_ids -= set(to_delete)
 
     save_config_to_disk()
-    global settings_dirty
-    settings_dirty = True
     return jsonify({"success": True})
 
 
