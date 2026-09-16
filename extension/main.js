@@ -62,7 +62,7 @@ let viewportSize = { width: 0, height: 0 };
 // arrives — which is what this used to do — makes tokens visibly hop from
 // point to point rather than glide. Instead, `latestTokens` holds the most
 // recent raw sample from the server (updated instantly, no throttling), and
-// a requestAnimationFrame loop continuously eases `smoothState` toward it
+// a setInterval-driven loop continuously eases `smoothState` toward it
 // using exponential smoothing (a fixed fraction of the remaining distance
 // per unit time, independent of the server's actual sample rate/jitter).
 // That loop is what actually pushes to Owlbear, at up to TARGET_FPS times a
@@ -97,6 +97,7 @@ let manualBlackoutUntil = 0; // Date.now()-based deadline; 0 = no active overrid
 document.getElementById('sync-fps').addEventListener('input', (e) => {
   TARGET_FPS = parseInt(e.target.value, 10);
   document.getElementById('fps-val').innerText = TARGET_FPS;
+  if (_intervalHandle) startRenderLoop(); // apply the new rate immediately instead of waiting for a reconnect
 });
 
 document.getElementById('test-blackout-btn').addEventListener('click', async () => {
@@ -168,7 +169,7 @@ OBR.onReady(async () => {
   // round trip on every single position push.
   setInterval(refreshViewportSize, 2000);
 
-  requestAnimationFrame(renderLoop);
+  startRenderLoop();
 });
 
 async function refreshViewportSize() {
@@ -302,18 +303,24 @@ function connectSocketIO(url) {
   }
 }
 
-// Runs every animation frame (~60fps) purely to keep motion smooth locally;
-// actually pushing to Owlbear is throttled separately to TARGET_FPS since
-// each push costs real round trips to the host app.
-let _lastFrameTime = performance.now();
-let _lastPushTime = 0;
+// Drives smoothing + pushes to Owlbear on a fixed-rate setInterval rather
+// than requestAnimationFrame. rAF is deliberately suspended by the browser
+// the instant this tab isn't the visible/foreground one — fine for a
+// typical animation, but exactly wrong here: a projector/second-screen fog
+// of war setup is meant to keep updating while the DM works in a different
+// browser tab or window, which is precisely when rAF stops firing at all.
+// setInterval keeps running in background tabs (browsers only clamp its
+// rate after several minutes of continuous backgrounding, rather than
+// freezing it outright the way rAF does), so updates keep flowing to the
+// visible-but-unfocused Owlbear tab.
+let _intervalHandle = null;
+let _lastTickTime = performance.now();
 let _isPushing = false;
 
-function renderLoop(now) {
-  requestAnimationFrame(renderLoop);
-
-  const dt = Math.min((now - _lastFrameTime) / 1000, 0.25); // clamp so a backgrounded tab doesn't lurch on return
-  _lastFrameTime = now;
+function tick() {
+  const now = performance.now();
+  const dt = Math.min((now - _lastTickTime) / 1000, 0.25); // clamp so a long gap (e.g. throttled interval) doesn't lurch
+  _lastTickTime = now;
 
   if (!isReady || !socket || !socket.connected) return;
 
@@ -328,11 +335,13 @@ function renderLoop(now) {
     if (Math.abs(target.y - s.y) < POS_EPSILON) s.y = target.y;
   }
 
-  const pushInterval = 1000 / TARGET_FPS;
-  if (now - _lastPushTime < pushInterval) return;
-  _lastPushTime = now;
-
   pushToOwlbear();
+}
+
+function startRenderLoop() {
+  if (_intervalHandle) clearInterval(_intervalHandle);
+  _lastTickTime = performance.now();
+  _intervalHandle = setInterval(tick, 1000 / TARGET_FPS);
 }
 
 async function pushToOwlbear() {

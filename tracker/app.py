@@ -1033,7 +1033,15 @@ def get_video_stream():
                     # reappear outside a fixed radius and get treated as
                     # brand new. Capped so two genuinely separate tokens
                     # can't merge just because one of them is fast.
-                    speed = np.hypot(t_data.get("vx", 0), t_data.get("vy", 0))
+                    #
+                    # Uses the speed recorded at the moment it was last
+                    # actually seen, not its live (friction-damped) vx/vy —
+                    # those get knocked down every single missed frame (see
+                    # below), so a token missing for more than a couple of
+                    # frames would otherwise shrink its own reattachment net
+                    # right when it needs it most, undermining the whole
+                    # point of this widening.
+                    speed = t_data.get("last_seen_speed", np.hypot(t_data.get("vx", 0), t_data.get("vy", 0)))
                     search_radius = min(max(cr * 1.5, 60, speed * (missed + 1) * 2.0), 500)
                 else:
                     search_radius = max(cr * 1.5, 60)  # Search radius scales with token size
@@ -1063,15 +1071,31 @@ def get_video_stream():
                     token["vx"] = token.get("vx", 0) * 0.5
                     token["vy"] = token.get("vy", 0) * 0.5
                 else:
-                    # Movement: snap smoothly
-                    alpha = min(1.0, dist_moved / 8.0)  # full snap above 8px movement
+                    # Movement: snap smoothly. The full-snap distance used to
+                    # be a flat 8px, which was only ever tuned against a much
+                    # lower-resolution feed — at 1080p/4K native frames, any
+                    # deliberate hand movement covers 8px within a frame or
+                    # two, so this ramp maxed out (alpha=1, i.e. no smoothing
+                    # at all, raw per-frame Hough noise passed straight
+                    # through) for anything but genuinely slow motion. Tying
+                    # it to the token's own detected radius instead makes the
+                    # ramp scale with resolution/camera distance the same way
+                    # the token size itself does, so "moving a little faster"
+                    # still gets smoothed instead of jumping straight to raw.
+                    full_snap_dist = max(cr, hough_deadzone * 3.0)
+                    alpha = min(1.0, dist_moved / full_snap_dist)
                     alpha = max(0.4, alpha)              # always move at least 40% toward detection
                     token["vx"] = token.get("vx", 0) * 0.5 + (cx - token["x"]) * 0.5
                     token["vy"] = token.get("vy", 0) * 0.5 + (cy - token["y"]) * 0.5
-                    
+                    # Recorded undamped, purely from this frame's real
+                    # displacement — used as the reattachment radius's speed
+                    # estimate above so it doesn't erode with each ghost
+                    # frame the way the live (friction-damped) vx/vy does.
+                    token["last_seen_speed"] = np.hypot(token["vx"], token["vy"])
+
                 token["x"] = token["x"] * (1 - alpha) + cx * alpha
                 token["y"] = token["y"] * (1 - alpha) + cy * alpha
-                
+
                 # Apply similar deadzone for radius
                 if abs(token["r"] - cr) > (hough_deadzone * 0.5):
                     token["r"] = token["r"] * 0.85 + cr * 0.15
@@ -1091,9 +1115,21 @@ def get_video_stream():
             if token_id not in matched_tokens:
                 t = get_video_stream.tracked_tokens[token_id]
                 t["missed"] += 1
-                # Dampen velocity during ghost phase (friction)
-                t["vx"] = t.get("vx", 0) * 0.7
-                t["vy"] = t.get("vy", 0) * 0.7
+                # Dampen velocity during ghost phase (friction). Gentler than
+                # the old 0.7 — a disk that's mid-slide when Hough briefly
+                # loses it (motion blur) is still moving, not decelerating,
+                # so assuming near-constant velocity for a few frames tracks
+                # reality far better than assuming it's stopping. At 0.7,
+                # four missed frames in a row already cut the predicted
+                # position's velocity to ~24% of the real one — the
+                # prediction visibly stalls out behind a disk that's still
+                # sliding, which is what "the token stops behind" looks like
+                # from the client's side even though Hough itself never lost
+                # the real disk for long. 0.92 still settles a token that's
+                # genuinely gone within the cctag_ghosting_frames window, just
+                # far more gradually.
+                t["vx"] = t.get("vx", 0) * 0.92
+                t["vy"] = t.get("vy", 0) * 0.92
                 # Predict position forward using damped velocity
                 t["x"] += t["vx"]
                 t["y"] += t["vy"]
