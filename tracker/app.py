@@ -79,6 +79,45 @@ except Exception as e:
     print("CCTag init error:", e)
     CCTAG_AVAILABLE = False
 
+# Optional OpenCL (GPU) offload for the undistort/zoom/pan/rotate warp — the
+# two most expensive full-frame geometric transforms in the pipeline. This
+# is OpenCV's UMat/T-API mechanism, which dispatches to whatever OpenCL
+# device is available (Intel iGPUs via Intel's Compute Runtime, in our
+# case) — NOT CUDA, which is NVIDIA-only and is why CCTag's own GPU support
+# and OpenCV's CUDA-only HoughCircles can't be used on Intel hardware at
+# all. Hough circle detection has no reliable OpenCL dispatch path in
+# OpenCV, so it isn't included here — only remap/warpAffine are targeted.
+#
+# Verified at startup, not just requested: cv2.ocl.haveOpenCL() checks
+# whether OpenCV was built with T-API support AND can find a working OpenCL
+# ICD at runtime (needs the intel-opencl-icd package + /dev/dri passed
+# through, same device VAAPI uses). If either isn't true, this silently
+# stays off and everything runs on CPU exactly as before — this optimization
+# can never make things worse, only sometimes fail to engage.
+USE_OPENCL = False
+if os.environ.get('TRACKER_USE_OPENCL', '0').lower() in ('1', 'true', 'yes'):
+    try:
+        cv2.ocl.setUseOpenCL(True)
+        if cv2.ocl.haveOpenCL() and cv2.ocl.useOpenCL():
+            USE_OPENCL = True
+            print(f"[OK] OpenCL GPU offload active: {cv2.ocl.Device.getDefault().name()}", flush=True)
+        else:
+            print("[WARN] TRACKER_USE_OPENCL=1 but no working OpenCL device found — undistort/warp will run on CPU.", flush=True)
+    except Exception as e:
+        print(f"[WARN] OpenCL setup failed ({e}) — undistort/warp will run on CPU.", flush=True)
+
+
+def _as_umat_cached(np_array, cache):
+    """Wrap np_array as a cv2.UMat, re-uploading to the GPU only when the
+    underlying array has actually been replaced (tracked by object identity,
+    the same signal the existing map-recompute caching already uses) rather
+    than every single frame. cache is a single-element list used as a
+    mutable box so the wrapped UMat survives across calls."""
+    if not cache or cache[0] is not np_array:
+        cache[:] = [np_array, cv2.UMat(np_array)]
+    return cache[1]
+
+
 class IPCameraCapture:
     def __init__(self, url):
         self.url = url
@@ -89,6 +128,11 @@ class IPCameraCapture:
         # Use deque with maxlen=1 for atomic "latest frame" access
         self.frame_buffer = collections.deque(maxlen=1)
         self.last_frame_time = 0
+        # Signalled the moment a newly decoded frame lands, so the
+        # processing loop can wake immediately instead of polling on a
+        # fixed sleep — that poll interval was pure added latency on every
+        # single frame.
+        self.frame_available = threading.Event()
         self.is_running = True
 
         # NOTE: CAP_PROP_BUFFERSIZE is not honored by OpenCV's FFmpeg backend
@@ -120,6 +164,7 @@ class IPCameraCapture:
                 continue
             self.frame_buffer.append(frame)
             self.last_frame_time = time.time()
+            self.frame_available.set()
 
             frame_count += 1
             now = time.time()
@@ -190,6 +235,11 @@ class IPCameraCaptureVAAPI:
         self.device = device or os.environ.get('TRACKER_VAAPI_DEVICE', '/dev/dri/renderD128')
         self.frame_buffer = collections.deque(maxlen=1)
         self.last_frame_time = 0
+        # Signalled the moment a newly decoded frame lands, so the
+        # processing loop can wake immediately instead of polling on a
+        # fixed sleep — that poll interval was pure added latency on every
+        # single frame.
+        self.frame_available = threading.Event()
         self.is_running = True
         self.proc = None
         self._opened = False
@@ -261,6 +311,7 @@ class IPCameraCaptureVAAPI:
             frame = cv2.cvtColor(nv12, cv2.COLOR_YUV2BGR_NV12)
             self.frame_buffer.append(frame)
             self.last_frame_time = time.time()
+            self.frame_available.set()
 
             frame_count += 1
             now = time.time()
@@ -659,12 +710,19 @@ def get_video_stream():
         success = False
         frame = None
         frame_time = None
+        _frame_event = None
 
         with camera_lock:
             if cap is not None and cap.isOpened():
                 # To prevent OpenCV from buffering and causing slow-motion lag,
                 # we grab frames rapidly to clear the buffer, then retrieve the latest one.
                 # Since OpenCV doesn't easily let us bypass the TCP buffer, grabbing 2-3 extra frames catches us up.
+                # Clear *before* reading: anything the reader thread signals
+                # after this point is genuinely newer than what we're about
+                # to look at, so the wait below can't miss a wakeup.
+                _frame_event = getattr(cap, 'frame_available', None)
+                if _frame_event is not None:
+                    _frame_event.clear()
                 for _ in range(4):
                     cap.grab()
                 success, frame = cap.retrieve()
@@ -709,7 +767,14 @@ def get_video_stream():
         # positions, adding pointless network chatter on top of it. Skip
         # straight to a short sleep until a genuinely new frame lands.
         if frame_time is not None and frame_time == last_processed_frame_time:
-            time.sleep(0.005)
+            if _frame_event is not None:
+                # Wakes within microseconds of the next frame being decoded
+                # rather than up to a full poll interval later. The timeout
+                # is just a safety net so a dead stream still falls through
+                # to the reconnect logic above.
+                _frame_event.wait(timeout=0.1)
+            else:
+                time.sleep(0.005)
             continue
         last_processed_frame_time = frame_time
 
@@ -799,6 +864,10 @@ def get_video_stream():
         # recomputed above) or zoom/pan/rotation themselves change — not
         # every frame.
         _needs_affine = zoom_level != 1.0 or offset_x != 0.0 or offset_y != 0.0 or rotation != 0.0
+
+        if USE_OPENCL and not hasattr(get_video_stream, '_umat_caches'):
+            get_video_stream._umat_caches = {k: [] for k in ('combined_map1', 'combined_map2', 'undistort_map1', 'undistort_map2')}
+
         if undistort_map1 is not None and _needs_affine:
             _combo_key = (id(undistort_map1), zoom_level, offset_x, offset_y, rotation, w, h)
             if combined_map_params != _combo_key:
@@ -808,14 +877,32 @@ def get_video_stream():
                 combined_map1 = cv2.warpAffine(undistort_map1, M, (w, h), flags=cv2.INTER_LINEAR)
                 combined_map2 = cv2.warpAffine(undistort_map2, M, (w, h), flags=cv2.INTER_LINEAR)
                 combined_map_params = _combo_key
-            frame = cv2.remap(frame, combined_map1, combined_map2, cv2.INTER_LINEAR)
+            if USE_OPENCL:
+                _c = get_video_stream._umat_caches
+                frame = cv2.remap(
+                    cv2.UMat(frame),
+                    _as_umat_cached(combined_map1, _c['combined_map1']),
+                    _as_umat_cached(combined_map2, _c['combined_map2']),
+                    cv2.INTER_LINEAR,
+                ).get()
+            else:
+                frame = cv2.remap(frame, combined_map1, combined_map2, cv2.INTER_LINEAR)
             if diag_undistort_viewers > 0:
                 try:
                     undistorted_frame_for_stream = frame.copy()
                 except Exception:
                     undistorted_frame_for_stream = None
         elif undistort_map1 is not None:
-            frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
+            if USE_OPENCL:
+                _c = get_video_stream._umat_caches
+                frame = cv2.remap(
+                    cv2.UMat(frame),
+                    _as_umat_cached(undistort_map1, _c['undistort_map1']),
+                    _as_umat_cached(undistort_map2, _c['undistort_map2']),
+                    cv2.INTER_LINEAR,
+                ).get()
+            else:
+                frame = cv2.remap(frame, undistort_map1, undistort_map2, cv2.INTER_LINEAR)
             if diag_undistort_viewers > 0:
                 try:
                     undistorted_frame_for_stream = frame.copy()
@@ -825,7 +912,10 @@ def get_video_stream():
             M = cv2.getRotationMatrix2D((w / 2, h / 2), rotation, zoom_level)
             M[0, 2] += offset_x * w
             M[1, 2] += offset_y * h
-            frame = cv2.warpAffine(frame, M, (w, h), flags=cv2.INTER_LINEAR)
+            if USE_OPENCL:
+                frame = cv2.warpAffine(cv2.UMat(frame), M, (w, h), flags=cv2.INTER_LINEAR).get()
+            else:
+                frame = cv2.warpAffine(frame, M, (w, h), flags=cv2.INTER_LINEAR)
 
         # 3. Brightness, Contrast, Exposure
         # Apply Brightness and Contrast
@@ -1273,9 +1363,23 @@ def get_video_stream():
 STREAM_JPEG_QUALITY = 80
 _JPEG_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, STREAM_JPEG_QUALITY]
 
+# Max width of the dashboard preview stream. Detection always runs on the
+# full-resolution frame — this only shrinks what gets shipped to the
+# browser, which is the difference between the preview keeping up and
+# drifting seconds behind on a high-resolution camera. Set to 0 to disable
+# downscaling and stream at native resolution.
+STREAM_MAX_WIDTH = int(os.environ.get('TRACKER_STREAM_MAX_WIDTH', '1920'))
+
 
 def generate_frames():
     global current_frame
+    # Only encode/send a frame we haven't already sent. This loop used to
+    # yield on a fixed ~33fps timer regardless of the source rate, so at a
+    # 10fps camera every single frame was re-encoded and re-sent ~3 times —
+    # triple the bandwidth and JPEG cost for zero additional information.
+    # When the browser couldn't drain that fast enough, the excess queued in
+    # the socket buffer and the preview drifted seconds behind live.
+    last_sent = None
     while True:
         # Grab a reference (not a copy) under the lock. get_video_stream()
         # always publishes a brand-new array (`current_frame = frame.copy()`)
@@ -1294,12 +1398,30 @@ def generate_frames():
             # Need to yield *something* so the stream keeps connection alive
             time.sleep(0.1)
             continue
+        if frame_ref is last_sent:
+            # Nothing new decoded yet — don't re-send the same picture.
+            time.sleep(0.005)
+            continue
+        last_sent = frame_ref
+
+        # Downscale the preview. This is a monitoring/calibration view, not
+        # the tracking input — the detection pipeline always works on the
+        # full-resolution frame regardless. At the camera's native
+        # resolution each JPEG is large enough that pushing them at source
+        # rate can outrun the browser, which is what builds the backlog.
+        if STREAM_MAX_WIDTH > 0 and frame_ref.shape[1] > STREAM_MAX_WIDTH:
+            _scale = STREAM_MAX_WIDTH / frame_ref.shape[1]
+            frame_ref = cv2.resize(
+                frame_ref,
+                (STREAM_MAX_WIDTH, max(1, int(frame_ref.shape[0] * _scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+
         ret, buffer = cv2.imencode('.jpg', frame_ref, _JPEG_PARAMS)
         frame_bytes = buffer.tobytes()
 
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        time.sleep(0.03) # Limit framerate to browser to save bandwidth
 
 def generate_raw_frames():
     global raw_frame_for_stream, diag_raw_viewers
@@ -1435,6 +1557,22 @@ def calibrate():
     if action == 'add_point':
         x = data.get('x')
         y = data.get('y')
+        # The dashboard reports clicks in the coordinate space of the image
+        # it actually received, which is downscaled (see STREAM_MAX_WIDTH)
+        # while src_pts is applied to the full-resolution processing frame.
+        # Scale here using the client's own reported image size rather than
+        # assuming a particular ratio, so this stays correct no matter what
+        # the preview is scaled to.
+        src_w = data.get('src_w')
+        src_h = data.get('src_h')
+        if src_w and src_h:
+            with frame_lock:
+                _cur = current_frame
+            if _cur is not None:
+                frame_h, frame_w = _cur.shape[:2]
+                x = x * (frame_w / float(src_w))
+                y = y * (frame_h / float(src_h))
+
         if corner_idx < 4:
             src_pts[corner_idx] = [x, y]
             corner_idx += 1

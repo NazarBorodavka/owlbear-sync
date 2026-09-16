@@ -1156,7 +1156,16 @@
             fetch('/api/calibrate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'add_point', x: x, y: y })
+                // Send the dimensions of the image these coordinates are
+                // relative to — the preview is downscaled, so the server
+                // has to scale them back into full-resolution frame space.
+                body: JSON.stringify({
+                    action: 'add_point',
+                    x: x,
+                    y: y,
+                    src_w: this.naturalWidth,
+                    src_h: this.naturalHeight
+                })
             })
                 .then(res => res.json())
                 .then(data => {

@@ -18,8 +18,16 @@ services:
       # isn't present or hardware decode fails for any reason, so it's safe
       # to leave enabled even if you're not sure your hardware supports it.
       # - TRACKER_USE_VAAPI=1
-    # Uncomment together with TRACKER_USE_VAAPI=1 above — passes the Intel
-    # GPU's render node through to the container. Find yours with
-    # `ls /dev/dri` on the host if it's not /dev/dri/renderD128.
+      # Optional: offload the undistort/zoom/pan/rotate warp to the same
+      # Intel iGPU via OpenCV's OpenCL path (not CUDA — CCTag's own GPU
+      # support and OpenCV's HoughCircles are CUDA-only and can't use Intel
+      # hardware at all, so this is deliberately scoped to just the
+      # undistort/warp step). Independent of TRACKER_USE_VAAPI above — you
+      # can enable either, both, or neither. Same automatic-fallback safety:
+      # if no working OpenCL device is found, everything just runs on CPU.
+      # - TRACKER_USE_OPENCL=1
+    # Uncomment together with either flag above — both features use the same
+    # Intel GPU render node. Find yours with `ls /dev/dri` on the host if
+    # it's not /dev/dri/renderD128.
     # devices:
     #   - /dev/dri:/dev/dri

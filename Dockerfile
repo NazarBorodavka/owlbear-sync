@@ -3,18 +3,22 @@ FROM python:3.12-slim-bookworm
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 
-# Install dependencies for CCTag runtime and build, plus a real system
-# ffmpeg + Intel VAAPI stack for optional hardware-accelerated RTSP decode
-# (see IPCameraCaptureVAAPI in tracker/app.py). This is unrelated to the
-# FFmpeg bundled inside the opencv-python-headless wheel that cv2.VideoCapture
-# uses by default — that bundled build is a generic binary with no VAAPI
-# support compiled in, which is a hard limitation of the PyPI wheel, not
-# something togglable at runtime. Debian's own ffmpeg package *does* support
-# VAAPI, so the hardware-accel path shells out to it directly instead.
-# These packages are always installed (small, harmless if unused) — actually
-# using hardware decode still requires opting in via TRACKER_USE_VAAPI and
+# Install dependencies for CCTag runtime and build, plus optional GPU-offload
+# support for two independent, separately-toggled features (see
+# TRACKER_USE_VAAPI / TRACKER_USE_OPENCL and IPCameraCaptureVAAPI /
+# USE_OPENCL in tracker/app.py):
+#   - ffmpeg + libva*: a real system ffmpeg (unrelated to the FFmpeg bundled
+#     inside opencv-python-headless, which has no VAAPI support compiled in —
+#     a hard PyPI-wheel limitation, not something togglable at runtime) for
+#     hardware-accelerated RTSP decode via Intel Quick Sync.
+#   - intel-opencl-icd + clinfo: an actual OpenCL device for OpenCV's
+#     UMat/T-API to dispatch remap/warpAffine to (this is OpenCL, not CUDA —
+#     CUDA-only features like CCTag's own GPU support or OpenCV's
+#     CUDA-only HoughCircles simply can't run on Intel hardware at all).
+# All of this is always installed (small, harmless if unused) — actually
+# using either feature still requires opting in via the env vars above and
 # passing /dev/dri through in docker-compose.yml, since not every host has
-# an Intel iGPU.
+# a compatible Intel iGPU.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -27,6 +31,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     intel-media-va-driver \
     libva2 \
     libva-drm2 \
+    intel-opencl-icd \
+    ocl-icd-libopencl1 \
+    clinfo \
     && rm -rf /var/lib/apt/lists/*
 
 COPY tracker/requirements.txt ./tracker/

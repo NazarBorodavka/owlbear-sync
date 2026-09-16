@@ -156,6 +156,26 @@ function fetchBuildInfo(url) {
     });
 }
 
+// Measures the one leg of the latency chain the server-side [Perf] logs
+// can't see: how long it takes from a tokens_update arriving here to
+// Owlbear actually having applied the move. Every OBR SDK call is a
+// postMessage round-trip to the host, so this can be a meaningful slice of
+// end-to-end delay. Averaged over a window rather than logged per frame so
+// it doesn't flood the console at sync rate.
+let _syncSamples = [];
+let _syncLastReport = performance.now();
+function recordSyncLatency(ms) {
+  _syncSamples.push(ms);
+  const elapsed = performance.now() - _syncLastReport;
+  if (elapsed >= 5000 && _syncSamples.length) {
+    const avg = _syncSamples.reduce((a, b) => a + b, 0) / _syncSamples.length;
+    const worst = Math.max(..._syncSamples);
+    console.log(`[SyncPerf] OBR update: avg ${avg.toFixed(0)}ms, worst ${worst.toFixed(0)}ms over ${_syncSamples.length} updates`);
+    _syncSamples = [];
+    _syncLastReport = performance.now();
+  }
+}
+
 function connectSocketIO(url) {
   if (socket) socket.disconnect();
 
@@ -189,6 +209,7 @@ function connectSocketIO(url) {
       
       if (isUpdating) return; // Skip if we're still processing the previous frame
       isUpdating = true;
+      const _syncStart = performance.now();
 
       try {
         const tokens = data.tokens || [];
@@ -236,6 +257,7 @@ function connectSocketIO(url) {
         }
         
         lastUpdateTime = Date.now();
+        recordSyncLatency(performance.now() - _syncStart);
       } catch (err) {
         console.error("Sync Error:", err);
       } finally {
