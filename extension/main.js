@@ -15,7 +15,7 @@ document.querySelector('#app').innerHTML = `
       <button id="connect-btn">Connect</button>
       <div id="status" class="status disconnected">Disconnected</div>
     </div>
-    
+
     <div class="mapping-section">
       <h3>Token Assignment</h3>
       <p class="subtitle">Assign physical tokens to virtual ones.</p>
@@ -27,14 +27,10 @@ document.querySelector('#app').innerHTML = `
     <div class="mapping-section">
       <h3>Sync Performance</h3>
       <div class="control-row">
-        <label>Sync Rate (FPS): <span id="fps-val">15</span></label>
-        <input type="range" id="sync-fps" min="1" max="30" value="15">
+        <label>Max Update Rate (FPS): <span id="fps-val">30</span></label>
+        <input type="range" id="sync-fps" min="5" max="60" value="30">
       </div>
-      <div class="control-row">
-        <label>Sensitivity (px): <span id="sens-val">3</span></label>
-        <input type="range" id="sync-sens" min="0" max="20" value="3" step="0.5">
-      </div>
-      <p style="font-size: 0.75rem; color: #94a3b8; margin-top: 5px;">Higher FPS or lower sensitivity means smoother movement but more network traffic.</p>
+      <p style="font-size: 0.75rem; color: #94a3b8; margin-top: 5px;">How often positions are pushed to Owlbear. Motion is smoothly interpolated between updates from the tracker, so higher just means less network/host load, not choppier motion.</p>
     </div>
 
     <div class="blackout-settings">
@@ -57,32 +53,93 @@ let tokenMapping = {}; // physicalId -> virtualItemId
 let assignedNames = {}; // physicalId -> virtualName (Used to re-sync across scenes)
 let currentPhysicalTokens = [];
 let virtualTokens = [];
-let isUpdating = false;
-let lastUpdateTime = 0;
-// Was 100ms (10fps) — slower than the camera itself (15fps ~= 66ms/frame),
-// meaning the extension was artificially adding latency below what the
-// backend can already deliver. Matches the camera's real rate now instead
-// of a leftover conservative default from before the CPU limit was fixed.
-let THROTTLE_MS = 66;
-let SYNC_THRESHOLD = 3;
-// The periodic tokens_update handler below calls updateBlackout() on every
-// tick using the tracker's real blank_screen state. Without a guard, that
-// would immediately stomp on a manual "Test Blackout" click — the overlay
-// would get added, then removed again on the very next tick (as little as
-// ~100ms later), which is why the test only ever flashed for a few frames
-// instead of holding for its full duration.
+let sceneItemsCache = [];
+let viewportSize = { width: 0, height: 0 };
+
+// --- Motion smoothing ---------------------------------------------------
+// The tracker only emits a fresh position ~10-15x/sec (whatever the camera
+// captures at), and applying each one directly to Owlbear the instant it
+// arrives — which is what this used to do — makes tokens visibly hop from
+// point to point rather than glide. Instead, `latestTokens` holds the most
+// recent raw sample from the server (updated instantly, no throttling), and
+// a requestAnimationFrame loop continuously eases `smoothState` toward it
+// using exponential smoothing (a fixed fraction of the remaining distance
+// per unit time, independent of the server's actual sample rate/jitter).
+// That loop is what actually pushes to Owlbear, at up to TARGET_FPS times a
+// second — decoupling "how often we learn something new" from "how often we
+// tell Owlbear about it" is what turns the jumps into a smooth glide.
+let latestTokens = {}; // physicalId -> {id, alias, x, y} raw, normalized [0,1]
+let smoothState = {};  // physicalId -> {x, y} currently-applied, normalized [0,1]
+let latestBlank = false;
+let lastServerBlankScreen = false; // most recent value from the server (for test-blackout restore)
+let lastAppliedBlank = false;      // what's actually been pushed to Owlbear
+let TARGET_FPS = 30;
+const SMOOTH_RATE = 20; // 1/s — higher = snappier/less lag, lower = smoother but more visible delay
+const POS_EPSILON = 0.0005; // normalized units; below this, treat as "arrived" and stop nudging
+
+// The periodic render loop below calls applyBlackout() using the tracker's
+// real blank_screen state. Without a guard, that would immediately stomp on
+// a manual "Test Blackout" click — the overlay would get added, then
+// removed again on the very next tick, which is why the test only ever
+// flashed for a few frames instead of holding for its full duration.
 let manualBlackoutUntil = 0; // Date.now()-based deadline; 0 = no active override
-let lastServerBlankScreen = false;
+
+// UI-only listeners are bound immediately, synchronously, with no
+// dependency on any OBR.* call succeeding first. Previously these lived
+// inside the OBR.onReady(async () => {...}) callback, after a couple of
+// awaited OBR calls — if any of those calls rejected (e.g. scene not fully
+// available yet), the rest of the callback silently never ran, which meant
+// nothing after that point (including these listeners) was ever wired up.
+// That's the most likely explanation for "the sliders don't do anything":
+// not that the slider logic was wrong, but that it never got attached at
+// all. Binding these first, unconditionally, means a later OBR failure
+// can't take them down with it.
+document.getElementById('sync-fps').addEventListener('input', (e) => {
+  TARGET_FPS = parseInt(e.target.value, 10);
+  document.getElementById('fps-val').innerText = TARGET_FPS;
+});
+
+document.getElementById('test-blackout-btn').addEventListener('click', async () => {
+  const TEST_DURATION_MS = 1000;
+  manualBlackoutUntil = Date.now() + TEST_DURATION_MS;
+  await applyBlackout(true);
+  setTimeout(async () => {
+    manualBlackoutUntil = 0;
+    // Hand control back to whatever the tracker actually wants right now,
+    // rather than unconditionally turning the overlay off — if a real
+    // blackout started during the test window, this keeps it on.
+    await applyBlackout(lastServerBlankScreen);
+  }, TEST_DURATION_MS);
+});
+
+// Re-apply color immediately when changed, so switching the dropdown has a
+// visible effect right away instead of waiting for the next
+// activate/deactivate transition (which might not happen for a while).
+document.getElementById('blackout-color').addEventListener('change', async () => {
+  if (Date.now() < manualBlackoutUntil || lastServerBlankScreen) {
+    await applyBlackout(true);
+  }
+});
+
+document.getElementById('connect-btn').addEventListener('click', () => {
+  const url = document.getElementById('ws-url').value;
+  connectSocketIO(url);
+});
 
 OBR.onReady(async () => {
   isReady = true;
   document.getElementById('status').innerText = "Ready. Connect to Tracker.";
   document.getElementById('status').className = "status ready";
-  
-  // Name-Based Re-sync: Update mapping whenever the scene changes
+
+  // Name-Based Re-sync: Update mapping whenever the scene changes. Also
+  // keeps sceneItemsCache current so the render loop never has to await a
+  // fresh OBR.scene.items.getItems() on every push — that round trip used
+  // to happen up to 15x/sec purely to re-fetch a list that only actually
+  // changes when this callback fires anyway.
   OBR.scene.items.onChange((items) => {
+    sceneItemsCache = items;
     virtualTokens = items.filter(item => item.layer === "CHARACTER" || item.layer === "MOUNT");
-    
+
     // Merge name-based matches into existing mapping (don't overwrite manual assignments)
     for (const [physicalId, name] of Object.entries(assignedNames)) {
       const match = virtualTokens.find(vt => (vt.text && vt.text.plainText === name) || vt.name === name);
@@ -92,52 +149,36 @@ OBR.onReady(async () => {
     }
     renderMappingUI();
   });
-  
-  // Initial fetch of virtual tokens
-  const items = await OBR.scene.items.getItems();
-  virtualTokens = items.filter(item => item.layer === "CHARACTER" || item.layer === "MOUNT");
 
-  // Add Test Blackout listener
-  document.getElementById('test-blackout-btn').addEventListener('click', async () => {
-    const TEST_DURATION_MS = 1000;
-    manualBlackoutUntil = Date.now() + TEST_DURATION_MS;
-    await updateBlackout(true);
-    setTimeout(async () => {
-      manualBlackoutUntil = 0;
-      // Hand control back to whatever the tracker actually wants right now,
-      // rather than unconditionally turning the overlay off — if a real
-      // blackout started during the test window, this keeps it on.
-      await updateBlackout(lastServerBlankScreen);
-    }, TEST_DURATION_MS);
-  });
+  try {
+    // Initial fetch — everything after this used to live in this same
+    // callback and would never run if this particular call failed. It's
+    // now the *only* thing gated on it; onChange above will keep things
+    // current from here on regardless.
+    const items = await OBR.scene.items.getItems();
+    sceneItemsCache = items;
+    virtualTokens = items.filter(item => item.layer === "CHARACTER" || item.layer === "MOUNT");
+  } catch (e) {
+    console.error("Initial scene items fetch failed:", e);
+  }
 
-  // Re-apply color immediately when changed, so switching the dropdown has
-  // a visible effect right away instead of waiting for the next
-  // activate/deactivate transition (which might not happen for a while).
-  document.getElementById('blackout-color').addEventListener('change', async () => {
-    if (Date.now() < manualBlackoutUntil || lastServerBlankScreen) {
-      await updateBlackout(true);
-    }
-  });
+  await refreshViewportSize();
+  // Viewport pixel size only changes on window resize, not per-frame — a
+  // slow background poll is enough and avoids a getWidth()/getHeight()
+  // round trip on every single position push.
+  setInterval(refreshViewportSize, 2000);
 
-  // UI Listeners for Sync Performance
-  document.getElementById('sync-fps').addEventListener('input', (e) => {
-    const fps = parseInt(e.target.value, 10);
-    document.getElementById('fps-val').innerText = fps;
-    THROTTLE_MS = Math.floor(1000 / fps);
-  });
-
-  document.getElementById('sync-sens').addEventListener('input', (e) => {
-    SYNC_THRESHOLD = parseFloat(e.target.value);
-    document.getElementById('sens-val').innerText = SYNC_THRESHOLD;
-  });
+  requestAnimationFrame(renderLoop);
 });
 
-document.getElementById('connect-btn').addEventListener('click', () => {
-  const url = document.getElementById('ws-url').value;
-  connectSocketIO(url);
-});
-
+async function refreshViewportSize() {
+  try {
+    const [width, height] = await Promise.all([OBR.viewport.getWidth(), OBR.viewport.getHeight()]);
+    viewportSize = { width, height };
+  } catch (e) {
+    console.error("Viewport size fetch failed:", e);
+  }
+}
 
 // Shows which build of the tracker (and by extension, which build of this
 // extension's own served files, since both are baked into the same Docker
@@ -156,12 +197,11 @@ function fetchBuildInfo(url) {
     });
 }
 
-// Measures the one leg of the latency chain the server-side [Perf] logs
-// can't see: how long it takes from a tokens_update arriving here to
-// Owlbear actually having applied the move. Every OBR SDK call is a
-// postMessage round-trip to the host, so this can be a meaningful slice of
-// end-to-end delay. Averaged over a window rather than logged per frame so
-// it doesn't flood the console at sync rate.
+// Measures how long an actual push to Owlbear takes (transform round trips
+// + updateItems), separate from how often we attempt one. Every OBR SDK
+// call is a postMessage round-trip to the host, so this is a meaningful
+// slice of end-to-end delay. Averaged over a window rather than logged per
+// call so it doesn't flood the console at push rate.
 let _syncSamples = [];
 let _syncLastReport = performance.now();
 function recordSyncLatency(ms) {
@@ -170,7 +210,7 @@ function recordSyncLatency(ms) {
   if (elapsed >= 5000 && _syncSamples.length) {
     const avg = _syncSamples.reduce((a, b) => a + b, 0) / _syncSamples.length;
     const worst = Math.max(..._syncSamples);
-    console.log(`[SyncPerf] OBR update: avg ${avg.toFixed(0)}ms, worst ${worst.toFixed(0)}ms over ${_syncSamples.length} updates`);
+    console.log(`[SyncPerf] OBR push: avg ${avg.toFixed(0)}ms, worst ${worst.toFixed(0)}ms over ${_syncSamples.length} pushes`);
     _syncSamples = [];
     _syncLastReport = performance.now();
   }
@@ -195,73 +235,65 @@ function connectSocketIO(url) {
       document.getElementById('status').innerText = "Connected to Tracker";
       document.getElementById('status').className = "status connected";
     });
-    
+
     socket.on('disconnect', () => {
       document.getElementById('status').innerText = "Disconnected";
       document.getElementById('status').className = "status disconnected";
     });
-    
-    socket.on('tokens_update', async (data) => {
+
+    // Deliberately cheap: no OBR calls, no awaits. This just records the
+    // latest known state so the render loop (below) can pick it up on its
+    // own schedule. Previously this handler did the entire OBR round trip
+    // itself and dropped any message that arrived while a previous one was
+    // still in flight — since each OBR round trip can plausibly take
+    // longer than the ~66ms gap between camera frames, that dropped the
+    // effective update rate to whatever the OBR round trip allowed, often
+    // just 1-2/sec, regardless of how fast the tracker was actually
+    // emitting.
+    socket.on('tokens_update', (data) => {
       if (!isReady) return;
-      
-      const now = Date.now();
-      if (now - lastUpdateTime < THROTTLE_MS) return; // Throttle to the configured sync rate
-      
-      if (isUpdating) return; // Skip if we're still processing the previous frame
-      isUpdating = true;
-      const _syncStart = performance.now();
 
-      try {
-        const tokens = data.tokens || [];
-        const blankScreen = data.blank_screen || false;
-        lastServerBlankScreen = blankScreen;
+      const tokens = data.tokens || [];
+      latestBlank = data.blank_screen || false;
+      lastServerBlankScreen = latestBlank;
 
-        // Fetch items and viewport details concurrently to reduce latency
-        const [items, screenWidth, screenHeight] = await Promise.all([
-          OBR.scene.items.getItems(),
-          OBR.viewport.getWidth(),
-          OBR.viewport.getHeight()
-        ]);
-
-        // 1. Prioritize blackout (Critical for projector setup) — unless a
-        // manual test is currently overriding it (see test-blackout-btn).
-        if (Date.now() >= manualBlackoutUntil) {
-          await updateBlackout(blankScreen, items);
+      const seenIds = new Set();
+      for (const t of tokens) {
+        seenIds.add(t.id);
+        latestTokens[t.id] = t;
+        if (!smoothState[t.id]) {
+          // First time seeing this token: snap immediately rather than
+          // easing in from (0,0) or some other undefined starting point.
+          smoothState[t.id] = { x: t.x, y: t.y };
         }
+      }
+      for (const id of Object.keys(latestTokens)) {
+        if (!seenIds.has(id)) {
+          delete latestTokens[id];
+          delete smoothState[id];
+        }
+      }
 
-        // 2. Sync positions
-        await syncTokensWithOwlbear(tokens, items, screenWidth, screenHeight);
-        
-        // 3. UI Update & Auto-Mapping
-        let mappingChanged = false;
-        
-        const oldIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
-        currentPhysicalTokens = tokens;
-        
-        // Auto-assign virtual tokens based on physical token alias
-        currentPhysicalTokens.forEach(pt => {
-          if (pt.alias && !tokenMapping[pt.id]) {
-            const match = virtualTokens.find(vt => (vt.text && vt.text.plainText === pt.alias) || vt.name === pt.alias);
-            if (match) {
-              tokenMapping[pt.id] = match.id;
-              assignedNames[pt.id] = pt.alias;
-              mappingChanged = true;
-            }
+      // Mapping UI / auto-assignment bookkeeping — all local, no OBR calls,
+      // safe to do synchronously on every message.
+      let mappingChanged = false;
+      const oldIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
+      currentPhysicalTokens = tokens;
+
+      currentPhysicalTokens.forEach(pt => {
+        if (pt.alias && !tokenMapping[pt.id]) {
+          const match = virtualTokens.find(vt => (vt.text && vt.text.plainText === pt.alias) || vt.name === pt.alias);
+          if (match) {
+            tokenMapping[pt.id] = match.id;
+            assignedNames[pt.id] = pt.alias;
+            mappingChanged = true;
           }
-        });
-        
-        const newIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
-        
-        if (newIds !== oldIds || mappingChanged) {
-          renderMappingUI();
         }
-        
-        lastUpdateTime = Date.now();
-        recordSyncLatency(performance.now() - _syncStart);
-      } catch (err) {
-        console.error("Sync Error:", err);
-      } finally {
-        isUpdating = false;
+      });
+
+      const newIds = currentPhysicalTokens.map(t => t.id).sort().join(',');
+      if (newIds !== oldIds || mappingChanged) {
+        renderMappingUI();
       }
     });
   } catch (e) {
@@ -270,14 +302,75 @@ function connectSocketIO(url) {
   }
 }
 
+// Runs every animation frame (~60fps) purely to keep motion smooth locally;
+// actually pushing to Owlbear is throttled separately to TARGET_FPS since
+// each push costs real round trips to the host app.
+let _lastFrameTime = performance.now();
+let _lastPushTime = 0;
+let _isPushing = false;
+
+function renderLoop(now) {
+  requestAnimationFrame(renderLoop);
+
+  const dt = Math.min((now - _lastFrameTime) / 1000, 0.25); // clamp so a backgrounded tab doesn't lurch on return
+  _lastFrameTime = now;
+
+  if (!isReady || !socket || !socket.connected) return;
+
+  const alpha = 1 - Math.exp(-SMOOTH_RATE * dt);
+  for (const id in smoothState) {
+    const target = latestTokens[id];
+    if (!target) continue;
+    const s = smoothState[id];
+    s.x += (target.x - s.x) * alpha;
+    s.y += (target.y - s.y) * alpha;
+    if (Math.abs(target.x - s.x) < POS_EPSILON) s.x = target.x;
+    if (Math.abs(target.y - s.y) < POS_EPSILON) s.y = target.y;
+  }
+
+  const pushInterval = 1000 / TARGET_FPS;
+  if (now - _lastPushTime < pushInterval) return;
+  _lastPushTime = now;
+
+  pushToOwlbear();
+}
+
+async function pushToOwlbear() {
+  if (_isPushing) return; // previous push still in flight — skip this tick rather than queue up stale ones
+  _isPushing = true;
+  const _t0 = performance.now();
+
+  try {
+    if (Date.now() >= manualBlackoutUntil && latestBlank !== lastAppliedBlank) {
+      await applyBlackout(latestBlank);
+    }
+
+    const tokensToSync = Object.keys(smoothState).map(id => ({
+      id,
+      alias: (latestTokens[id] || {}).alias,
+      x: smoothState[id].x,
+      y: smoothState[id].y,
+    }));
+
+    if (tokensToSync.length > 0) {
+      await syncTokensWithOwlbear(tokensToSync, sceneItemsCache, viewportSize.width, viewportSize.height);
+    }
+  } catch (err) {
+    console.error("Sync Error:", err);
+  } finally {
+    _isPushing = false;
+    recordSyncLatency(performance.now() - _t0);
+  }
+}
+
 function renderMappingUI() {
   const listEl = document.getElementById('mapping-list');
-  
+
   if (currentPhysicalTokens.length === 0) {
     listEl.innerHTML = '<p class="empty-msg">No physical tokens detected yet.</p>';
     return;
   }
-  
+
   // Remove the empty message if it exists
   const emptyMsg = listEl.querySelector('.empty-msg');
   if (emptyMsg) {
@@ -298,10 +391,10 @@ function renderMappingUI() {
       existingElements[id].remove();
     }
   }
-  
+
   currentPhysicalTokens.forEach(pt => {
     const displayName = pt.alias || pt.id.split('_')[0];
-    
+
     if (existingElements[pt.id]) {
       // Update label if alias changed, leave select untouched
       const labelStrong = existingElements[pt.id].querySelector('strong');
@@ -318,34 +411,34 @@ function renderMappingUI() {
       const itemEl = document.createElement('div');
       itemEl.className = 'mapping-item';
       itemEl.dataset.id = pt.id; // Store ID for incremental updates
-      
+
       const label = document.createElement('div');
       label.className = 'mapping-label';
       label.innerHTML = `<strong>${displayName}</strong> <span class="id-tag">${pt.id}</span>`;
-      
+
       const select = document.createElement('select');
       select.className = 'mapping-select';
-      
+
       const defaultOpt = document.createElement('option');
       defaultOpt.value = "";
       defaultOpt.text = "-- Select Virtual Token --";
       select.appendChild(defaultOpt);
-      
+
       virtualTokens.forEach(vt => {
         const opt = document.createElement('option');
         opt.value = vt.id;
         opt.text = vt.text && vt.text.plainText ? vt.text.plainText : (vt.name || 'Unnamed Token');
         select.appendChild(opt);
       });
-      
+
       if (tokenMapping[pt.id]) {
         select.value = tokenMapping[pt.id];
       }
-      
+
       select.addEventListener('change', (e) => {
         const virtualId = e.target.value;
         const selectedToken = virtualTokens.find(vt => vt.id === virtualId);
-        
+
         if (virtualId === "") {
           delete tokenMapping[pt.id];
           delete assignedNames[pt.id];
@@ -354,7 +447,7 @@ function renderMappingUI() {
           assignedNames[pt.id] = selectedToken.text && selectedToken.text.plainText ? selectedToken.text.plainText : (selectedToken.name || 'Unnamed Token');
         }
       });
-      
+
       itemEl.appendChild(label);
       itemEl.appendChild(select);
       listEl.appendChild(itemEl);
@@ -362,9 +455,19 @@ function renderMappingUI() {
   });
 }
 
+// Minimum scene-unit movement before bothering to push a position update.
+// Was previously a user-facing "Sensitivity (px)" slider, but the value was
+// actually compared against scene-space distance, not screen pixels —
+// mislabeled and, at the range the slider offered, either had no
+// perceptible effect or (if turned up) fought against the smoothing above.
+// Now that motion is continuously eased toward the target every push
+// anyway, this only needs to be just large enough to stop float noise from
+// generating pushes once a token has settled.
+const MIN_MOVE_DIST = 0.5;
+
 async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenHeight) {
   const itemsToUpdate = [];
-  
+
   // Run all inverseTransformPoint queries concurrently
   const transformPromises = physicalTokens.map(async (pt) => {
     const virtualId = tokenMapping[pt.id];
@@ -392,7 +495,7 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
     }
 
     // Update if moved more than threshold or needs name sync
-    if (dist > SYNC_THRESHOLD || needsNameUpdate) {
+    if (dist > MIN_MOVE_DIST || needsNameUpdate) {
       return {
         id: targetItem.id,
         position: { x: scenePoint.x, y: scenePoint.y },
@@ -433,7 +536,7 @@ async function syncTokensWithOwlbear(physicalTokens, items, screenWidth, screenH
 // have to touch scene.fog at all.
 let savedFogColor = null;
 
-async function updateBlackout(active, items) {
+async function applyBlackout(active, items) {
   try {
     // Hex, not the CSS keyword "black"/"white": nothing in the SDK actually
     // validates this string (checked the bundled source — it's a raw
@@ -442,7 +545,7 @@ async function updateBlackout(active, items) {
     // silently falls back to a default (black) on anything else.
     const color = document.getElementById('blackout-color').value || "#000000";
     if (!items) {
-      items = await OBR.scene.items.getItems();
+      items = sceneItemsCache.length ? sceneItemsCache : await OBR.scene.items.getItems();
     }
     const hasItem = items.some(i => i.id === "blackout-overlay");
 
@@ -491,6 +594,7 @@ async function updateBlackout(active, items) {
         }
       });
     }
+    lastAppliedBlank = active;
   } catch (e) {
     console.error("Error updating blackout:", e);
   }

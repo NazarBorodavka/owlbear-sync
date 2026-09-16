@@ -789,6 +789,18 @@ def get_video_stream():
 
         # Preprocessing: Apply Distortion Correction, Zoom, Pan, Rotation, Colors
         h, w = frame.shape[:2]
+
+        # Log the native resolution once (and again if it ever changes, e.g.
+        # after a camera swap). The Hough radius settings are expressed in
+        # *this* space, not in whatever the downscaled preview happens to
+        # be — worth being able to see the number rather than infer it.
+        if getattr(get_video_stream, '_logged_frame_size', None) != (w, h):
+            get_video_stream._logged_frame_size = (w, h)
+            print(
+                f"[Capture] Native frame {w}x{h} — detection runs at this resolution; "
+                f"Hough radius values are in these pixels (preview is downscaled for display only).",
+                flush=True,
+            )
         # Store raw frame for diagnostic streaming (before any processing) —
         # only if someone's actually watching /diagnostic right now.
         if diag_raw_viewers > 0:
@@ -992,7 +1004,7 @@ def get_video_stream():
 
         for (cx, cy, cr) in detected_circles:
             best_id = None
-            best_dist = max(cr * 1.5, 60) # Search radius scales with token size
+            best_dist = None
             for t_id, t_data in get_video_stream.tracked_tokens.items():
                 if t_id in matched_tokens: continue
                 # Use velocity-predicted position for matching so fast-moving tokens
@@ -1000,7 +1012,19 @@ def get_video_stream():
                 pred_x = t_data["x"] + t_data.get("vx", 0)
                 pred_y = t_data["y"] + t_data.get("vy", 0)
                 dist = np.hypot(cx - pred_x, cy - pred_y)
-                if dist < best_dist:
+                # Base catchment scales with token size. A disk sliding fast
+                # across the table can drop out of Hough detection for a
+                # frame or two (motion blur) — without compensating for that,
+                # the reappearing circle lands outside a fixed radius and
+                # gets spawned as a brand new, unidentified token instead of
+                # reclaiming the one that already carries its CCTag marker
+                # ID. Widen the net by recent speed x how long it's been
+                # missing, capped so two genuinely separate tokens can't
+                # merge just because one of them is fast.
+                speed = np.hypot(t_data.get("vx", 0), t_data.get("vy", 0))
+                missed = t_data.get("missed", 0)
+                search_radius = min(max(cr * 1.5, 60, speed * (missed + 1) * 2.0), 500)
+                if dist < search_radius and (best_dist is None or dist < best_dist):
                     best_dist = dist
                     best_id = t_id
             

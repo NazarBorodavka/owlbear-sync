@@ -1458,6 +1458,20 @@
         // machine, or a cleared cache would silently show the page's hardcoded
         // HTML defaults instead of the real running config (including whether
         // the camera is already connected, e.g. via startup auto-reconnect).
+        // Every slider has a companion number box (id "val_<sliderId>").
+        // The load paths below populate sliders field-by-field, and it's
+        // easy for one to update the slider but forget its number box —
+        // which showed stale values after a refresh until any slider was
+        // touched (at which point _sendSettings()'s own sync pass fixed
+        // them all at once). Deriving the pairing from the DOM instead of
+        // restating it per field means it can't drift out of sync again.
+        function syncAllValDisplays() {
+            document.querySelectorAll('[id^="val_"]').forEach(el => {
+                const base = document.getElementById(el.id.slice(4));
+                if (base) el.value = base.value;
+            });
+        }
+
         function loadServerSettings() {
             fetch('/api/settings')
                 .then(res => res.json())
@@ -1528,6 +1542,7 @@
                         document.getElementById('camStatus').innerText = "Connected";
                         document.getElementById('camStatus').className = "status success";
                     }
+                    syncAllValDisplays();
                     _serverSettingsLoaded = true;
                 })
                 .catch(err => {
@@ -1536,6 +1551,7 @@
                     // whatever loadConfig() already put in the DOM, and
                     // blocking forever would make the page unusable if the
                     // server is genuinely unreachable.
+                    syncAllValDisplays();
                     _serverSettingsLoaded = true;
                 });
         }
