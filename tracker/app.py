@@ -1002,32 +1002,56 @@ def get_video_stream():
 
         matched_tokens = set()
 
-        for (cx, cy, cr) in detected_circles:
-            best_id = None
-            best_dist = None
+        # Build every plausible (circle, token) pairing within range, then
+        # assign globally in ascending-distance order instead of greedily
+        # per-circle. A per-circle scan lets the arbitrary order circles
+        # happen to be iterated in decide who claims an ambiguous circle —
+        # if a fast token passes close by a stationary one, whichever of the
+        # two circles got processed first could win the wrong token. Sorting
+        # every viable pairing by distance first and assigning closest-first
+        # removes that order-dependence (same approach already used for the
+        # CCTag candidate matching further down).
+        candidate_pairs = []
+        for cidx, (cx, cy, cr) in enumerate(detected_circles):
             for t_id, t_data in get_video_stream.tracked_tokens.items():
-                if t_id in matched_tokens: continue
                 # Use velocity-predicted position for matching so fast-moving tokens
                 # aren't treated as new tokens each frame
                 pred_x = t_data["x"] + t_data.get("vx", 0)
                 pred_y = t_data["y"] + t_data.get("vy", 0)
                 dist = np.hypot(cx - pred_x, cy - pred_y)
-                # Base catchment scales with token size. A disk sliding fast
-                # across the table can drop out of Hough detection for a
-                # frame or two (motion blur) — without compensating for that,
-                # the reappearing circle lands outside a fixed radius and
-                # gets spawned as a brand new, unidentified token instead of
-                # reclaiming the one that already carries its CCTag marker
-                # ID. Widen the net by recent speed x how long it's been
-                # missing, capped so two genuinely separate tokens can't
-                # merge just because one of them is fast.
-                speed = np.hypot(t_data.get("vx", 0), t_data.get("vy", 0))
                 missed = t_data.get("missed", 0)
-                search_radius = min(max(cr * 1.5, 60, speed * (missed + 1) * 2.0), 500)
-                if dist < search_radius and (best_dist is None or dist < best_dist):
-                    best_dist = dist
-                    best_id = t_id
-            
+                if missed > 0:
+                    # Only widen the catchment while genuinely ghosting (has
+                    # missed at least one real detection). A token that's
+                    # being detected every single frame doesn't need extra
+                    # slack just because it happens to be moving fast right
+                    # now — giving it one anyway is what let a fast token
+                    # sweep up a stationary token's circle while merely
+                    # passing near it. The widening exists purely to reclaim
+                    # a token that actually dropped out of Hough detection
+                    # for a frame or two (motion blur), which would otherwise
+                    # reappear outside a fixed radius and get treated as
+                    # brand new. Capped so two genuinely separate tokens
+                    # can't merge just because one of them is fast.
+                    speed = np.hypot(t_data.get("vx", 0), t_data.get("vy", 0))
+                    search_radius = min(max(cr * 1.5, 60, speed * (missed + 1) * 2.0), 500)
+                else:
+                    search_radius = max(cr * 1.5, 60)  # Search radius scales with token size
+                if dist < search_radius:
+                    candidate_pairs.append((dist, cidx, t_id))
+
+        candidate_pairs.sort(key=lambda p: p[0])
+
+        matched_circles = {}
+        for dist, cidx, t_id in candidate_pairs:
+            if cidx in matched_circles or t_id in matched_tokens:
+                continue
+            matched_circles[cidx] = t_id
+            matched_tokens.add(t_id)
+
+        for cidx, (cx, cy, cr) in enumerate(detected_circles):
+            best_id = matched_circles.get(cidx)
+
             if best_id:
                 token = get_video_stream.tracked_tokens[best_id]
                 # Dynamic smoothing with deadzone: lock perfectly if stationary, snap if moved
@@ -1052,7 +1076,6 @@ def get_video_stream():
                 if abs(token["r"] - cr) > (hough_deadzone * 0.5):
                     token["r"] = token["r"] * 0.85 + cr * 0.15
                 token["missed"] = 0
-                matched_tokens.add(best_id)
             else:
                 new_id = f"Token_{get_video_stream.token_counter}"
                 get_video_stream.token_counter += 1
