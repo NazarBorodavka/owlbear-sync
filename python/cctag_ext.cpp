@@ -47,16 +47,26 @@ public:
             return py::list();
         }
 
+        // Returns every marker CCTag found geometrically, not just the ones
+        // that reached id_reliable status — including the status code lets
+        // the Python side tell apart "nothing was there at all" from "found
+        // a ring pattern but rejected it," and *why* (too few outer points,
+        // no usable radial cuts, ellipse-refinement didn't converge, or a
+        // decoded ID with too little confidence to trust). x()/y()/id()/
+        // quality() are all populated regardless of status since they're set
+        // during earlier geometric stages, before identification runs.
+        // Callers that only want trustworthy detections must filter on
+        // status == 1 (status::id_reliable) themselves — this used to be
+        // filtered here, silently discarding the diagnostic information.
         py::list results;
         for(const cctag::CCTag& marker : markers) {
-            if(marker.getStatus() == status::id_reliable) {
-                py::dict res;
-                res["idx"] = marker.id();
-                res["x"] = marker.x() + offset_x;
-                res["y"] = marker.y() + offset_y;
-                res["decision_margin"] = marker.quality();
-                results.append(res);
-            }
+            py::dict res;
+            res["idx"] = marker.id();
+            res["x"] = marker.x() + offset_x;
+            res["y"] = marker.y() + offset_y;
+            res["decision_margin"] = marker.quality();
+            res["status"] = marker.getStatus();
+            results.append(res);
         }
         return results;
     }

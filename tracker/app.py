@@ -1168,7 +1168,13 @@ def get_video_stream():
             cctag_detector = FastCCTagDetector(3) # 3 crowns
 
         def _detect_full_frame(frame_gray):
-            """Run CCTag detection on the entire frame. Returns list of {idx, x, y, decision_margin}."""
+            """Run CCTag detection on the entire frame. Returns list of
+            {idx, x, y, decision_margin, status} for every candidate CCTag
+            found geometrically — status is 1 (id_reliable) only for ones
+            safe to actually identify with; everything else is a specific
+            rejection reason (see _status_names near the diagnostic log
+            below), kept so a token that's detected-but-never-identified can
+            be debugged instead of just disappearing silently."""
             try:
                 if not CCTAG_AVAILABLE:
                     return []
@@ -1219,6 +1225,13 @@ def get_video_stream():
                 # Hungarian assignment that removes that order-dependence.
                 candidate_pairs = []
                 for ridx, res in enumerate(cctag_results):
+                    # The native detector now returns every candidate it finds
+                    # geometrically, not just ones that reached a trustworthy
+                    # ID — status 1 (id_reliable) is the only one safe to
+                    # actually vote with. Everything else is kept in
+                    # last_cctag_results purely for the diagnostic log below.
+                    if int(res.get('status', 0)) != 1:
+                        continue
                     rid = int(res.get('idx', -1))
                     dm = float(res.get('decision_margin', 0))
                     rx, ry = float(res.get('x', 0)), float(res.get('y', 0))
@@ -1420,30 +1433,67 @@ def get_video_stream():
                         # outside cctag_min_id/cctag_max_id.
                         raw_results = getattr(get_video_stream, 'last_cctag_results', None)
                         raw_age = time.time() - getattr(get_video_stream, 'last_cctag_time', 0)
+                        # Status codes from CCTag.hpp — only 1 (id_reliable) is
+                        # ever used for actual identification; the rest tell
+                        # us *why* a geometrically-found candidate was
+                        # rejected, which a plain "found N markers" count
+                        # can't distinguish.
+                        _status_names = {
+                            1: "id_reliable",
+                            -1: "too_few_outer_points/no_collected_cuts",
+                            -2: "no_selected_cuts",
+                            -3: "opti_has_diverged",
+                            -4: "id_not_reliable",
+                            -5: "degenerate",
+                        }
                         if raw_results is None:
                             raw_summary = "no CCTag pass has completed yet"
                         elif not raw_results:
-                            raw_summary = f"last pass ({raw_age:.1f}s ago) found 0 markers in the ENTIRE frame"
+                            raw_summary = f"last pass ({raw_age:.1f}s ago) found 0 candidates anywhere in the ENTIRE frame"
                         else:
+                            reliable_count = sum(1 for r in raw_results if int(r.get('status', 0)) == 1)
                             closest = min(
                                 raw_results,
                                 key=lambda r: np.hypot(t_data['x'] - r.get('x', 1e9), t_data['y'] - r.get('y', 1e9)),
                             )
                             c_id = int(closest.get('idx', -1))
+                            c_status = int(closest.get('status', 0))
                             c_dist = np.hypot(t_data['x'] - closest.get('x', 0), t_data['y'] - closest.get('y', 0))
                             in_range = cctag_min_id <= c_id <= cctag_max_id
                             gate = t_data['r'] * cctag_match_radius_mult
                             raw_summary = (
-                                f"last pass ({raw_age:.1f}s ago) found {len(raw_results)} marker(s); "
-                                f"closest to this token is id={c_id} at {c_dist:.0f}px away "
+                                f"last pass ({raw_age:.1f}s ago) found {len(raw_results)} candidate(s) total "
+                                f"({reliable_count} reliable); closest to this token is id={c_id} "
+                                f"[status={_status_names.get(c_status, c_status)}] at {c_dist:.0f}px away "
                                 f"(match gate is {gate:.0f}px, {'WITHIN' if c_dist < gate else 'OUTSIDE'} range; "
                                 f"id {'IS' if in_range else 'is NOT'} within cctag_min_id/max_id "
                                 f"[{cctag_min_id}-{cctag_max_id}]), decision_margin={closest.get('decision_margin', 0):.4g}"
                             )
+                        # Is this token close enough to the calibrated
+                        # corner-mask boundary that part of its ring pattern
+                        # could be getting hard-clipped to black before CCTag
+                        # ever sees the frame? Hough only needs to see a
+                        # token's center/disk to keep tracking it through
+                        # that, but CCTag needs the outer rings intact to
+                        # decode an ID — a token sitting right on the mask
+                        # edge would track fine while failing to identify
+                        # reliably, which looks identical to every other
+                        # cause in the votes/raw-results data alone.
+                        mask_note = ""
+                        if corner_idx == 4:
+                            edge_dist = cv2.pointPolygonTest(
+                                np.int32(src_pts), (float(t_data['x']), float(t_data['y'])), True
+                            )
+                            if edge_dist < t_data['r'] * 1.5:
+                                mask_note = (
+                                    f"; ONLY {edge_dist:.0f}px from the calibrated play-area edge "
+                                    f"(token radius {t_data['r']:.0f}px) — part of its ring pattern "
+                                    f"may be getting masked out before CCTag sees it"
+                                )
                         print(
                             f"[CCTag] {t_id} tracked but unidentified for {duration:.1f}s "
                             f"(pos=({t_data['x']:.0f},{t_data['y']:.0f}), r={t_data['r']:.0f}px) — "
-                            f"this token's votes={votes if votes else 'NONE'}; {raw_summary}",
+                            f"this token's votes={votes if votes else 'NONE'}; {raw_summary}{mask_note}",
                             flush=True,
                         )
                         t_data["unidentified_last_logged"] = _now
