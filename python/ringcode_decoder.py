@@ -110,84 +110,156 @@ for _marks in CODEWORDS:
         _bits[_m] = 1
     _CODEWORD_BITS.append(tuple(_bits))
 
-# Classification thresholds on mean grayscale intensity (0-255) within a
-# slot's sample patch. Tune against your own lighting.
-BLACK_MAX = 90    # mean intensity below this -> confidently a printed mark
-WHITE_MIN = 165   # mean intensity above this -> confidently blank
-# A patch whose own samples span more than this range is internally
-# inconsistent (straddling an edge, or partially occluded) -- rejected as
-# unknown regardless of what its mean happens to be (see point 2).
-MAX_SPREAD = 60
+# --- Classification is RELATIVE, not against fixed absolute brightness
+# values. An earlier version compared each patch's mean against fixed
+# BLACK_MAX/WHITE_MIN constants (90/165) — this failed even on a phone
+# screen displaying the marker directly (about as close to ideal, high-
+# contrast input as exists), because absolute brightness depends on
+# exposure/backlight/ambient light in a way that has nothing to do with
+# which parts of the marker are actually ink vs. background. CCTag never
+# has this problem because it never compares against an absolute brightness
+# value either — it finds transitions relative to each marker's own local
+# signal. This decoder now does the same thing: every marker carries
+# exactly 7 marked / 9 unmarked slots (by construction — see CODEWORDS
+# above), so a clean reading of any one of the 10 IDs should split its own
+# 16 sampled means into two clusters. Finding that split from the data
+# itself (the largest gap between sorted means) instead of comparing to a
+# fixed number is what makes this adapt automatically to whatever exposure/
+# lighting is active, the same way CCTag does.
+#
+# The two constants below are deliberately generous sanity floors, not
+# precision thresholds — they only reject genuinely degenerate input (a
+# blank/no-contrast view, or a patch that's internally split down the
+# middle), and shouldn't need retuning per setup the way the old absolute
+# values did.
+MIN_GAP = 15.0          # refuse to decode if no real bimodal split exists at all
+SPREAD_FRACTION = 0.6   # a patch's own internal spread beyond this fraction of
+                        # the frame's observed range marks it inconsistent
+MIN_SPREAD_FLOOR = 40.0  # ...with this floor so a very low-contrast but still
+                         # genuinely bimodal frame doesn't make the fraction
+                         # above reject everything
 
 
-def _sample_patch(gray, cx, cy, r, slot_idx, phase_deg):
-    """Raw sample values within one slot's patch, at a given sampling phase
-    offset (not the token's physical rotation — see read_slots_best_phase)."""
-    center_deg = slot_idx * SLOT_ANGLE_DEG - 90 + SLOT_ANGLE_DEG / 2 + phase_deg
-    a0 = np.radians(center_deg - SAMPLE_ANGLE_DEG / 2)
-    a1 = np.radians(center_deg + SAMPLE_ANGLE_DEG / 2)
-    r0 = r * R_SAMPLE_INNER_FRAC
-    r1 = r * R_SAMPLE_OUTER_FRAC
-    vals = []
+# Sample grid, precomputed once at import time (not per call): 5 angular
+# offsets within each slot's sample window, 5 radial fractions within the
+# sample band. Reused identically for every slot/phase/token — only the
+# slot center angle and token (cx, cy, r) actually vary per call.
+_ANGLE_OFFSETS_DEG = np.linspace(-SAMPLE_ANGLE_DEG / 2, SAMPLE_ANGLE_DEG / 2, 5)
+_RADIUS_FRACS = np.linspace(R_SAMPLE_INNER_FRAC, R_SAMPLE_OUTER_FRAC, 5)
+_SAMPLES_PER_SLOT = len(_ANGLE_OFFSETS_DEG) * len(_RADIUS_FRACS)
+
+
+def _sample_all_slots(gray, cx, cy, r, phase_deg):
+    """Vectorized equivalent of calling a per-slot sampler 16 times with
+    nested Python loops inside each — that original version cost ~3200
+    nested-loop iterations per token per phase (16 slots x 25 samples x 8
+    phases), confirmed by direct measurement to be the dominant per-frame
+    cost once this backend was wired into the main loop (~137ms/frame vs.
+    an expected few ms). This computes all 16 slots' sample coordinates and
+    gathers their pixel values in a handful of numpy array ops instead.
+
+    Returns a (16, 25) array of raw pixel values; out-of-frame samples are
+    NaN rather than silently dropped (handled by the nan-aware reductions in
+    _classify_batch, equivalent to the original's "skip and average over
+    whatever was left" behavior)."""
     h, w = gray.shape[:2]
-    for a in np.linspace(a0, a1, 5):
-        for rad in np.linspace(r0, r1, 5):
-            x = int(round(cx + rad * np.cos(a)))
-            y = int(round(cy + rad * np.sin(a)))
-            if 0 <= x < w and 0 <= y < h:
-                vals.append(gray[y, x])
-    return vals
+    slot_centers_deg = (
+        np.arange(N_SLOTS) * SLOT_ANGLE_DEG - 90 + SLOT_ANGLE_DEG / 2 + phase_deg
+    )  # (16,)
+    angles_deg = slot_centers_deg[:, None] + _ANGLE_OFFSETS_DEG[None, :]  # (16, 5)
+    angles_rad = np.radians(angles_deg)
+    cos_a = np.cos(angles_rad)[:, :, None]  # (16, 5, 1)
+    sin_a = np.sin(angles_rad)[:, :, None]
+    radii = (r * _RADIUS_FRACS)[None, None, :]  # (1, 1, 5)
+
+    xs = np.round(cx + radii * cos_a).astype(np.int32)  # (16, 5, 5)
+    ys = np.round(cy + radii * sin_a).astype(np.int32)
+    valid = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+    vals = gray[np.clip(ys, 0, h - 1), np.clip(xs, 0, w - 1)].astype(np.float32)
+    vals[~valid] = np.nan
+    return vals.reshape(N_SLOTS, _SAMPLES_PER_SLOT)
 
 
-def _classify(vals, black_max=BLACK_MAX, white_min=WHITE_MIN):
-    """1 (mark), 0 (blank), or None (unknown/occluded/inconsistent).
-    black_max/white_min are parameters (not just the module defaults above)
-    so the host app can make them live-tunable from a dashboard without
-    needing a restart — lighting varies per setup, everything else about
-    this decoder (sampling geometry, phase search, spread rejection) is
-    structural and shouldn't need tuning."""
-    if not vals:
-        return None
-    vals = np.asarray(vals, dtype=np.float32)
-    spread = float(vals.max() - vals.min())
-    if spread > MAX_SPREAD:
-        return None
-    mean = float(vals.mean())
-    if mean <= black_max:
-        return 1
-    if mean >= white_min:
-        return 0
-    return None
+def _classify_batch(vals_2d):
+    """Length-16 list of 1/0/None from a (16, 25) sample array, classified
+    RELATIVE to this specific reading's own measured brightness distribution
+    rather than fixed absolute thresholds (see the constants block above for
+    why). Also returns the gap size found, purely for diagnostic logging —
+    a small gap is a direct, human-readable signal of "this frame currently
+    has too little contrast to trust," independent of absolute exposure.
+    Returns (bits, gap_size)."""
+    valid_counts = np.sum(~np.isnan(vals_2d), axis=1)
+    means = np.nanmean(vals_2d, axis=1)
+    maxs = np.nanmax(np.where(np.isnan(vals_2d), -np.inf, vals_2d), axis=1)
+    mins = np.nanmin(np.where(np.isnan(vals_2d), np.inf, vals_2d), axis=1)
+    spreads = maxs - mins
+
+    valid = valid_counts > 0
+    if not np.any(valid):
+        return [None] * N_SLOTS, 0.0
+
+    # Stage 1: filter out patches whose own samples are internally
+    # inconsistent (straddling a printed edge, or partially occluded) before
+    # they can pollute the stage-2 split below. The limit scales with the
+    # observed range this frame actually has, not a fixed brightness value.
+    observed_range = float(np.max(means[valid]) - np.min(means[valid]))
+    spread_limit = max(MIN_SPREAD_FLOOR, observed_range * SPREAD_FRACTION)
+    consistent = valid & (spreads <= spread_limit)
+
+    if np.sum(consistent) < 2:
+        return [None] * N_SLOTS, 0.0
+
+    # Stage 2: find the natural black/white split among the trustworthy
+    # patches' means — the largest gap in their sorted values. All 10 IDs
+    # have exactly 7 marked / 9 unmarked slots by construction, so a clean
+    # reading should show a genuine two-cluster split here regardless of
+    # the absolute brightness level it happens to sit at.
+    trusted_means = np.sort(means[consistent])
+    gaps = np.diff(trusted_means)
+    split_idx = int(np.argmax(gaps))
+    gap_size = float(gaps[split_idx])
+    threshold = float((trusted_means[split_idx] + trusted_means[split_idx + 1]) / 2.0)
+
+    if gap_size < MIN_GAP:
+        # No genuine bimodal separation -- e.g. a blank/no-contrast view.
+        return [None] * N_SLOTS, gap_size
+
+    bits = []
+    for i in range(N_SLOTS):
+        if not consistent[i]:
+            bits.append(None)
+        elif means[i] < threshold:
+            bits.append(1)
+        else:
+            bits.append(0)
+    return bits, gap_size
 
 
-def read_slots(gray, cx, cy, r, phase_deg=0.0, black_max=BLACK_MAX, white_min=WHITE_MIN):
-    """Length-16 list of 1/0/None at a single, fixed sampling phase."""
-    return [
-        _classify(_sample_patch(gray, cx, cy, r, s, phase_deg), black_max, white_min)
-        for s in range(N_SLOTS)
-    ]
+def read_slots(gray, cx, cy, r, phase_deg=0.0):
+    """(bits, gap_size) at a single, fixed sampling phase. bits is a
+    length-16 list of 1/0/None; gap_size is how well-separated the black/
+    white clusters were this reading (purely diagnostic)."""
+    return _classify_batch(_sample_all_slots(gray, cx, cy, r, phase_deg))
 
 
-def read_slots_best_phase(gray, cx, cy, r, n_candidates=N_PHASE_CANDIDATES,
-                           black_max=BLACK_MAX, white_min=WHITE_MIN):
+def read_slots_best_phase(gray, cx, cy, r, n_candidates=N_PHASE_CANDIDATES):
     """Tries several candidate sampling phase offsets spanning one slot
     width and keeps whichever gives the most confidently-classified (non-
     unknown) slots. Necessary because the physical disk's rotation is
     arbitrary and unrelated to this sampling grid — without this, a
     rotation landing near the midpoint between two phases degrades every
-    slot at once (see module docstring, point 3)."""
-    best_bits, best_known = None, -1
+    slot at once (see module docstring, point 3). Returns (bits, gap_size)."""
+    best_bits, best_gap, best_known = None, 0.0, -1
     for k in range(n_candidates):
         phase = k * (SLOT_ANGLE_DEG / n_candidates)
-        bits = read_slots(gray, cx, cy, r, phase, black_max, white_min)
+        bits, gap_size = read_slots(gray, cx, cy, r, phase)
         n_known = sum(1 for b in bits if b is not None)
         if n_known > best_known:
-            best_known, best_bits = n_known, bits
-    return best_bits
+            best_known, best_bits, best_gap = n_known, bits, gap_size
+    return best_bits, best_gap
 
 
-def decode(gray, cx, cy, r, min_margin=2, black_max=BLACK_MAX, white_min=WHITE_MIN,
-           return_debug=False):
+def decode(gray, cx, cy, r, min_margin=2, return_debug=False):
     """Identify which of the 10 IDs this token is, tolerant of unknown/
     occluded slots and of arbitrary physical rotation. Tries every rotation
     of every codeword, scores by how many KNOWN (non-None) bits match, and
@@ -198,18 +270,20 @@ def decode(gray, cx, cy, r, min_margin=2, black_max=BLACK_MAX, white_min=WHITE_M
 
     Returns (id, confidence), or (id, confidence, debug_dict) if
     return_debug=True -- the debug dict carries the raw bits read, how many
-    were confidently classified, and the best/second-best match scores, for
-    logging exactly what the decoder saw when a token sits unidentified
-    (same purpose as CCTag's "tracked but unidentified" diagnostic log).
-    Returns (None, 0.0[, debug]) if no confident match.
+    were confidently classified, the measured black/white gap size, and the
+    best/second-best match scores, for logging exactly what the decoder saw
+    when a token sits unidentified (same purpose as CCTag's "tracked but
+    unidentified" diagnostic log). Returns (None, 0.0[, debug]) if no
+    confident match.
     """
-    bits = read_slots_best_phase(gray, cx, cy, r, black_max=black_max, white_min=white_min)
+    bits, gap_size = read_slots_best_phase(gray, cx, cy, r)
     known_mask = [b is not None for b in bits]
     n_known = sum(known_mask)
     if n_known < N_SLOTS // 2:
-        # Too much of the ring is occluded/unreadable to trust any match.
-        debug = {"bits": bits, "n_known": n_known, "best_matches": None,
-                  "second_best": None, "reason": "too few known bits"}
+        # Too much of the ring is occluded/unreadable, or there's no real
+        # black/white contrast in this reading at all (gap_size near 0).
+        debug = {"bits": bits, "n_known": n_known, "gap_size": gap_size,
+                  "best_matches": None, "second_best": None, "reason": "too few known bits"}
         return (None, 0.0, debug) if return_debug else (None, 0.0)
 
     scores = []  # (matches, id, rotation)
@@ -225,7 +299,7 @@ def decode(gray, cx, cy, r, min_margin=2, black_max=BLACK_MAX, white_min=WHITE_M
     scores.sort(key=lambda s: -s[0])
     best_matches, best_id, _ = scores[0]
     second_best = next((m for m, i, _ in scores[1:] if i != best_id), 0)
-    debug = {"bits": bits, "n_known": n_known, "best_matches": best_matches,
+    debug = {"bits": bits, "n_known": n_known, "gap_size": gap_size, "best_matches": best_matches,
               "second_best": second_best, "best_id": best_id, "reason": None}
 
     if best_matches - second_best < min_margin:

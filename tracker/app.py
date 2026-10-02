@@ -489,7 +489,7 @@ def load_config_from_disk():
     global auto_blank, auto_blank_delay
     global cctag_min_id, cctag_max_id, cctag_min_ident_proba, cctag_id_voting_decay
     global cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
-    global ringcode_black_max, ringcode_white_min, ringcode_min_margin
+    global ringcode_min_margin
     global token_aliases, manual_blank, camera_url, show_overlay, flip_x, flip_y
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
     global src_pts, corner_idx, homography_matrix
@@ -506,8 +506,6 @@ def load_config_from_disk():
                 cctag_match_radius_mult = float(c.get('cctag_match_radius_mult', 2.0))
                 cctag_ghosting_frames = int(c.get('cctag_ghosting_frames', 30))
                 cctag_id_switch_margin = float(c.get('cctag_id_switch_margin', 1.5))
-                ringcode_black_max = float(c.get('ringcode_black_max', 90))
-                ringcode_white_min = float(c.get('ringcode_white_min', 165))
                 ringcode_min_margin = int(c.get('ringcode_min_margin', 2))
                 camera_url = c.get('camera_url', camera_url)
                 if 'password' in c:
@@ -592,8 +590,6 @@ def save_config_to_disk():
         'cctag_match_radius_mult': cctag_match_radius_mult,
         'cctag_ghosting_frames': cctag_ghosting_frames,
         'cctag_id_switch_margin': cctag_id_switch_margin,
-        'ringcode_black_max': ringcode_black_max,
-        'ringcode_white_min': ringcode_white_min,
         'ringcode_min_margin': ringcode_min_margin,
         'token_aliases': token_aliases,
         'camera_url': camera_url,
@@ -665,14 +661,12 @@ cctag_ghosting_frames = 30
 # flip-flopping on frame-to-frame noise near the decision boundary.
 cctag_id_switch_margin = 1.5
 
-# Ring code backend settings (see python/ringcode_decoder.py). Thresholds on
-# mean grayscale intensity (0-255) within a sampled slot patch — tune these
-# two against your actual lighting; everything else about the decoder
-# (sampling geometry, phase search, spread rejection) is structural and not
-# exposed here. min_margin mirrors cctag_id_switch_margin's role: how much a
-# decode's best match must beat the second-best before it's trusted.
-ringcode_black_max = 90.0
-ringcode_white_min = 165.0
+# Ring code backend setting (see python/ringcode_decoder.py). Classification
+# is relative/self-calibrating (adapts to whatever lighting/exposure is
+# active each frame, the same way CCTag does) rather than compared against
+# fixed brightness thresholds, so there's nothing to tune there. min_margin
+# mirrors cctag_id_switch_margin's role: how much a decode's best match must
+# beat the second-best before it's trusted.
 ringcode_min_margin = 2
 
 manual_blank = False
@@ -1225,7 +1219,6 @@ def get_video_stream():
                 rid, conf, dbg = ringcode_decoder.decode(
                     gray, t_data["x"], t_data["y"], t_data["r"],
                     min_margin=ringcode_min_margin,
-                    black_max=ringcode_black_max, white_min=ringcode_white_min,
                     return_debug=True,
                 )
                 t_data["ringcode_debug"] = dbg
@@ -1569,11 +1562,22 @@ def get_video_stream():
                             else:
                                 bits_str = ''.join('?' if b is None else str(b) for b in dbg['bits'])
                                 if dbg['reason'] == 'too few known bits':
+                                    gap = dbg.get('gap_size', 0.0)
+                                    if gap < 15.0:
+                                        cause = (
+                                            f"no real black/white separation found in this reading "
+                                            f"(gap={gap:.0f}, needs >=15) — marker is likely too small, "
+                                            f"too blurry, or too far to resolve at all right now"
+                                        )
+                                    else:
+                                        cause = (
+                                            f"found a {gap:.0f}-level split but too many individual "
+                                            f"slots were internally inconsistent to trust (occlusion, "
+                                            f"or sampling landed across a printed edge)"
+                                        )
                                     summary = (
                                         f"only {dbg['n_known']}/16 slots confidently read "
-                                        f"(bits={bits_str}) — too much of the ring is occluded, "
-                                        f"too small/blurry, or black_max/white_min thresholds "
-                                        f"don't match current lighting"
+                                        f"(bits={bits_str}) — {cause}"
                                     )
                                 elif dbg['reason'] == 'margin too small':
                                     summary = (
@@ -2229,8 +2233,6 @@ def get_settings():
         "cctag_ghosting_frames": cctag_ghosting_frames,
         "cctag_id_switch_margin": cctag_id_switch_margin,
         "id_backend": ID_BACKEND,
-        "ringcode_black_max": ringcode_black_max,
-        "ringcode_white_min": ringcode_white_min,
         "ringcode_min_margin": ringcode_min_margin,
     })
 
@@ -2244,7 +2246,7 @@ def update_settings():
     global camera_url, manual_blank, flip_x, flip_y
     global CCTAG_AVAILABLE, cctag_min_id, cctag_max_id, cctag_min_ident_proba
     global cctag_id_voting_decay, cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
-    global ringcode_black_max, ringcode_white_min, ringcode_min_margin
+    global ringcode_min_margin
 
     data = request.json
     if 'camera_url' in data: camera_url = data['camera_url']
@@ -2268,12 +2270,6 @@ def update_settings():
         except Exception: pass
     if 'cctag_id_switch_margin' in data:
         try: cctag_id_switch_margin = float(data['cctag_id_switch_margin'])
-        except Exception: pass
-    if 'ringcode_black_max' in data:
-        try: ringcode_black_max = float(data['ringcode_black_max'])
-        except Exception: pass
-    if 'ringcode_white_min' in data:
-        try: ringcode_white_min = float(data['ringcode_white_min'])
         except Exception: pass
     if 'ringcode_min_margin' in data:
         try: ringcode_min_margin = int(data['ringcode_min_margin'])

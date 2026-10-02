@@ -926,32 +926,12 @@
                         </div>
                         </div>
                         <div id="ringcode-only-fields" style="display: none;">
-                        <div class="field">
-                            <div class="field-row">
-                                <span class="field-label">Black Threshold (0-255)
-                                    <button type="button" class="info-icon" tabindex="0"
-                                        data-tip="A sampled patch reads as a printed mark when its average brightness is at or below this. Lower it if marks are being missed (read as blank) in bright lighting; raise it if blank areas are being misread as marks in dim lighting.">i</button>
-                                </span>
-                                <input type="number" id="val_ringcode_black_max" value="90" step="1" min="0"
-                                    max="255" class="val-input"
-                                    oninput="syncSlider(this, 'ringcode_black_max'); updateSettings()">
-                            </div>
-                            <input type="range" id="ringcode_black_max" min="0" max="255" step="1" value="90"
-                                oninput="updateVal('ringcode_black_max')">
-                        </div>
-                        <div class="field">
-                            <div class="field-row">
-                                <span class="field-label">White Threshold (0-255)
-                                    <button type="button" class="info-icon" tabindex="0"
-                                        data-tip="A sampled patch reads as blank when its average brightness is at or above this. Must stay comfortably above Black Threshold — the gap between the two is the 'unknown/occluded' zone that keeps partial occlusion safe instead of silently misread.">i</button>
-                                </span>
-                                <input type="number" id="val_ringcode_white_min" value="165" step="1" min="0"
-                                    max="255" class="val-input"
-                                    oninput="syncSlider(this, 'ringcode_white_min'); updateSettings()">
-                            </div>
-                            <input type="range" id="ringcode_white_min" min="0" max="255" step="1" value="165"
-                                oninput="updateVal('ringcode_white_min')">
-                        </div>
+                        <p class="section-desc" style="margin-top: 0;">
+                            Ring Code classifies each marker relative to its own measured
+                            black/white split each frame rather than against fixed brightness
+                            values, so it self-adjusts to lighting/exposure changes automatically
+                            — there's no brightness threshold to tune here.
+                        </p>
                         <div class="field">
                             <div class="field-row">
                                 <span class="field-label">Decode Confidence Margin (bits)
@@ -1351,8 +1331,6 @@
                 cctag_match_radius_mult: parseFloat(document.getElementById('cctag_match_radius_mult').value),
                 cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value),
                 cctag_id_switch_margin: parseFloat(document.getElementById('cctag_id_switch_margin').value),
-                ringcode_black_max: parseFloat(document.getElementById('ringcode_black_max').value),
-                ringcode_white_min: parseFloat(document.getElementById('ringcode_white_min').value),
                 ringcode_min_margin: parseInt(document.getElementById('ringcode_min_margin').value)
             };
 
@@ -1427,8 +1405,6 @@
                 cctag_match_radius_mult: parseFloat(document.getElementById('cctag_match_radius_mult').value),
                 cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value),
                 cctag_id_switch_margin: parseFloat(document.getElementById('cctag_id_switch_margin').value),
-                ringcode_black_max: parseFloat(document.getElementById('ringcode_black_max').value),
-                ringcode_white_min: parseFloat(document.getElementById('ringcode_white_min').value),
                 ringcode_min_margin: parseInt(document.getElementById('ringcode_min_margin').value)
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
@@ -1468,14 +1444,6 @@
                     if (config.cctag_id_switch_margin !== undefined) {
                         document.getElementById('cctag_id_switch_margin').value = config.cctag_id_switch_margin;
                         document.getElementById('val_cctag_id_switch_margin').value = config.cctag_id_switch_margin;
-                    }
-                    if (config.ringcode_black_max !== undefined) {
-                        document.getElementById('ringcode_black_max').value = config.ringcode_black_max;
-                        document.getElementById('val_ringcode_black_max').value = config.ringcode_black_max;
-                    }
-                    if (config.ringcode_white_min !== undefined) {
-                        document.getElementById('ringcode_white_min').value = config.ringcode_white_min;
-                        document.getElementById('val_ringcode_white_min').value = config.ringcode_white_min;
                     }
                     if (config.ringcode_min_margin !== undefined) {
                         document.getElementById('ringcode_min_margin').value = config.ringcode_min_margin;
@@ -1561,14 +1529,6 @@
                     if (cfg.cctag_id_switch_margin !== undefined) {
                         document.getElementById('cctag_id_switch_margin').value = cfg.cctag_id_switch_margin;
                         document.getElementById('val_cctag_id_switch_margin').value = cfg.cctag_id_switch_margin;
-                    }
-                    if (cfg.ringcode_black_max !== undefined) {
-                        document.getElementById('ringcode_black_max').value = cfg.ringcode_black_max;
-                        document.getElementById('val_ringcode_black_max').value = cfg.ringcode_black_max;
-                    }
-                    if (cfg.ringcode_white_min !== undefined) {
-                        document.getElementById('ringcode_white_min').value = cfg.ringcode_white_min;
-                        document.getElementById('val_ringcode_white_min').value = cfg.ringcode_white_min;
                     }
                     if (cfg.ringcode_min_margin !== undefined) {
                         document.getElementById('ringcode_min_margin').value = cfg.ringcode_min_margin;
