@@ -1062,9 +1062,13 @@ def get_video_stream():
 
             if best_id:
                 token = get_video_stream.tracked_tokens[best_id]
+                # Was this token ghosting (undetected for at least one frame)
+                # right before this match? Checked before "missed" gets reset
+                # below — used to cap the reattachment snap further down.
+                was_ghosting = token.get("missed", 0) > 0
                 # Dynamic smoothing with deadzone: lock perfectly if stationary, snap if moved
                 dist_moved = np.hypot(token["x"] - cx, token["y"] - cy)
-                
+
                 if dist_moved < hough_deadzone:
                     # Deadzone: completely ignore tiny jitter
                     alpha = 0.0
@@ -1085,6 +1089,21 @@ def get_video_stream():
                     full_snap_dist = max(cr, hough_deadzone * 3.0)
                     alpha = min(1.0, dist_moved / full_snap_dist)
                     alpha = max(0.4, alpha)              # always move at least 40% toward detection
+                    if was_ghosting:
+                        # A token that was just occluded (a hand covering it
+                        # while fine-positioning the disk is the common case)
+                        # can reappear a real, uncertain distance away from
+                        # its extrapolated ghost position — easily enough to
+                        # blow past full_snap_dist and hit alpha=1.0, i.e. an
+                        # instant one-frame teleport to the correction. That's
+                        # the visible "snap" right as a token comes to rest
+                        # at the end of a move. Capping it here forces the
+                        # correction to ease in over a handful of frames (at
+                        # 10fps, roughly 300-400ms to fully converge) instead
+                        # of popping, without slowing down normal,
+                        # continuously-tracked motion at all — this only
+                        # applies to the first frame back from a gap.
+                        alpha = min(alpha, 0.5)
                     token["vx"] = token.get("vx", 0) * 0.5 + (cx - token["x"]) * 0.5
                     token["vy"] = token.get("vy", 0) * 0.5 + (cy - token["y"]) * 0.5
                     # Recorded undamped, purely from this frame's real
@@ -1249,7 +1268,28 @@ def get_video_stream():
                         # As long as the disk is physically tracked, it retains its last known ID
                         # unless another token actively claims it with higher confidence.
 
-                # Resolve cross-token ID collisions (two Hough circles both matching same CCTag ID)
+                # Resolve cross-token ID collisions (two Hough circles both matching same CCTag ID).
+                # This had no hysteresis at all: when both tokens are actively
+                # tracked (missed==0 for both — the common case for two real
+                # disks, or for one real disk plus a transient false-positive
+                # Hough blob right as a token is picked up/set down), the
+                # winner was decided by `votes > ex_v`, a bare inequality with
+                # zero margin. A momentary spurious circle (motion blur,
+                # reflection) that happens to get CCTag-matched to the same
+                # ID as a real, continuously-tracked token can win this by
+                # pure noise and instantly wipe the real token's marker_id —
+                # which then has to rebuild its identity from zero votes via
+                # full-frame CCTag passes that each take real time and aren't
+                # guaranteed to hit. That's the mechanism behind both "IDs
+                # flip between two tokens" and "a token goes unidentified for
+                # a long time after moving even though it's still tracked":
+                # the latter is the same reset, just with the false
+                # competitor gone by the time anyone's watching, leaving only
+                # the aftermath — a token that has to earn its ID back from
+                # scratch. Reusing cctag_id_switch_margin here (the same
+                # hysteresis already used to stop a single token's own ID
+                # pick from flapping) means a challenger has to clearly
+                # out-vote the incumbent before ownership actually transfers.
                 claimed = {}
                 for t_id, t_data in get_video_stream.tracked_tokens.items():
                     m_id = t_data.get("marker_id")
@@ -1261,16 +1301,23 @@ def get_video_stream():
                         claimed[m_id] = (t_id, votes, missed)
                     else:
                         ex_t, ex_v, ex_m = claimed[m_id]
-                        if missed < ex_m or (missed == ex_m and votes > ex_v):
-                            # Current token wins — reset loser's marker and votes for this ID
+                        if missed < ex_m or (missed == ex_m and votes > ex_v * cctag_id_switch_margin):
+                            # Current token clearly wins — reset loser's marker and votes for this ID
                             loser = get_video_stream.tracked_tokens[ex_t]
                             loser["marker_id"] = None
                             loser.get("id_votes", {}).pop(m_id, None)
                             claimed[m_id] = (t_id, votes, missed)
-                        else:
-                            # Existing token wins — reset current token
+                        elif ex_m < missed or ex_v > votes * cctag_id_switch_margin:
+                            # Existing token clearly wins — reset current token
                             t_data["marker_id"] = None
                             t_data.get("id_votes", {}).pop(m_id, None)
+                        # else: neither side clearly wins this round — leave
+                        # both as-is rather than forcing a decision on noise.
+                        # The display-side dedup (best_tokens, below) already
+                        # picks a single winner to show by `missed` each
+                        # frame regardless, so a genuine near-tie doesn't
+                        # produce a visible flip — it just avoids destroying
+                        # the loser's accumulated identity over noise.
 
                 get_video_stream.cctag_future = None
 
@@ -1330,11 +1377,43 @@ def get_video_stream():
                 "has_base": True
             })
             
-        # Render "Unknown" tokens locally in red
+        # Render "Unknown" tokens locally in red. Also surface a diagnostic
+        # log when a token that Hough is actively, continuously tracking
+        # (missed==0 — position tracking is fine) still has no resolved
+        # identity after a few seconds. Position succeeding while identity
+        # doesn't is exactly the "disk is detected but stays unidentified
+        # for a long time" symptom — logging whether it has *any* id_votes
+        # (CCTag is finding candidates near it, just losing ties/collisions)
+        # versus none at all (CCTag isn't detecting anything there — a
+        # marker-size/angle/lighting problem) tells us which one it actually
+        # is next time, instead of guessing blind.
+        _now = time.time()
         for t_id, t_data in get_video_stream.tracked_tokens.items():
-            if t_data.get("marker_id") is None and show_overlay:
-                cv2.circle(frame, (int(t_data["x"]), int(t_data["y"])), int(t_data["r"]), (0, 0, 255), 2)
-                cv2.putText(frame, "Unknown", (int(t_data["x"]) + 10, int(t_data["y"]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            if t_data.get("marker_id") is None:
+                if show_overlay:
+                    cv2.circle(frame, (int(t_data["x"]), int(t_data["y"])), int(t_data["r"]), (0, 0, 255), 2)
+                    cv2.putText(frame, "Unknown", (int(t_data["x"]) + 10, int(t_data["y"]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                if t_data.get("missed", 0) == 0:
+                    since = t_data.setdefault("unidentified_since", _now)
+                    duration = _now - since
+                    last_logged = t_data.get("unidentified_last_logged", 0)
+                    if duration > 3.0 and (_now - last_logged) > 5.0:
+                        votes = t_data.get("id_votes", {})
+                        print(
+                            f"[CCTag] {t_id} tracked but unidentified for {duration:.1f}s "
+                            f"(pos=({t_data['x']:.0f},{t_data['y']:.0f}), r={t_data['r']:.0f}px, "
+                            f"recent_votes={votes if votes else 'NONE — CCTag is not detecting anything near this position'})",
+                            flush=True,
+                        )
+                        t_data["unidentified_last_logged"] = _now
+                else:
+                    # Ghosting (not even being Hough-matched this frame) —
+                    # don't let a stale timer carry over if it comes back.
+                    t_data.pop("unidentified_since", None)
+                    t_data.pop("unidentified_last_logged", None)
+            else:
+                t_data.pop("unidentified_since", None)
+                t_data.pop("unidentified_last_logged", None)
 
         # --- Appear/Disappear Logging ---
         if not hasattr(get_video_stream, "last_marker_ids"):
