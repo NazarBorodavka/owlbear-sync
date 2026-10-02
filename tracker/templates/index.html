@@ -884,6 +884,7 @@
                                 </div>
                             </div>
                         </div>
+                        <div id="cctag-only-fields">
                         <div class="field">
                             <div class="field-row">
                                 <span class="field-label">Identification Strictness (0-10)
@@ -912,19 +913,6 @@
                         </div>
                         <div class="field">
                             <div class="field-row">
-                                <span class="field-label">ID Switch Confidence Margin
-                                    <button type="button" class="info-icon" tabindex="0"
-                                        data-tip="How much more confident a new ID must be before it's allowed to replace a token's current ID. 1.0 switches instantly (flicker-prone). Higher values (1.5-2.0) require a clear, sustained lead before flipping — this is the main knob if IDs keep swapping between two nearby tokens.">i</button>
-                                </span>
-                                <input type="number" id="val_cctag_id_switch_margin" value="1.5" step="0.1" min="1.0"
-                                    max="3.0" class="val-input"
-                                    oninput="syncSlider(this, 'cctag_id_switch_margin'); updateSettings()">
-                            </div>
-                            <input type="range" id="cctag_id_switch_margin" min="1.0" max="3.0" step="0.1" value="1.5"
-                                oninput="updateVal('cctag_id_switch_margin')">
-                        </div>
-                        <div class="field">
-                            <div class="field-row">
                                 <span class="field-label">Match Radius (&times; token radius)
                                     <button type="button" class="info-icon" tabindex="0"
                                         data-tip="How far a tag reading can be from a tracked base's center (as a multiple of that base's own radius) and still count as the same token. Increase this if the camera is at a steep angle, causing the tag to appear offset from the base center.">i</button>
@@ -935,6 +923,61 @@
                             </div>
                             <input type="range" id="cctag_match_radius_mult" min="0.5" max="5.0" step="0.1"
                                 value="2.0" oninput="updateVal('cctag_match_radius_mult')">
+                        </div>
+                        </div>
+                        <div id="ringcode-only-fields" style="display: none;">
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Black Threshold (0-255)
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="A sampled patch reads as a printed mark when its average brightness is at or below this. Lower it if marks are being missed (read as blank) in bright lighting; raise it if blank areas are being misread as marks in dim lighting.">i</button>
+                                </span>
+                                <input type="number" id="val_ringcode_black_max" value="90" step="1" min="0"
+                                    max="255" class="val-input"
+                                    oninput="syncSlider(this, 'ringcode_black_max'); updateSettings()">
+                            </div>
+                            <input type="range" id="ringcode_black_max" min="0" max="255" step="1" value="90"
+                                oninput="updateVal('ringcode_black_max')">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">White Threshold (0-255)
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="A sampled patch reads as blank when its average brightness is at or above this. Must stay comfortably above Black Threshold — the gap between the two is the 'unknown/occluded' zone that keeps partial occlusion safe instead of silently misread.">i</button>
+                                </span>
+                                <input type="number" id="val_ringcode_white_min" value="165" step="1" min="0"
+                                    max="255" class="val-input"
+                                    oninput="syncSlider(this, 'ringcode_white_min'); updateSettings()">
+                            </div>
+                            <input type="range" id="ringcode_white_min" min="0" max="255" step="1" value="165"
+                                oninput="updateVal('ringcode_white_min')">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Decode Confidence Margin (bits)
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How many more matching bits the best candidate ID must have over the second-best before a token is identified. 2 is the tested default. Raise this if IDs are being misread; lower it if tokens take too long to identify when partially occluded.">i</button>
+                                </span>
+                                <input type="number" id="val_ringcode_min_margin" value="2" step="1" min="1"
+                                    max="8" class="val-input"
+                                    oninput="syncSlider(this, 'ringcode_min_margin'); updateSettings()">
+                            </div>
+                            <input type="range" id="ringcode_min_margin" min="1" max="8" step="1" value="2"
+                                oninput="updateVal('ringcode_min_margin')">
+                        </div>
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">ID Switch Confidence Margin
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How much more confident a new ID must be before it's allowed to replace a token's current ID. 1.0 switches instantly (flicker-prone). Higher values (1.5-2.0) require a clear, sustained lead before flipping — this is the main knob if IDs keep swapping between two nearby tokens.">i</button>
+                                </span>
+                                <input type="number" id="val_cctag_id_switch_margin" value="1.5" step="0.1" min="1.0"
+                                    max="3.0" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_id_switch_margin'); updateSettings()">
+                            </div>
+                            <input type="range" id="cctag_id_switch_margin" min="1.0" max="3.0" step="0.1" value="1.5"
+                                oninput="updateVal('cctag_id_switch_margin')">
                         </div>
                         <div class="field">
                             <div class="field-row">
@@ -951,9 +994,9 @@
                         </div>
                         <div class="field">
                             <div class="field-row">
-                                <span class="field-label">Marker Type
+                                <span class="field-label">Identification Backend
                                     <button type="button" class="info-icon" tabindex="0"
-                                        data-tip="This build is compiled for CCTag 3-crown markers only. Using a different marker family requires rebuilding the Docker image.">i</button>
+                                        data-tip="Chosen at container startup via the TRACKER_ID_BACKEND env var, not switchable here — this just shows which one is actually running. CCTag supports IDs 0-31 and larger markers; Ring Code is a custom 10-ID (0-9) system designed for much smaller/lower-resolution markers.">i</button>
                                 </span>
                             </div>
                             <input type="text" id="cctag_family_display" class="val-input" value="CCTag (3 Crowns)"
@@ -1307,7 +1350,10 @@
                 cctag_id_voting_decay: parseFloat(document.getElementById('cctag_id_voting_decay').value),
                 cctag_match_radius_mult: parseFloat(document.getElementById('cctag_match_radius_mult').value),
                 cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value),
-                cctag_id_switch_margin: parseFloat(document.getElementById('cctag_id_switch_margin').value)
+                cctag_id_switch_margin: parseFloat(document.getElementById('cctag_id_switch_margin').value),
+                ringcode_black_max: parseFloat(document.getElementById('ringcode_black_max').value),
+                ringcode_white_min: parseFloat(document.getElementById('ringcode_white_min').value),
+                ringcode_min_margin: parseInt(document.getElementById('ringcode_min_margin').value)
             };
 
             // Sync numeric display inputs
@@ -1380,7 +1426,10 @@
                 cctag_id_voting_decay: parseFloat(document.getElementById('cctag_id_voting_decay').value),
                 cctag_match_radius_mult: parseFloat(document.getElementById('cctag_match_radius_mult').value),
                 cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value),
-                cctag_id_switch_margin: parseFloat(document.getElementById('cctag_id_switch_margin').value)
+                cctag_id_switch_margin: parseFloat(document.getElementById('cctag_id_switch_margin').value),
+                ringcode_black_max: parseFloat(document.getElementById('ringcode_black_max').value),
+                ringcode_white_min: parseFloat(document.getElementById('ringcode_white_min').value),
+                ringcode_min_margin: parseInt(document.getElementById('ringcode_min_margin').value)
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -1419,6 +1468,18 @@
                     if (config.cctag_id_switch_margin !== undefined) {
                         document.getElementById('cctag_id_switch_margin').value = config.cctag_id_switch_margin;
                         document.getElementById('val_cctag_id_switch_margin').value = config.cctag_id_switch_margin;
+                    }
+                    if (config.ringcode_black_max !== undefined) {
+                        document.getElementById('ringcode_black_max').value = config.ringcode_black_max;
+                        document.getElementById('val_ringcode_black_max').value = config.ringcode_black_max;
+                    }
+                    if (config.ringcode_white_min !== undefined) {
+                        document.getElementById('ringcode_white_min').value = config.ringcode_white_min;
+                        document.getElementById('val_ringcode_white_min').value = config.ringcode_white_min;
+                    }
+                    if (config.ringcode_min_margin !== undefined) {
+                        document.getElementById('ringcode_min_margin').value = config.ringcode_min_margin;
+                        document.getElementById('val_ringcode_min_margin').value = config.ringcode_min_margin;
                     }
                     if (config.exposure !== undefined) document.getElementById('exposure').value = config.exposure;
                     if (config.contrast !== undefined) document.getElementById('contrast').value = config.contrast;
@@ -1500,6 +1561,36 @@
                     if (cfg.cctag_id_switch_margin !== undefined) {
                         document.getElementById('cctag_id_switch_margin').value = cfg.cctag_id_switch_margin;
                         document.getElementById('val_cctag_id_switch_margin').value = cfg.cctag_id_switch_margin;
+                    }
+                    if (cfg.ringcode_black_max !== undefined) {
+                        document.getElementById('ringcode_black_max').value = cfg.ringcode_black_max;
+                        document.getElementById('val_ringcode_black_max').value = cfg.ringcode_black_max;
+                    }
+                    if (cfg.ringcode_white_min !== undefined) {
+                        document.getElementById('ringcode_white_min').value = cfg.ringcode_white_min;
+                        document.getElementById('val_ringcode_white_min').value = cfg.ringcode_white_min;
+                    }
+                    if (cfg.ringcode_min_margin !== undefined) {
+                        document.getElementById('ringcode_min_margin').value = cfg.ringcode_min_margin;
+                        document.getElementById('val_ringcode_min_margin').value = cfg.ringcode_min_margin;
+                    }
+                    // Backend is chosen at container startup (TRACKER_ID_BACKEND env
+                    // var), not switchable from here — this just reflects which one is
+                    // actually running: show the matching settings sub-panel and hide
+                    // the other backend's (otherwise-meaningless) sliders, and update
+                    // the read-only "Identification Backend" display.
+                    if (cfg.id_backend !== undefined) {
+                        const isRingCode = cfg.id_backend === 'ringcode';
+                        const cctagFields = document.getElementById('cctag-only-fields');
+                        const ringcodeFields = document.getElementById('ringcode-only-fields');
+                        if (cctagFields) cctagFields.style.display = isRingCode ? 'none' : '';
+                        if (ringcodeFields) ringcodeFields.style.display = isRingCode ? '' : 'none';
+                        const familyDisplay = document.getElementById('cctag_family_display');
+                        if (familyDisplay) {
+                            familyDisplay.value = isRingCode
+                                ? 'Ring Code (16-slot, 10 IDs)'
+                                : 'CCTag (3 Crowns)';
+                        }
                     }
                     if (cfg.cctag_min_ident_proba !== undefined) {
                         let mappedVal = cfg.cctag_min_ident_proba;

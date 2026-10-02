@@ -26,6 +26,18 @@ services:
       # can enable either, both, or neither. Same automatic-fallback safety:
       # if no working OpenCL device is found, everything just runs on CPU.
       # - TRACKER_USE_OPENCL=1
+      # Optional: switch which marker identification system reads token IDs.
+      # Default (unset) is 'cctag' — the proven, occlusion-resistant system
+      # supporting IDs 0-31, needing markers down to roughly 30px radius at
+      # whatever resolution the camera captures. 'ringcode' is a custom,
+      # pure-Python/OpenCV system (no native library) capped at exactly 10
+      # IDs (0-9) but tested working down to roughly 9-18px radius — useful
+      # if your camera distance/zoom can't give CCTag enough pixels per
+      # marker and you only need a handful of distinct tokens. Falls back to
+      # cctag automatically if ringcode fails to load for any reason. Only
+      # one backend runs at a time; this is a startup choice, not a live
+      # toggle. See python/ringcode_decoder.py and tags/ringcode/*.svg.
+      # - TRACKER_ID_BACKEND=ringcode
     # Uncomment together with either flag above — both features use the same
     # Intel GPU render node. Find yours with `ls /dev/dri` on the host if
     # it's not /dev/dri/renderD128.

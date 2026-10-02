@@ -79,6 +79,32 @@ except Exception as e:
     print("CCTag init error:", e)
     CCTAG_AVAILABLE = False
 
+# Marker identification backend: 'cctag' (default) or 'ringcode'. Opt-in via
+# env var, same pattern as TRACKER_USE_VAAPI/TRACKER_USE_OPENCL — chosen at
+# startup since it's an experimental alternative being evaluated against
+# CCTag on real hardware, not something to flip mid-session. 'ringcode' is a
+# custom 10-ID marker system (python/ringcode_decoder.py): pure Python/
+# OpenCV, no native library, designed for markers at a fraction of the
+# pixel size CCTag needs, at the cost of being capped at exactly 10 distinct
+# IDs (0-9) and needing its own real-world validation — this is exactly
+# that validation pass, run alongside the existing, proven CCTag path
+# rather than replacing it.
+ID_BACKEND = os.environ.get('TRACKER_ID_BACKEND', 'cctag').lower()
+if ID_BACKEND not in ('cctag', 'ringcode'):
+    print(f"[WARN] Unrecognized TRACKER_ID_BACKEND={ID_BACKEND!r} — defaulting to cctag.", flush=True)
+    ID_BACKEND = 'cctag'
+RINGCODE_AVAILABLE = False
+if ID_BACKEND == 'ringcode':
+    try:
+        import ringcode_decoder
+        RINGCODE_AVAILABLE = True
+        print("[OK] Ring code identification backend active (10 IDs, pure Python, no native dependency).", flush=True)
+    except Exception as e:
+        print(f"[WARN] TRACKER_ID_BACKEND=ringcode but import failed ({e}) — falling back to CCTag.", flush=True)
+        ID_BACKEND = 'cctag'
+if ID_BACKEND == 'cctag':
+    print("[OK] CCTag identification backend active.", flush=True)
+
 # Optional OpenCL (GPU) offload for the undistort/zoom/pan/rotate warp — the
 # two most expensive full-frame geometric transforms in the pipeline. This
 # is OpenCV's UMat/T-API mechanism, which dispatches to whatever OpenCL
@@ -463,6 +489,7 @@ def load_config_from_disk():
     global auto_blank, auto_blank_delay
     global cctag_min_id, cctag_max_id, cctag_min_ident_proba, cctag_id_voting_decay
     global cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
+    global ringcode_black_max, ringcode_white_min, ringcode_min_margin
     global token_aliases, manual_blank, camera_url, show_overlay, flip_x, flip_y
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
     global src_pts, corner_idx, homography_matrix
@@ -479,6 +506,9 @@ def load_config_from_disk():
                 cctag_match_radius_mult = float(c.get('cctag_match_radius_mult', 2.0))
                 cctag_ghosting_frames = int(c.get('cctag_ghosting_frames', 30))
                 cctag_id_switch_margin = float(c.get('cctag_id_switch_margin', 1.5))
+                ringcode_black_max = float(c.get('ringcode_black_max', 90))
+                ringcode_white_min = float(c.get('ringcode_white_min', 165))
+                ringcode_min_margin = int(c.get('ringcode_min_margin', 2))
                 camera_url = c.get('camera_url', camera_url)
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
@@ -562,6 +592,9 @@ def save_config_to_disk():
         'cctag_match_radius_mult': cctag_match_radius_mult,
         'cctag_ghosting_frames': cctag_ghosting_frames,
         'cctag_id_switch_margin': cctag_id_switch_margin,
+        'ringcode_black_max': ringcode_black_max,
+        'ringcode_white_min': ringcode_white_min,
+        'ringcode_min_margin': ringcode_min_margin,
         'token_aliases': token_aliases,
         'camera_url': camera_url,
         'password': USER_DATA.get("admin", "admin"),
@@ -631,6 +664,17 @@ cctag_ghosting_frames = 30
 # it's allowed to take over. Prevents an established token's label from
 # flip-flopping on frame-to-frame noise near the decision boundary.
 cctag_id_switch_margin = 1.5
+
+# Ring code backend settings (see python/ringcode_decoder.py). Thresholds on
+# mean grayscale intensity (0-255) within a sampled slot patch — tune these
+# two against your actual lighting; everything else about the decoder
+# (sampling geometry, phase search, spread rejection) is structural and not
+# exposed here. min_margin mirrors cctag_id_switch_margin's role: how much a
+# decode's best match must beat the second-best before it's trusted.
+ringcode_black_max = 90.0
+ringcode_white_min = 165.0
+ringcode_min_margin = 2
+
 manual_blank = False
 
 # Performance optimization: Cache for software exposure table
@@ -1158,198 +1202,269 @@ def get_video_stream():
         get_video_stream._phase_times["hough"] += time.time() - _t_hough_start
         _t_cctag_start = time.time()
 
-        # --- SLOW RECOGNIZER: Full-Frame CCTag ---
-        # CRITICAL INSIGHT from diagnostics:
-        # - CCTag on a small 160x160 crop from Hough → ALL WHITE ROI → ZERO detections
-        # - CCTag on full 1920x1080 frame → detects ALL markers in ~341ms
-        # The Hough crop is the bug — even with generous padding, the crop boundary
-        # falls in white paper with no rings visible. Solution: run CCTag on the FULL frame.
-        if CCTAG_AVAILABLE and cctag_detector is None:
-            cctag_detector = FastCCTagDetector(3) # 3 crowns
-
-        def _detect_full_frame(frame_gray):
-            """Run CCTag detection on the entire frame. Returns list of
-            {idx, x, y, decision_margin, status} for every candidate CCTag
-            found geometrically — status is 1 (id_reliable) only for ones
-            safe to actually identify with; everything else is a specific
-            rejection reason (see _status_names near the diagnostic log
-            below), kept so a token that's detected-but-never-identified can
-            be debugged instead of just disappearing silently."""
-            try:
-                if not CCTAG_AVAILABLE:
-                    return []
-                h_f, w_f = frame_gray.shape
-                # Linear stretch: ensures black rings always have full contrast regardless of lighting.
-                # Preserves gradient profile perfectly. Safe for CCTag's edge math.
-                img_enhanced = cv2.normalize(frame_gray, None, 0, 255, cv2.NORM_MINMAX)
-                img = np.ascontiguousarray(img_enhanced, dtype=np.uint8)
-                # fx/fy ≈ image width is the standard approximation for an unknown focal length.
-                # CCTag uses this only for scale-invariant ellipse fitting.
-                results = cctag_detector.detect(
-                    img,
-                    min_ident_proba=cctag_min_ident_proba,
-                    cx=w_f / 2.0, cy=h_f / 2.0,
-                    fx=float(w_f), fy=float(w_f),
+        if ID_BACKEND == 'ringcode':
+            # --- RING CODE: direct per-token decode, no background thread ---
+            # Cheap enough (a handful of small sample patches + ~160 lookup
+            # comparisons per token) to run inline on the main loop every
+            # frame, unlike CCTag's ~300ms+ full-frame search — no
+            # executor/future bookkeeping needed at all.
+            if not hasattr(get_video_stream, "_ringcode_attempts"):
+                # Aggregate decode success-rate stats, folded into the same
+                # 10s [Perf] report as everything else below — a per-event
+                # log tells you about one bad moment, this tells you the
+                # actual real-world hit rate to compare against CCTag's.
+                get_video_stream._ringcode_attempts = 0
+                get_video_stream._ringcode_successes = 0
+                get_video_stream._ringcode_confidence_sum = 0.0
+            for t_id, t_data in get_video_stream.tracked_tokens.items():
+                if t_data.get("missed", 0) > 0:
+                    # Not actively Hough-matched this frame — its (x, y) is
+                    # only a predicted/ghosted position, not a confirmed
+                    # disk location, so sampling there isn't meaningful.
+                    continue
+                rid, conf, dbg = ringcode_decoder.decode(
+                    gray, t_data["x"], t_data["y"], t_data["r"],
+                    min_margin=ringcode_min_margin,
+                    black_max=ringcode_black_max, white_min=ringcode_white_min,
+                    return_debug=True,
                 )
-                return list(results)
-            except Exception as e:
-                print(f"[CCTag] Full-frame error: {e}", flush=True)
-                return []
+                t_data["ringcode_debug"] = dbg
+                get_video_stream._ringcode_attempts += 1
+                if rid is not None and (cctag_min_id <= rid <= cctag_max_id):
+                    t_data["marker_id"] = rid
+                    t_data["ringcode_confidence"] = conf
+                    get_video_stream._ringcode_successes += 1
+                    get_video_stream._ringcode_confidence_sum += conf
+                # Intentionally NOT clearing marker_id to None on a failed or
+                # low-confidence read this frame — same persistence
+                # philosophy as CCTag: as long as the disk is physically
+                # tracked, it keeps its last known ID until something else
+                # confidently claims it (the collision check right below).
 
-        # Collect full-frame CCTag results when the background thread is done
-        if hasattr(get_video_stream, "cctag_future") and get_video_stream.cctag_future is not None:
-            if get_video_stream.cctag_future.done():
-                try:
-                    cctag_results = get_video_stream.cctag_future.result()
-                except Exception:
-                    cctag_results = []
+            # Resolve cross-token collisions: two Hough tracks both
+            # confidently decoding to the same ring-code ID this frame.
+            # Reuses cctag_id_switch_margin as the same hysteresis knob —
+            # a challenger must clearly out-confidence the incumbent before
+            # ownership transfers, same rationale as the CCTag collision
+            # check just below (not applied there since that branch doesn't
+            # run in this mode).
+            claimed = {}
+            for t_id, t_data in get_video_stream.tracked_tokens.items():
+                m_id = t_data.get("marker_id")
+                if m_id is None:
+                    continue
+                conf = t_data.get("ringcode_confidence", 0)
+                missed = t_data.get("missed", 0)
+                if m_id not in claimed:
+                    claimed[m_id] = (t_id, conf, missed)
+                else:
+                    ex_t, ex_c, ex_m = claimed[m_id]
+                    if missed < ex_m or (missed == ex_m and conf > ex_c * cctag_id_switch_margin):
+                        loser = get_video_stream.tracked_tokens[ex_t]
+                        loser["marker_id"] = None
+                        claimed[m_id] = (t_id, conf, missed)
+                    elif ex_m < missed or ex_c > conf * cctag_id_switch_margin:
+                        t_data["marker_id"] = None
+                    # else: neither side clearly wins -- leave both as-is,
+                    # same rationale as the CCTag collision check.
 
-                # Stashed for the "tracked but unidentified" diagnostic below,
-                # which runs every frame (not just when a pass just
-                # completed) and needs to show what the *last* completed pass
-                # actually found — including raw detections that got filtered
-                # out by cctag_min_id/max_id or the per-token distance gate —
-                # to tell apart "CCTag found nothing at all near here" from
-                # "CCTag found something but it didn't pass the match radius"
-                # from "it decoded an ID outside the configured range".
-                get_video_stream.last_cctag_results = cctag_results
-                get_video_stream.last_cctag_time = time.time()
+        elif ID_BACKEND == 'cctag':
+          # --- SLOW RECOGNIZER: Full-Frame CCTag ---
+          # CRITICAL INSIGHT from diagnostics:
+          # - CCTag on a small 160x160 crop from Hough → ALL WHITE ROI → ZERO detections
+          # - CCTag on full 1920x1080 frame → detects ALL markers in ~341ms
+          # The Hough crop is the bug — even with generous padding, the crop boundary
+          # falls in white paper with no rings visible. Solution: run CCTag on the FULL frame.
+          if CCTAG_AVAILABLE and cctag_detector is None:
+              cctag_detector = FastCCTagDetector(3) # 3 crowns
 
-                # Build every plausible (detection, token) pairing, then assign
-                # globally in ascending-distance order. A pure per-result greedy
-                # scan (the old approach) let processing order decide who claims
-                # a token when two detections both fall in its catchment radius —
-                # with tokens this close together at this resolution that produced
-                # nondeterministic swaps. Sorting all candidates first and
-                # assigning closest-first is a cheap stand-in for a proper
-                # Hungarian assignment that removes that order-dependence.
-                candidate_pairs = []
-                for ridx, res in enumerate(cctag_results):
-                    # The native detector now returns every candidate it finds
-                    # geometrically, not just ones that reached a trustworthy
-                    # ID — status 1 (id_reliable) is the only one safe to
-                    # actually vote with. Everything else is kept in
-                    # last_cctag_results purely for the diagnostic log below.
-                    if int(res.get('status', 0)) != 1:
-                        continue
-                    rid = int(res.get('idx', -1))
-                    dm = float(res.get('decision_margin', 0))
-                    rx, ry = float(res.get('x', 0)), float(res.get('y', 0))
+          def _detect_full_frame(frame_gray):
+              """Run CCTag detection on the entire frame. Returns list of
+              {idx, x, y, decision_margin, status} for every candidate CCTag
+              found geometrically — status is 1 (id_reliable) only for ones
+              safe to actually identify with; everything else is a specific
+              rejection reason (see _status_names near the diagnostic log
+              below), kept so a token that's detected-but-never-identified can
+              be debugged instead of just disappearing silently."""
+              try:
+                  if not CCTAG_AVAILABLE:
+                      return []
+                  h_f, w_f = frame_gray.shape
+                  # Linear stretch: ensures black rings always have full contrast regardless of lighting.
+                  # Preserves gradient profile perfectly. Safe for CCTag's edge math.
+                  img_enhanced = cv2.normalize(frame_gray, None, 0, 255, cv2.NORM_MINMAX)
+                  img = np.ascontiguousarray(img_enhanced, dtype=np.uint8)
+                  # fx/fy ≈ image width is the standard approximation for an unknown focal length.
+                  # CCTag uses this only for scale-invariant ellipse fitting.
+                  results = cctag_detector.detect(
+                      img,
+                      min_ident_proba=cctag_min_ident_proba,
+                      cx=w_f / 2.0, cy=h_f / 2.0,
+                      fx=float(w_f), fy=float(w_f),
+                  )
+                  return list(results)
+              except Exception as e:
+                  print(f"[CCTag] Full-frame error: {e}", flush=True)
+                  return []
 
-                    if not (cctag_min_id <= rid <= cctag_max_id) or dm <= 0:
-                        continue
+          # Collect full-frame CCTag results when the background thread is done
+          if hasattr(get_video_stream, "cctag_future") and get_video_stream.cctag_future is not None:
+              if get_video_stream.cctag_future.done():
+                  try:
+                      cctag_results = get_video_stream.cctag_future.result()
+                  except Exception:
+                      cctag_results = []
 
-                    for t_id, t_data in get_video_stream.tracked_tokens.items():
-                        d = np.hypot(t_data["x"] - rx, t_data["y"] - ry)
-                        # Accept if CCTag center falls within cctag_match_radius_mult × token radius.
-                        # Higher = more forgiving matching for large/far tokens.
-                        if d < t_data["r"] * cctag_match_radius_mult:
-                            candidate_pairs.append((d, ridx, t_id, rid, dm))
+                  # Stashed for the "tracked but unidentified" diagnostic below,
+                  # which runs every frame (not just when a pass just
+                  # completed) and needs to show what the *last* completed pass
+                  # actually found — including raw detections that got filtered
+                  # out by cctag_min_id/max_id or the per-token distance gate —
+                  # to tell apart "CCTag found nothing at all near here" from
+                  # "CCTag found something but it didn't pass the match radius"
+                  # from "it decoded an ID outside the configured range".
+                  get_video_stream.last_cctag_results = cctag_results
+                  get_video_stream.last_cctag_time = time.time()
 
-                candidate_pairs.sort(key=lambda p: p[0])
+                  # Build every plausible (detection, token) pairing, then assign
+                  # globally in ascending-distance order. A pure per-result greedy
+                  # scan (the old approach) let processing order decide who claims
+                  # a token when two detections both fall in its catchment radius —
+                  # with tokens this close together at this resolution that produced
+                  # nondeterministic swaps. Sorting all candidates first and
+                  # assigning closest-first is a cheap stand-in for a proper
+                  # Hungarian assignment that removes that order-dependence.
+                  candidate_pairs = []
+                  for ridx, res in enumerate(cctag_results):
+                      # The native detector now returns every candidate it finds
+                      # geometrically, not just ones that reached a trustworthy
+                      # ID — status 1 (id_reliable) is the only one safe to
+                      # actually vote with. Everything else is kept in
+                      # last_cctag_results purely for the diagnostic log below.
+                      if int(res.get('status', 0)) != 1:
+                          continue
+                      rid = int(res.get('idx', -1))
+                      dm = float(res.get('decision_margin', 0))
+                      rx, ry = float(res.get('x', 0)), float(res.get('y', 0))
 
-                matched_cctag = set()
-                matched_results = set()
-                for d, ridx, t_id, rid, dm in candidate_pairs:
-                    if t_id in matched_cctag or ridx in matched_results:
-                        continue
-                    matched_cctag.add(t_id)
-                    matched_results.add(ridx)
+                      if not (cctag_min_id <= rid <= cctag_max_id) or dm <= 0:
+                          continue
 
-                    t_data = get_video_stream.tracked_tokens[t_id]
-                    # Accumulate votes
-                    votes = t_data.setdefault("id_votes", {})
-                    # Decay old votes
-                    for k in list(votes.keys()):
-                        votes[k] *= cctag_id_voting_decay
-                        if votes[k] < 0.01:  # Drop very stale votes (lower threshold = longer memory)
-                            del votes[k]
-                    votes[rid] = votes.get(rid, 0) + dm
+                      for t_id, t_data in get_video_stream.tracked_tokens.items():
+                          d = np.hypot(t_data["x"] - rx, t_data["y"] - ry)
+                          # Accept if CCTag center falls within cctag_match_radius_mult × token radius.
+                          # Higher = more forgiving matching for large/far tokens.
+                          if d < t_data["r"] * cctag_match_radius_mult:
+                              candidate_pairs.append((d, ridx, t_id, rid, dm))
 
-                    # Hysteresis: only let a challenger ID displace the token's
-                    # currently-assigned ID once it clearly outscores it. Without
-                    # this, two IDs with near-equal vote totals near the noise
-                    # floor cause the displayed ID to flip every time a marginal
-                    # detection nudges the ranking — the "keeps flipping" symptom.
-                    current_id = t_data.get("marker_id")
-                    best_rid, best_vote = max(votes.items(), key=lambda x: x[1])
-                    if current_id is None or current_id not in votes:
-                        t_data["marker_id"] = best_rid
-                    elif best_rid != current_id and best_vote > votes.get(current_id, 0) * cctag_id_switch_margin:
-                        t_data["marker_id"] = best_rid
+                  candidate_pairs.sort(key=lambda p: p[0])
 
-                # Tokens not matched this round: decay their votes but keep their ID
-                for t_id, t_data in get_video_stream.tracked_tokens.items():
-                    if t_id not in matched_cctag and "id_votes" in t_data:
-                        for k in list(t_data["id_votes"].keys()):
-                            t_data["id_votes"][k] *= cctag_id_voting_decay
-                            if t_data["id_votes"][k] < 0.01:  # Same threshold
-                                del t_data["id_votes"][k]
-                        if t_data["id_votes"]:
-                            best_rid = max(t_data["id_votes"].items(), key=lambda x: x[1])[0]
-                            t_data["marker_id"] = best_rid
-                        # Intentionally NOT setting marker_id to None if votes run out.
-                        # As long as the disk is physically tracked, it retains its last known ID
-                        # unless another token actively claims it with higher confidence.
+                  matched_cctag = set()
+                  matched_results = set()
+                  for d, ridx, t_id, rid, dm in candidate_pairs:
+                      if t_id in matched_cctag or ridx in matched_results:
+                          continue
+                      matched_cctag.add(t_id)
+                      matched_results.add(ridx)
 
-                # Resolve cross-token ID collisions (two Hough circles both matching same CCTag ID).
-                # This had no hysteresis at all: when both tokens are actively
-                # tracked (missed==0 for both — the common case for two real
-                # disks, or for one real disk plus a transient false-positive
-                # Hough blob right as a token is picked up/set down), the
-                # winner was decided by `votes > ex_v`, a bare inequality with
-                # zero margin. A momentary spurious circle (motion blur,
-                # reflection) that happens to get CCTag-matched to the same
-                # ID as a real, continuously-tracked token can win this by
-                # pure noise and instantly wipe the real token's marker_id —
-                # which then has to rebuild its identity from zero votes via
-                # full-frame CCTag passes that each take real time and aren't
-                # guaranteed to hit. That's the mechanism behind both "IDs
-                # flip between two tokens" and "a token goes unidentified for
-                # a long time after moving even though it's still tracked":
-                # the latter is the same reset, just with the false
-                # competitor gone by the time anyone's watching, leaving only
-                # the aftermath — a token that has to earn its ID back from
-                # scratch. Reusing cctag_id_switch_margin here (the same
-                # hysteresis already used to stop a single token's own ID
-                # pick from flapping) means a challenger has to clearly
-                # out-vote the incumbent before ownership actually transfers.
-                claimed = {}
-                for t_id, t_data in get_video_stream.tracked_tokens.items():
-                    m_id = t_data.get("marker_id")
-                    if m_id is None:
-                        continue
-                    votes = t_data.get("id_votes", {}).get(m_id, 0)
-                    missed = t_data.get("missed", 0)
-                    if m_id not in claimed:
-                        claimed[m_id] = (t_id, votes, missed)
-                    else:
-                        ex_t, ex_v, ex_m = claimed[m_id]
-                        if missed < ex_m or (missed == ex_m and votes > ex_v * cctag_id_switch_margin):
-                            # Current token clearly wins — reset loser's marker and votes for this ID
-                            loser = get_video_stream.tracked_tokens[ex_t]
-                            loser["marker_id"] = None
-                            loser.get("id_votes", {}).pop(m_id, None)
-                            claimed[m_id] = (t_id, votes, missed)
-                        elif ex_m < missed or ex_v > votes * cctag_id_switch_margin:
-                            # Existing token clearly wins — reset current token
-                            t_data["marker_id"] = None
-                            t_data.get("id_votes", {}).pop(m_id, None)
-                        # else: neither side clearly wins this round — leave
-                        # both as-is rather than forcing a decision on noise.
-                        # The display-side dedup (best_tokens, below) already
-                        # picks a single winner to show by `missed` each
-                        # frame regardless, so a genuine near-tie doesn't
-                        # produce a visible flip — it just avoids destroying
-                        # the loser's accumulated identity over noise.
+                      t_data = get_video_stream.tracked_tokens[t_id]
+                      # Accumulate votes
+                      votes = t_data.setdefault("id_votes", {})
+                      # Decay old votes
+                      for k in list(votes.keys()):
+                          votes[k] *= cctag_id_voting_decay
+                          if votes[k] < 0.01:  # Drop very stale votes (lower threshold = longer memory)
+                              del votes[k]
+                      votes[rid] = votes.get(rid, 0) + dm
 
-                get_video_stream.cctag_future = None
+                      # Hysteresis: only let a challenger ID displace the token's
+                      # currently-assigned ID once it clearly outscores it. Without
+                      # this, two IDs with near-equal vote totals near the noise
+                      # floor cause the displayed ID to flip every time a marginal
+                      # detection nudges the ranking — the "keeps flipping" symptom.
+                      current_id = t_data.get("marker_id")
+                      best_rid, best_vote = max(votes.items(), key=lambda x: x[1])
+                      if current_id is None or current_id not in votes:
+                          t_data["marker_id"] = best_rid
+                      elif best_rid != current_id and best_vote > votes.get(current_id, 0) * cctag_id_switch_margin:
+                          t_data["marker_id"] = best_rid
 
-        # Submit a new full-frame detection job if nothing is running
-        if CCTAG_AVAILABLE and not getattr(get_video_stream, "cctag_future", None):
-            gray_copy = gray.copy()  # Must copy; camera thread overwrites gray continuously
-            get_video_stream.cctag_future = cctag_executor.submit(_detect_full_frame, gray_copy)
+                  # Tokens not matched this round: decay their votes but keep their ID
+                  for t_id, t_data in get_video_stream.tracked_tokens.items():
+                      if t_id not in matched_cctag and "id_votes" in t_data:
+                          for k in list(t_data["id_votes"].keys()):
+                              t_data["id_votes"][k] *= cctag_id_voting_decay
+                              if t_data["id_votes"][k] < 0.01:  # Same threshold
+                                  del t_data["id_votes"][k]
+                          if t_data["id_votes"]:
+                              best_rid = max(t_data["id_votes"].items(), key=lambda x: x[1])[0]
+                              t_data["marker_id"] = best_rid
+                          # Intentionally NOT setting marker_id to None if votes run out.
+                          # As long as the disk is physically tracked, it retains its last known ID
+                          # unless another token actively claims it with higher confidence.
 
+                  # Resolve cross-token ID collisions (two Hough circles both matching same CCTag ID).
+                  # This had no hysteresis at all: when both tokens are actively
+                  # tracked (missed==0 for both — the common case for two real
+                  # disks, or for one real disk plus a transient false-positive
+                  # Hough blob right as a token is picked up/set down), the
+                  # winner was decided by `votes > ex_v`, a bare inequality with
+                  # zero margin. A momentary spurious circle (motion blur,
+                  # reflection) that happens to get CCTag-matched to the same
+                  # ID as a real, continuously-tracked token can win this by
+                  # pure noise and instantly wipe the real token's marker_id —
+                  # which then has to rebuild its identity from zero votes via
+                  # full-frame CCTag passes that each take real time and aren't
+                  # guaranteed to hit. That's the mechanism behind both "IDs
+                  # flip between two tokens" and "a token goes unidentified for
+                  # a long time after moving even though it's still tracked":
+                  # the latter is the same reset, just with the false
+                  # competitor gone by the time anyone's watching, leaving only
+                  # the aftermath — a token that has to earn its ID back from
+                  # scratch. Reusing cctag_id_switch_margin here (the same
+                  # hysteresis already used to stop a single token's own ID
+                  # pick from flapping) means a challenger has to clearly
+                  # out-vote the incumbent before ownership actually transfers.
+                  claimed = {}
+                  for t_id, t_data in get_video_stream.tracked_tokens.items():
+                      m_id = t_data.get("marker_id")
+                      if m_id is None:
+                          continue
+                      votes = t_data.get("id_votes", {}).get(m_id, 0)
+                      missed = t_data.get("missed", 0)
+                      if m_id not in claimed:
+                          claimed[m_id] = (t_id, votes, missed)
+                      else:
+                          ex_t, ex_v, ex_m = claimed[m_id]
+                          if missed < ex_m or (missed == ex_m and votes > ex_v * cctag_id_switch_margin):
+                              # Current token clearly wins — reset loser's marker and votes for this ID
+                              loser = get_video_stream.tracked_tokens[ex_t]
+                              loser["marker_id"] = None
+                              loser.get("id_votes", {}).pop(m_id, None)
+                              claimed[m_id] = (t_id, votes, missed)
+                          elif ex_m < missed or ex_v > votes * cctag_id_switch_margin:
+                              # Existing token clearly wins — reset current token
+                              t_data["marker_id"] = None
+                              t_data.get("id_votes", {}).pop(m_id, None)
+                          # else: neither side clearly wins this round — leave
+                          # both as-is rather than forcing a decision on noise.
+                          # The display-side dedup (best_tokens, below) already
+                          # picks a single winner to show by `missed` each
+                          # frame regardless, so a genuine near-tie doesn't
+                          # produce a visible flip — it just avoids destroying
+                          # the loser's accumulated identity over noise.
+
+                  get_video_stream.cctag_future = None
+
+          # Submit a new full-frame detection job if nothing is running
+          if CCTAG_AVAILABLE and not getattr(get_video_stream, "cctag_future", None):
+              gray_copy = gray.copy()  # Must copy; camera thread overwrites gray continuously
+              get_video_stream.cctag_future = cctag_executor.submit(_detect_full_frame, gray_copy)
+
+        # Shared timing bucket regardless of which backend ran — keeps the
+        # [Perf] log's "cctag=Xms" figure directly comparable between the
+        # two backends, which is the whole point while evaluating ring code
+        # against CCTag on real hardware.
         get_video_stream._phase_times["cctag"] += time.time() - _t_cctag_start
         _t_render_start = time.time()
 
@@ -1422,63 +1537,19 @@ def get_video_stream():
                     duration = _now - since
                     last_logged = t_data.get("unidentified_last_logged", 0)
                     if duration > 3.0 and (_now - last_logged) > 5.0:
-                        votes = t_data.get("id_votes", {})
-                        # Look at the raw results from the most recently
-                        # completed CCTag pass (not just this token's own
-                        # votes) to tell apart three different failure modes
-                        # that all look identical from the votes alone:
-                        # CCTag finding literally nothing in frame, finding
-                        # something too far away to pass the match-radius
-                        # gate, or finding something whose decoded ID falls
-                        # outside cctag_min_id/cctag_max_id.
-                        raw_results = getattr(get_video_stream, 'last_cctag_results', None)
-                        raw_age = time.time() - getattr(get_video_stream, 'last_cctag_time', 0)
-                        # Status codes from CCTag.hpp — only 1 (id_reliable) is
-                        # ever used for actual identification; the rest tell
-                        # us *why* a geometrically-found candidate was
-                        # rejected, which a plain "found N markers" count
-                        # can't distinguish.
-                        _status_names = {
-                            1: "id_reliable",
-                            -1: "too_few_outer_points/no_collected_cuts",
-                            -2: "no_selected_cuts",
-                            -3: "opti_has_diverged",
-                            -4: "id_not_reliable",
-                            -5: "degenerate",
-                        }
-                        if raw_results is None:
-                            raw_summary = "no CCTag pass has completed yet"
-                        elif not raw_results:
-                            raw_summary = f"last pass ({raw_age:.1f}s ago) found 0 candidates anywhere in the ENTIRE frame"
-                        else:
-                            reliable_count = sum(1 for r in raw_results if int(r.get('status', 0)) == 1)
-                            closest = min(
-                                raw_results,
-                                key=lambda r: np.hypot(t_data['x'] - r.get('x', 1e9), t_data['y'] - r.get('y', 1e9)),
-                            )
-                            c_id = int(closest.get('idx', -1))
-                            c_status = int(closest.get('status', 0))
-                            c_dist = np.hypot(t_data['x'] - closest.get('x', 0), t_data['y'] - closest.get('y', 0))
-                            in_range = cctag_min_id <= c_id <= cctag_max_id
-                            gate = t_data['r'] * cctag_match_radius_mult
-                            raw_summary = (
-                                f"last pass ({raw_age:.1f}s ago) found {len(raw_results)} candidate(s) total "
-                                f"({reliable_count} reliable); closest to this token is id={c_id} "
-                                f"[status={_status_names.get(c_status, c_status)}] at {c_dist:.0f}px away "
-                                f"(match gate is {gate:.0f}px, {'WITHIN' if c_dist < gate else 'OUTSIDE'} range; "
-                                f"id {'IS' if in_range else 'is NOT'} within cctag_min_id/max_id "
-                                f"[{cctag_min_id}-{cctag_max_id}]), decision_margin={closest.get('decision_margin', 0):.4g}"
-                            )
                         # Is this token close enough to the calibrated
-                        # corner-mask boundary that part of its ring pattern
-                        # could be getting hard-clipped to black before CCTag
-                        # ever sees the frame? Hough only needs to see a
+                        # corner-mask boundary that part of its marker could
+                        # be getting hard-clipped to black before either
+                        # backend ever sees it? Hough only needs to see a
                         # token's center/disk to keep tracking it through
-                        # that, but CCTag needs the outer rings intact to
-                        # decode an ID — a token sitting right on the mask
-                        # edge would track fine while failing to identify
-                        # reliably, which looks identical to every other
-                        # cause in the votes/raw-results data alone.
+                        # that, but identification needs the outer
+                        # ring/pattern intact — a token sitting right on the
+                        # mask edge would track fine while failing to
+                        # identify reliably, which looks identical to every
+                        # other cause in the backend-specific data alone.
+                        # Shared across both backends since it's a Hough/
+                        # calibration-level concern, not an identification
+                        # one.
                         mask_note = ""
                         if corner_idx == 4:
                             edge_dist = cv2.pointPolygonTest(
@@ -1487,15 +1558,105 @@ def get_video_stream():
                             if edge_dist < t_data['r'] * 1.5:
                                 mask_note = (
                                     f"; ONLY {edge_dist:.0f}px from the calibrated play-area edge "
-                                    f"(token radius {t_data['r']:.0f}px) — part of its ring pattern "
-                                    f"may be getting masked out before CCTag sees it"
+                                    f"(token radius {t_data['r']:.0f}px) — part of its pattern "
+                                    f"may be getting masked out before it's even analyzed"
                                 )
-                        print(
-                            f"[CCTag] {t_id} tracked but unidentified for {duration:.1f}s "
-                            f"(pos=({t_data['x']:.0f},{t_data['y']:.0f}), r={t_data['r']:.0f}px) — "
-                            f"this token's votes={votes if votes else 'NONE'}; {raw_summary}{mask_note}",
-                            flush=True,
-                        )
+
+                        if ID_BACKEND == 'ringcode':
+                            dbg = t_data.get("ringcode_debug")
+                            if dbg is None:
+                                summary = "no decode attempt recorded yet for this token"
+                            else:
+                                bits_str = ''.join('?' if b is None else str(b) for b in dbg['bits'])
+                                if dbg['reason'] == 'too few known bits':
+                                    summary = (
+                                        f"only {dbg['n_known']}/16 slots confidently read "
+                                        f"(bits={bits_str}) — too much of the ring is occluded, "
+                                        f"too small/blurry, or black_max/white_min thresholds "
+                                        f"don't match current lighting"
+                                    )
+                                elif dbg['reason'] == 'margin too small':
+                                    summary = (
+                                        f"bits={bits_str} ({dbg['n_known']}/16 known); best candidate "
+                                        f"id={dbg['best_id']} matched {dbg['best_matches']} bits, "
+                                        f"next-best matched {dbg['second_best']} "
+                                        f"(needs margin >= {ringcode_min_margin}) — "
+                                        f"ambiguous between two candidates"
+                                    )
+                                else:
+                                    # dbg['reason'] is None -> decode() itself
+                                    # succeeded confidently, but the result
+                                    # never reached marker_id — the only way
+                                    # that happens is cctag_min_id/max_id
+                                    # excluding this ID (ring code only ever
+                                    # produces 0-9, so this means that range
+                                    # has been narrowed below the decoded id).
+                                    summary = (
+                                        f"bits={bits_str} ({dbg['n_known']}/16 known); decoded id="
+                                        f"{dbg['best_id']} with margin {dbg['best_matches']-dbg['second_best']} "
+                                        f"(confident), but it's outside the configured "
+                                        f"cctag_min_id/max_id range [{cctag_min_id}-{cctag_max_id}]"
+                                    )
+                            print(
+                                f"[RingCode] {t_id} tracked but unidentified for {duration:.1f}s "
+                                f"(pos=({t_data['x']:.0f},{t_data['y']:.0f}), r={t_data['r']:.0f}px) — "
+                                f"{summary}{mask_note}",
+                                flush=True,
+                            )
+                        else:
+                            votes = t_data.get("id_votes", {})
+                            # Look at the raw results from the most recently
+                            # completed CCTag pass (not just this token's own
+                            # votes) to tell apart three different failure modes
+                            # that all look identical from the votes alone:
+                            # CCTag finding literally nothing in frame, finding
+                            # something too far away to pass the match-radius
+                            # gate, or finding something whose decoded ID falls
+                            # outside cctag_min_id/cctag_max_id.
+                            raw_results = getattr(get_video_stream, 'last_cctag_results', None)
+                            raw_age = time.time() - getattr(get_video_stream, 'last_cctag_time', 0)
+                            # Status codes from CCTag.hpp — only 1 (id_reliable) is
+                            # ever used for actual identification; the rest tell
+                            # us *why* a geometrically-found candidate was
+                            # rejected, which a plain "found N markers" count
+                            # can't distinguish.
+                            _status_names = {
+                                1: "id_reliable",
+                                -1: "too_few_outer_points/no_collected_cuts",
+                                -2: "no_selected_cuts",
+                                -3: "opti_has_diverged",
+                                -4: "id_not_reliable",
+                                -5: "degenerate",
+                            }
+                            if raw_results is None:
+                                raw_summary = "no CCTag pass has completed yet"
+                            elif not raw_results:
+                                raw_summary = f"last pass ({raw_age:.1f}s ago) found 0 candidates anywhere in the ENTIRE frame"
+                            else:
+                                reliable_count = sum(1 for r in raw_results if int(r.get('status', 0)) == 1)
+                                closest = min(
+                                    raw_results,
+                                    key=lambda r: np.hypot(t_data['x'] - r.get('x', 1e9), t_data['y'] - r.get('y', 1e9)),
+                                )
+                                c_id = int(closest.get('idx', -1))
+                                c_status = int(closest.get('status', 0))
+                                c_dist = np.hypot(t_data['x'] - closest.get('x', 0), t_data['y'] - closest.get('y', 0))
+                                in_range = cctag_min_id <= c_id <= cctag_max_id
+                                gate = t_data['r'] * cctag_match_radius_mult
+                                raw_summary = (
+                                    f"last pass ({raw_age:.1f}s ago) found {len(raw_results)} candidate(s) total "
+                                    f"({reliable_count} reliable); closest to this token is id={c_id} "
+                                    f"[status={_status_names.get(c_status, c_status)}] at {c_dist:.0f}px away "
+                                    f"(match gate is {gate:.0f}px, {'WITHIN' if c_dist < gate else 'OUTSIDE'} range; "
+                                    f"id {'IS' if in_range else 'is NOT'} within cctag_min_id/max_id "
+                                    f"[{cctag_min_id}-{cctag_max_id}]), decision_margin={closest.get('decision_margin', 0):.4g}"
+                                )
+                            print(
+                                f"[CCTag] {t_id} tracked but unidentified for {duration:.1f}s "
+                                f"(pos=({t_data['x']:.0f},{t_data['y']:.0f}), r={t_data['r']:.0f}px) — "
+                                f"this token's votes={votes if votes else 'NONE'}; {raw_summary}{mask_note}",
+                                flush=True,
+                            )
                         t_data["unidentified_last_logged"] = _now
                 else:
                     # Ghosting (not even being Hough-matched this frame) —
@@ -1597,6 +1758,22 @@ def get_video_stream():
                 f"lock={_pt['lock']/_n*1000:.0f}ms",
                 flush=True,
             )
+            if ID_BACKEND == 'ringcode' and get_video_stream._ringcode_attempts > 0:
+                _attempts = get_video_stream._ringcode_attempts
+                _successes = get_video_stream._ringcode_successes
+                _avg_conf = (
+                    get_video_stream._ringcode_confidence_sum / _successes
+                    if _successes else 0.0
+                )
+                print(
+                    f"[RingCode] decode success rate over last {_perf_elapsed:.0f}s: "
+                    f"{_successes}/{_attempts} ({100.0 * _successes / _attempts:.0f}%) "
+                    f"attempts confident, avg confidence {_avg_conf:.2f} on successes",
+                    flush=True,
+                )
+                get_video_stream._ringcode_attempts = 0
+                get_video_stream._ringcode_successes = 0
+                get_video_stream._ringcode_confidence_sum = 0.0
             get_video_stream._phase_frames = 0
             get_video_stream._phase_last_report = time.time()
             for _k in get_video_stream._phase_times:
@@ -2051,6 +2228,10 @@ def get_settings():
         "cctag_match_radius_mult": cctag_match_radius_mult,
         "cctag_ghosting_frames": cctag_ghosting_frames,
         "cctag_id_switch_margin": cctag_id_switch_margin,
+        "id_backend": ID_BACKEND,
+        "ringcode_black_max": ringcode_black_max,
+        "ringcode_white_min": ringcode_white_min,
+        "ringcode_min_margin": ringcode_min_margin,
     })
 
 
@@ -2063,6 +2244,7 @@ def update_settings():
     global camera_url, manual_blank, flip_x, flip_y
     global CCTAG_AVAILABLE, cctag_min_id, cctag_max_id, cctag_min_ident_proba
     global cctag_id_voting_decay, cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
+    global ringcode_black_max, ringcode_white_min, ringcode_min_margin
 
     data = request.json
     if 'camera_url' in data: camera_url = data['camera_url']
@@ -2086,6 +2268,15 @@ def update_settings():
         except Exception: pass
     if 'cctag_id_switch_margin' in data:
         try: cctag_id_switch_margin = float(data['cctag_id_switch_margin'])
+        except Exception: pass
+    if 'ringcode_black_max' in data:
+        try: ringcode_black_max = float(data['ringcode_black_max'])
+        except Exception: pass
+    if 'ringcode_white_min' in data:
+        try: ringcode_white_min = float(data['ringcode_white_min'])
+        except Exception: pass
+    if 'ringcode_min_margin' in data:
+        try: ringcode_min_margin = int(data['ringcode_min_margin'])
         except Exception: pass
     if 'distortion_k1' in data:
         distortion_k1 = float(data['distortion_k1'])
