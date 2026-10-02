@@ -1198,6 +1198,17 @@ def get_video_stream():
                 except Exception:
                     cctag_results = []
 
+                # Stashed for the "tracked but unidentified" diagnostic below,
+                # which runs every frame (not just when a pass just
+                # completed) and needs to show what the *last* completed pass
+                # actually found — including raw detections that got filtered
+                # out by cctag_min_id/max_id or the per-token distance gate —
+                # to tell apart "CCTag found nothing at all near here" from
+                # "CCTag found something but it didn't pass the match radius"
+                # from "it decoded an ID outside the configured range".
+                get_video_stream.last_cctag_results = cctag_results
+                get_video_stream.last_cctag_time = time.time()
+
                 # Build every plausible (detection, token) pairing, then assign
                 # globally in ascending-distance order. A pure per-result greedy
                 # scan (the old approach) let processing order decide who claims
@@ -1399,10 +1410,40 @@ def get_video_stream():
                     last_logged = t_data.get("unidentified_last_logged", 0)
                     if duration > 3.0 and (_now - last_logged) > 5.0:
                         votes = t_data.get("id_votes", {})
+                        # Look at the raw results from the most recently
+                        # completed CCTag pass (not just this token's own
+                        # votes) to tell apart three different failure modes
+                        # that all look identical from the votes alone:
+                        # CCTag finding literally nothing in frame, finding
+                        # something too far away to pass the match-radius
+                        # gate, or finding something whose decoded ID falls
+                        # outside cctag_min_id/cctag_max_id.
+                        raw_results = getattr(get_video_stream, 'last_cctag_results', None)
+                        raw_age = time.time() - getattr(get_video_stream, 'last_cctag_time', 0)
+                        if raw_results is None:
+                            raw_summary = "no CCTag pass has completed yet"
+                        elif not raw_results:
+                            raw_summary = f"last pass ({raw_age:.1f}s ago) found 0 markers in the ENTIRE frame"
+                        else:
+                            closest = min(
+                                raw_results,
+                                key=lambda r: np.hypot(t_data['x'] - r.get('x', 1e9), t_data['y'] - r.get('y', 1e9)),
+                            )
+                            c_id = int(closest.get('idx', -1))
+                            c_dist = np.hypot(t_data['x'] - closest.get('x', 0), t_data['y'] - closest.get('y', 0))
+                            in_range = cctag_min_id <= c_id <= cctag_max_id
+                            gate = t_data['r'] * cctag_match_radius_mult
+                            raw_summary = (
+                                f"last pass ({raw_age:.1f}s ago) found {len(raw_results)} marker(s); "
+                                f"closest to this token is id={c_id} at {c_dist:.0f}px away "
+                                f"(match gate is {gate:.0f}px, {'WITHIN' if c_dist < gate else 'OUTSIDE'} range; "
+                                f"id {'IS' if in_range else 'is NOT'} within cctag_min_id/max_id "
+                                f"[{cctag_min_id}-{cctag_max_id}]), decision_margin={closest.get('decision_margin', 0):.4g}"
+                            )
                         print(
                             f"[CCTag] {t_id} tracked but unidentified for {duration:.1f}s "
-                            f"(pos=({t_data['x']:.0f},{t_data['y']:.0f}), r={t_data['r']:.0f}px, "
-                            f"recent_votes={votes if votes else 'NONE — CCTag is not detecting anything near this position'})",
+                            f"(pos=({t_data['x']:.0f},{t_data['y']:.0f}), r={t_data['r']:.0f}px) — "
+                            f"this token's votes={votes if votes else 'NONE'}; {raw_summary}",
                             flush=True,
                         )
                         t_data["unidentified_last_logged"] = _now
