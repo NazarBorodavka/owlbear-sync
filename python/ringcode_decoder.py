@@ -1,76 +1,74 @@
 """Reference decoder for the custom 10-ID "ring code" marker (see
 tags/ringcode/*.svg). Pure Python/OpenCV — no native library, no build step,
 unlike CCTag. Designed for exactly 10 IDs at much lower per-tag resolution
-than CCTag needs, by trading CCTag's fine sub-pixel radial-profile reading
-for a coarse 16-slot present/absent read, which tolerates far smaller/blurrier
-markers and is cheap enough to run on every frame instead of a background
-worker.
+than CCTag needs, and for a large blank center so a miniature's base/peg has
+somewhere safe to sit.
 
-Marker geometry (as a fraction of the token's own outer radius, matching the
-tags/ringcode/*.svg generator). Revised from an earlier version (center
-0.00-0.46) after real-world testing showed that was too small to keep a
-mini's actual base/peg clear of the code ring regardless of placement —
-pushed hard toward a bigger center at the cost of a narrower ring:
-    0.00 - 0.58  blank center  (mini mounting keep-out zone)
-    0.62 - 0.82  code ring     (16 slots, 22.5 deg each, marked/unmarked)
-    0.85 - 1.00  solid black ring, now extended to the token's true outer
-                 edge (reclaims what used to be a wasted white margin, and
-                 gives Hough a direct black-vs-table edge instead of a
-                 weaker white-margin-vs-table one). Reuses the EXISTING
-                 Hough circle detection this project already runs every
-                 frame — no new detection step needed to locate the token
-                 itself.
+This is the third design iteration, and the change from v2 to v3 is the
+important one — it's a response to a real failure mode found in actual
+camera footage, not a synthetic test:
 
-Three robustness properties below were found necessary by direct testing,
-not assumed — each one failed in an earlier version before being added:
+v1/v2 both classified each of the 16 slots by comparing its mean brightness
+against either a fixed absolute threshold (v1) or a single SPLIT POINT
+computed once across all 16 slots' means (v2, "find the largest gap"). Both
+versions passed every synthetic lighting test thrown at them (uniform
+brightness/gain shifts) and both still failed on real camera footage, even
+on large, unoccluded markers. The reason: real lighting is rarely uniform
+across a whole marker — a mild directional light or projector produces a
+GRADIENT, where one side of the marker is measurably brighter than the
+other. Under a gradient, "white" on the dim side can read darker than
+"black" on the bright side, which breaks any method that computes ONE
+threshold (fixed or adaptive) for the WHOLE marker — there's no single
+number that correctly separates ink from paper everywhere at once.
 
-1. Sampling is INSET well away from the code ring's own printed edges
-   (0.56-0.74 of the token radius, not the full 0.50-0.80 span). Sampling
-   exactly at a printed boundary catches antialiasing/discretization noise
-   at that edge, which silently corrupted readings even with a correct mean
-   threshold.
-2. Each patch's classification checks internal CONSISTENCY (spread), not
-   just its mean. A patch straddling an edge — a printed-wedge boundary at
-   the wrong rotation, or a partial occluder clipping into just the inner
-   portion of a slot — reads as a mix of two different intensities. Blindly
-   averaging that mix can land anywhere, including confidently (and
-   wrongly) on the other side of the threshold. Rejecting high-spread
-   patches as "unknown" instead is what makes this erasure-tolerant rather
-   than silently-wrong-tolerant.
-3. Sampling tries several candidate PHASE offsets and keeps whichever one
-   actually lines up with the print, rather than sampling at one fixed set
-   of absolute angles and hoping the physical disk's rotation happens to
-   agree with it. Without this, a token rotated to land near the exact
-   midpoint between two sample phases degrades EVERY slot simultaneously
-   (confirmed by direct test: single-phase sampling read all 16 slots as a
-   uniform, confidently-wrong "all blank" at the worst-case rotation,
-   because every sample patch landed in the gap between two wedges at once)
-   — a periodic blind spot recurring every 22.5 degrees of rotation. With
-   phase search, the same worst-case rotation decodes with 0 unknown bits.
+This is a known, documented problem in the fiducial marker literature, not
+a one-off: AprilTag's own detector specifically uses a "spatially-varying"
+adaptive threshold (each pixel compared to its own local neighborhood, not
+a global or per-tag value) for exactly this reason. RUNE-Tag, a dot-pattern
+marker designed for strong occlusion/illumination robustness, reports
+"performance remains largely unaffected [by illumination gradients] until
+the gradient becomes very steep" — because each dot is evaluated using
+information local to that dot, not a whole-marker statistic.
 
-Known remaining limitation (also verified directly, not assumed): a
-CONCENTRIC occluder (centered on the token, e.g. a mini mounted dead center)
-degrades gracefully only up to the point where its radius reaches the
-sampling band's inner edge (~66% of token radius) — past that it blanks
-all 16 slots simultaneously, since every slot's sample band is covered at
-once. This is consistent with the project's established mounting rule
-(keep any occlusion source off-center): an OFF-CENTER occluder — even one
-sized larger than intended, reaching deep into the ring on one side — was
-verified to decode correctly, because it only ever affects a limited
-angular range of slots, leaving the rest to decode from. This decoder does
-not and cannot fix a dead-center occluder; that must be solved by mounting,
-same as for CCTag.
+v3 applies the same principle here: markers use round DOTS (not angular
+wedges) arranged in a ring, and each dot is classified by comparing it
+ONLY to the two blank gaps immediately beside it (geometrically a few
+degrees away, i.e. under near-identical local lighting), using a RATIO
+(not a difference) so the comparison is also robust to the whole scene's
+exposure/gain level, not just gradients. No comparison ever spans more than
+~22 degrees of the marker, and no fixed or marker-wide brightness value
+appears anywhere in the classification. Verified by direct testing (see
+the test scenarios run during development) to tolerate a lighting gradient
+across the marker that breaks the old global-split approach outright, in
+addition to all the uniform-lighting/rotation/occlusion robustness already
+established for the wedge design.
 
-Also verified: moderate camera tilt/parallax (the marker projecting as an
-ellipse rather than a circle, since this decoder only uses Hough's single
-circular radius, not a true ellipse fit) degrades gracefully up to roughly
-25-30 degrees of tilt — handled by the same erasure tolerance as occlusion,
-no special perspective correction needed. Beyond roughly 35 degrees it
-fails safely (refuses to decode) rather than misidentifying. If your camera
-mount produces viewing angles beyond that at some table positions, replace
-the circular Hough fit with cv2.fitEllipse() on the outer ring's contour and
-sample along the fitted ellipse instead of a circle — not implemented here
-since it wasn't yet needed to pass testing.
+Marker geometry (as a fraction of the token's own outer radius, matching
+the tags/ringcode/*.svg generator):
+    0.00 - 0.60  blank center  (mini mounting keep-out zone)
+    0.72         radius of the ring of 16 dot positions (7 printed per ID)
+    0.86 - 1.00  solid black ring, at the token's true outer edge (reuses
+                 the EXISTING Hough circle detection this project already
+                 runs every frame — no new detection step needed to locate
+                 the token itself)
+
+Properties carried over from the wedge design, still true here for the
+same reasons (see git history for the original derivations):
+  - Sampling tries several candidate PHASE offsets and keeps whichever
+    lines up best with the print, since the physical disk's rotation is
+    arbitrary and unrelated to the sampling grid.
+  - A patch (dot or gap) whose own samples are internally inconsistent
+    (straddling a printed edge, or partially occluded) is rejected as
+    unknown rather than trusted.
+  - Decoding tries every rotation of every known codeword and only accepts
+    a result that clearly beats the second-best candidate.
+
+Known limitation, unchanged from v2: a CONCENTRIC occluder (centered on the
+token) degrades gracefully only until its radius reaches the dot ring —
+past that it covers every dot and gap simultaneously and there is nothing
+left to compare. This cannot be fixed by sampling/classification; it is
+what the large blank center exists to prevent in the first place (keep any
+mounting peg/base off-center, same rule as for CCTag).
 """
 import numpy as np
 import cv2
@@ -78,23 +76,21 @@ import cv2
 N_SLOTS = 16
 SLOT_ANGLE_DEG = 360.0 / N_SLOTS
 
-# Sampling band deliberately inset from the printed code ring's true span
-# (0.62-0.82 of token radius) to stay clear of antialiasing/discretization
-# noise at its edges (see module docstring, point 1) -- same ~20%-of-band
-# margin on each side as the original 0.50-0.80 design used.
-R_SAMPLE_INNER_FRAC = 0.66
-R_SAMPLE_OUTER_FRAC = 0.78
+# Marker geometry, as fractions of the token's own outer radius (must match
+# the tags/ringcode/*.svg generator).
+DOT_RING_R_FRAC = 0.72
+DOT_RADIUS_FRAC = 0.08
 
-# Each patch samples a narrower angular slice than the full 22.5-degree slot
-# (the printed wedge itself only fills ~65% of its slot, see the generator),
-# so a well-aligned sample has margin on both sides before touching a
-# printed edge.
-SAMPLE_ANGLE_DEG = SLOT_ANGLE_DEG * 0.35
+# Sample points are inset within each dot/gap's own footprint rather than
+# spanning its full extent, to stay clear of antialiasing/discretization
+# noise at a printed edge (the same lesson learned and documented in the
+# wedge design). 0.5 means samples stay within the inner 50% of the dot's
+# own radius.
+_SAMPLE_INSET = 0.5
+_SAMPLE_RADIAL_HALF_FRAC = DOT_RADIUS_FRAC * _SAMPLE_INSET
+_SAMPLE_ANGULAR_HALF_DEG = np.degrees(_SAMPLE_RADIAL_HALF_FRAC / DOT_RING_R_FRAC)
 
-# How many candidate phase offsets to try per decode (point 3). 8 candidates
-# spans the 22.5-degree slot period in 2.8125-degree steps — small enough
-# that the true best alignment is always within half a step of one of them.
-N_PHASE_CANDIDATES = 8
+N_PHASE_CANDIDATES = 16
 
 # Generated by a combinatorial search (minimum pairwise separation across
 # all relative rotations = 4 bits) -- 10 necklaces, 7-of-16 marks each.
@@ -118,153 +114,137 @@ for _marks in CODEWORDS:
         _bits[_m] = 1
     _CODEWORD_BITS.append(tuple(_bits))
 
-# --- Classification is RELATIVE, not against fixed absolute brightness
-# values. An earlier version compared each patch's mean against fixed
-# BLACK_MAX/WHITE_MIN constants (90/165) — this failed even on a phone
-# screen displaying the marker directly (about as close to ideal, high-
-# contrast input as exists), because absolute brightness depends on
-# exposure/backlight/ambient light in a way that has nothing to do with
-# which parts of the marker are actually ink vs. background. CCTag never
-# has this problem because it never compares against an absolute brightness
-# value either — it finds transitions relative to each marker's own local
-# signal. This decoder now does the same thing: every marker carries
-# exactly 7 marked / 9 unmarked slots (by construction — see CODEWORDS
-# above), so a clean reading of any one of the 10 IDs should split its own
-# 16 sampled means into two clusters. Finding that split from the data
-# itself (the largest gap between sorted means) instead of comparing to a
-# fixed number is what makes this adapt automatically to whatever exposure/
-# lighting is active, the same way CCTag does.
-#
-# The two constants below are deliberately generous sanity floors, not
-# precision thresholds — they only reject genuinely degenerate input (a
-# blank/no-contrast view, or a patch that's internally split down the
-# middle), and shouldn't need retuning per setup the way the old absolute
-# values did.
-MIN_GAP = 15.0          # refuse to decode if no real bimodal split exists at all
-SPREAD_FRACTION = 0.6   # a patch's own internal spread beyond this fraction of
-                        # the frame's observed range marks it inconsistent
-MIN_SPREAD_FLOOR = 40.0  # ...with this floor so a very low-contrast but still
-                         # genuinely bimodal frame doesn't make the fraction
-                         # above reject everything
+# A patch's own samples spanning more than this many gray levels marks it
+# internally inconsistent (straddling a printed edge, or partially
+# occluded) -- generous and rarely needs tuning, since it only needs to
+# catch gross inconsistency, not perform precision classification (that's
+# what the ratio comparison below does).
+MAX_SPREAD = 60.0
+
+# A dot counts as "ink present" only if it's at most this fraction as
+# bright as its own two neighboring (guaranteed-blank) gaps -- a RATIO, not
+# a difference, so it's unaffected by the scene's overall exposure/gain,
+# and computed from geometrically adjacent samples, so it's unaffected by
+# lighting gradients across the marker. 0.75 means the dot must read at
+# least 25% darker than its immediate local background.
+DOT_RATIO_THRESHOLD = 0.75
+# ...and a dot counts as "confidently blank" only if it's at least this
+# close to its local reference (not just "not dark enough to be a mark") --
+# anything between the two ratios is genuinely ambiguous and left unknown.
+BLANK_RATIO_THRESHOLD = 0.92
 
 
-# Sample grid, precomputed once at import time (not per call): 5 angular
-# offsets within each slot's sample window, 5 radial fractions within the
-# sample band. Reused identically for every slot/phase/token — only the
-# slot center angle and token (cx, cy, r) actually vary per call.
-_ANGLE_OFFSETS_DEG = np.linspace(-SAMPLE_ANGLE_DEG / 2, SAMPLE_ANGLE_DEG / 2, 5)
-_RADIUS_FRACS = np.linspace(R_SAMPLE_INNER_FRAC, R_SAMPLE_OUTER_FRAC, 5)
-_SAMPLES_PER_SLOT = len(_ANGLE_OFFSETS_DEG) * len(_RADIUS_FRACS)
-
-
-def _sample_all_slots(gray, cx, cy, r, phase_deg):
-    """Vectorized equivalent of calling a per-slot sampler 16 times with
-    nested Python loops inside each — that original version cost ~3200
-    nested-loop iterations per token per phase (16 slots x 25 samples x 8
-    phases), confirmed by direct measurement to be the dominant per-frame
-    cost once this backend was wired into the main loop (~137ms/frame vs.
-    an expected few ms). This computes all 16 slots' sample coordinates and
-    gathers their pixel values in a handful of numpy array ops instead.
-
-    Returns a (16, 25) array of raw pixel values; out-of-frame samples are
-    NaN rather than silently dropped (handled by the nan-aware reductions in
-    _classify_batch, equivalent to the original's "skip and average over
-    whatever was left" behavior)."""
+def _sample_ring_points(gray, cx, cy, r, center_degs):
+    """Vectorized sampling of N patches (dots or gaps), each a small
+    (angle, radius) grid centered on its own nominal position. Returns a
+    (len(center_degs), 25) array; out-of-frame samples are NaN."""
     h, w = gray.shape[:2]
-    slot_centers_deg = (
-        np.arange(N_SLOTS) * SLOT_ANGLE_DEG - 90 + SLOT_ANGLE_DEG / 2 + phase_deg
-    )  # (16,)
-    angles_deg = slot_centers_deg[:, None] + _ANGLE_OFFSETS_DEG[None, :]  # (16, 5)
-    angles_rad = np.radians(angles_deg)
-    cos_a = np.cos(angles_rad)[:, :, None]  # (16, 5, 1)
-    sin_a = np.sin(angles_rad)[:, :, None]
-    radii = (r * _RADIUS_FRACS)[None, None, :]  # (1, 1, 5)
+    n = len(center_degs)
+    angle_offsets = np.linspace(-_SAMPLE_ANGULAR_HALF_DEG, _SAMPLE_ANGULAR_HALF_DEG, 5)
+    radius_offsets = np.linspace(-_SAMPLE_RADIAL_HALF_FRAC, _SAMPLE_RADIAL_HALF_FRAC, 5)
 
-    xs = np.round(cx + radii * cos_a).astype(np.int32)  # (16, 5, 5)
+    angles_deg = np.asarray(center_degs)[:, None] + angle_offsets[None, :]  # (n, 5)
+    angles_rad = np.radians(angles_deg)
+    cos_a = np.cos(angles_rad)[:, :, None]  # (n, 5, 1)
+    sin_a = np.sin(angles_rad)[:, :, None]
+    radii = (r * (DOT_RING_R_FRAC + radius_offsets))[None, None, :]  # (1, 1, 5)
+
+    xs = np.round(cx + radii * cos_a).astype(np.int32)  # (n, 5, 5)
     ys = np.round(cy + radii * sin_a).astype(np.int32)
     valid = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
     vals = gray[np.clip(ys, 0, h - 1), np.clip(xs, 0, w - 1)].astype(np.float32)
     vals[~valid] = np.nan
-    return vals.reshape(N_SLOTS, _SAMPLES_PER_SLOT)
+    return vals.reshape(n, 25)
 
 
-def _classify_batch(vals_2d):
-    """Length-16 list of 1/0/None from a (16, 25) sample array, classified
-    RELATIVE to this specific reading's own measured brightness distribution
-    rather than fixed absolute thresholds (see the constants block above for
-    why). Also returns the gap size found, purely for diagnostic logging —
-    a small gap is a direct, human-readable signal of "this frame currently
-    has too little contrast to trust," independent of absolute exposure.
-    Returns (bits, gap_size)."""
+def _patch_stats(vals_2d):
+    """Per-patch (mean, spread, n_valid) from a (N, 25) sample array."""
     valid_counts = np.sum(~np.isnan(vals_2d), axis=1)
     means = np.nanmean(vals_2d, axis=1)
     maxs = np.nanmax(np.where(np.isnan(vals_2d), -np.inf, vals_2d), axis=1)
     mins = np.nanmin(np.where(np.isnan(vals_2d), np.inf, vals_2d), axis=1)
-    spreads = maxs - mins
-
-    valid = valid_counts > 0
-    if not np.any(valid):
-        return [None] * N_SLOTS, 0.0
-
-    # Stage 1: filter out patches whose own samples are internally
-    # inconsistent (straddling a printed edge, or partially occluded) before
-    # they can pollute the stage-2 split below. The limit scales with the
-    # observed range this frame actually has, not a fixed brightness value.
-    observed_range = float(np.max(means[valid]) - np.min(means[valid]))
-    spread_limit = max(MIN_SPREAD_FLOOR, observed_range * SPREAD_FRACTION)
-    consistent = valid & (spreads <= spread_limit)
-
-    if np.sum(consistent) < 2:
-        return [None] * N_SLOTS, 0.0
-
-    # Stage 2: find the natural black/white split among the trustworthy
-    # patches' means — the largest gap in their sorted values. All 10 IDs
-    # have exactly 7 marked / 9 unmarked slots by construction, so a clean
-    # reading should show a genuine two-cluster split here regardless of
-    # the absolute brightness level it happens to sit at.
-    trusted_means = np.sort(means[consistent])
-    gaps = np.diff(trusted_means)
-    split_idx = int(np.argmax(gaps))
-    gap_size = float(gaps[split_idx])
-    threshold = float((trusted_means[split_idx] + trusted_means[split_idx + 1]) / 2.0)
-
-    if gap_size < MIN_GAP:
-        # No genuine bimodal separation -- e.g. a blank/no-contrast view.
-        return [None] * N_SLOTS, gap_size
-
-    bits = []
-    for i in range(N_SLOTS):
-        if not consistent[i]:
-            bits.append(None)
-        elif means[i] < threshold:
-            bits.append(1)
-        else:
-            bits.append(0)
-    return bits, gap_size
+    spreads = np.where(valid_counts > 0, maxs - mins, np.inf)
+    return means, spreads, valid_counts
 
 
 def read_slots(gray, cx, cy, r, phase_deg=0.0):
-    """(bits, gap_size) at a single, fixed sampling phase. bits is a
-    length-16 list of 1/0/None; gap_size is how well-separated the black/
-    white clusters were this reading (purely diagnostic)."""
-    return _classify_batch(_sample_all_slots(gray, cx, cy, r, phase_deg))
+    """(bits, min_ratio_margin) at a single, fixed sampling phase. bits is a
+    length-16 list of 1 (dot present), 0 (blank), or None (unknown/
+    occluded/inconsistent). min_ratio_margin is purely diagnostic: how far
+    the least-confident classified slot sat from its own decision boundary."""
+    dot_centers_deg = np.arange(N_SLOTS) * SLOT_ANGLE_DEG - 90 + phase_deg
+    gap_centers_deg = dot_centers_deg + SLOT_ANGLE_DEG / 2.0
+
+    dot_means, dot_spreads, dot_valid = _patch_stats(_sample_ring_points(gray, cx, cy, r, dot_centers_deg))
+    gap_means, gap_spreads, gap_valid = _patch_stats(_sample_ring_points(gray, cx, cy, r, gap_centers_deg))
+
+    bits = []
+    margins = []
+    for i in range(N_SLOTS):
+        gap_before = gap_means[i - 1]  # gap just before dot i (wraps for i=0)
+        gap_after = gap_means[i]       # gap just after dot i
+        # Use whichever flanking gap(s) are internally consistent and
+        # actually sampled; average if both are usable, for a little
+        # redundancy against one of them being clipped by an occluder.
+        candidates = []
+        if gap_valid[i - 1] > 0 and gap_spreads[i - 1] <= MAX_SPREAD:
+            candidates.append(gap_before)
+        if gap_valid[i] > 0 and gap_spreads[i] <= MAX_SPREAD:
+            candidates.append(gap_after)
+
+        if dot_valid[i] == 0 or dot_spreads[i] > MAX_SPREAD or not candidates:
+            bits.append(None)
+            margins.append(0.0)
+            continue
+
+        local_ref = float(np.mean(candidates))
+        if local_ref <= 1.0:
+            # Degenerate (near-black local background) -- can't form a
+            # meaningful ratio.
+            bits.append(None)
+            margins.append(0.0)
+            continue
+
+        ratio = dot_means[i] / local_ref
+        if ratio <= DOT_RATIO_THRESHOLD:
+            bits.append(1)
+            margins.append(DOT_RATIO_THRESHOLD - ratio)
+        elif ratio >= BLANK_RATIO_THRESHOLD:
+            bits.append(0)
+            margins.append(ratio - BLANK_RATIO_THRESHOLD)
+        else:
+            bits.append(None)
+            margins.append(0.0)
+
+    return bits, (min(margins) if margins else 0.0)
 
 
 def read_slots_best_phase(gray, cx, cy, r, n_candidates=N_PHASE_CANDIDATES):
     """Tries several candidate sampling phase offsets spanning one slot
     width and keeps whichever gives the most confidently-classified (non-
-    unknown) slots. Necessary because the physical disk's rotation is
-    arbitrary and unrelated to this sampling grid — without this, a
-    rotation landing near the midpoint between two phases degrades every
-    slot at once (see module docstring, point 3). Returns (bits, gap_size)."""
-    best_bits, best_gap, best_known = None, 0.0, -1
+    unknown) slots, breaking ties by the HIGHEST margin (how far the least-
+    confident classified bit sat from its own decision boundary).
+
+    The margin tiebreak matters more than it looks: with small/marginal
+    dots, two phases can produce the same count of "confident" bits while
+    one of them is confident-and-CORRECT and the other is confident-and-
+    WRONG (found by direct testing — a dot's own sample patch can land just
+    outside a tiny dot at a slightly-off phase and read a falsely confident
+    blank instead of the true mark, rather than correctly landing in the
+    ambiguous zone and being flagged unknown). A higher margin means the
+    classification is further from that knife's edge, so preferring it
+    among equally-confident phases is a real, if imperfect, defense against
+    quietly misreading a bit instead of just failing to decode it.
+
+    Returns (bits, margin)."""
+    best_bits, best_margin, best_known = None, -1.0, -1
     for k in range(n_candidates):
         phase = k * (SLOT_ANGLE_DEG / n_candidates)
-        bits, gap_size = read_slots(gray, cx, cy, r, phase)
+        bits, margin = read_slots(gray, cx, cy, r, phase)
         n_known = sum(1 for b in bits if b is not None)
-        if n_known > best_known:
-            best_known, best_bits, best_gap = n_known, bits, gap_size
-    return best_bits, best_gap
+        if (n_known, margin) > (best_known, best_margin):
+            best_known, best_bits, best_margin = n_known, bits, margin
+    return best_bits, best_margin
 
 
 def decode(gray, cx, cy, r, min_margin=2, return_debug=False):
@@ -277,20 +257,13 @@ def decode(gray, cx, cy, r, min_margin=2, return_debug=False):
     to avoid accepting a noisy near-tie.
 
     Returns (id, confidence), or (id, confidence, debug_dict) if
-    return_debug=True -- the debug dict carries the raw bits read, how many
-    were confidently classified, the measured black/white gap size, and the
-    best/second-best match scores, for logging exactly what the decoder saw
-    when a token sits unidentified (same purpose as CCTag's "tracked but
-    unidentified" diagnostic log). Returns (None, 0.0[, debug]) if no
-    confident match.
+    return_debug=True. Returns (None, 0.0[, debug]) if no confident match.
     """
-    bits, gap_size = read_slots_best_phase(gray, cx, cy, r)
+    bits, ratio_margin = read_slots_best_phase(gray, cx, cy, r)
     known_mask = [b is not None for b in bits]
     n_known = sum(known_mask)
     if n_known < N_SLOTS // 2:
-        # Too much of the ring is occluded/unreadable, or there's no real
-        # black/white contrast in this reading at all (gap_size near 0).
-        debug = {"bits": bits, "n_known": n_known, "gap_size": gap_size,
+        debug = {"bits": bits, "n_known": n_known, "ratio_margin": ratio_margin,
                   "best_matches": None, "second_best": None, "reason": "too few known bits"}
         return (None, 0.0, debug) if return_debug else (None, 0.0)
 
@@ -307,8 +280,9 @@ def decode(gray, cx, cy, r, min_margin=2, return_debug=False):
     scores.sort(key=lambda s: -s[0])
     best_matches, best_id, _ = scores[0]
     second_best = next((m for m, i, _ in scores[1:] if i != best_id), 0)
-    debug = {"bits": bits, "n_known": n_known, "gap_size": gap_size, "best_matches": best_matches,
-              "second_best": second_best, "best_id": best_id, "reason": None}
+    debug = {"bits": bits, "n_known": n_known, "ratio_margin": ratio_margin,
+              "best_matches": best_matches, "second_best": second_best,
+              "best_id": best_id, "reason": None}
 
     if best_matches - second_best < min_margin:
         debug["reason"] = "margin too small"

@@ -1562,22 +1562,12 @@ def get_video_stream():
                             else:
                                 bits_str = ''.join('?' if b is None else str(b) for b in dbg['bits'])
                                 if dbg['reason'] == 'too few known bits':
-                                    gap = dbg.get('gap_size', 0.0)
-                                    if gap < 15.0:
-                                        cause = (
-                                            f"no real black/white separation found in this reading "
-                                            f"(gap={gap:.0f}, needs >=15) — marker is likely too small, "
-                                            f"too blurry, or too far to resolve at all right now"
-                                        )
-                                    else:
-                                        cause = (
-                                            f"found a {gap:.0f}-level split but too many individual "
-                                            f"slots were internally inconsistent to trust (occlusion, "
-                                            f"or sampling landed across a printed edge)"
-                                        )
                                     summary = (
                                         f"only {dbg['n_known']}/16 slots confidently read "
-                                        f"(bits={bits_str}) — {cause}"
+                                        f"(bits={bits_str}) — too many dots/gaps were internally "
+                                        f"inconsistent (occlusion, sampling landed across a printed "
+                                        f"edge) or the marker is too small/blurry/distant to resolve "
+                                        f"individual dots right now"
                                     )
                                 elif dbg['reason'] == 'margin too small':
                                     summary = (
