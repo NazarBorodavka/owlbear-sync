@@ -7,12 +7,19 @@ markers and is cheap enough to run on every frame instead of a background
 worker.
 
 Marker geometry (as a fraction of the token's own outer radius, matching the
-tags/ringcode/*.svg generator):
-    0.00 - 0.46  blank center  (mini mounting keep-out zone)
-    0.50 - 0.80  code ring     (16 slots, 22.5 deg each, marked/unmarked)
-    0.82 - 0.90  solid black ring (reuses the EXISTING Hough circle
-                 detection this project already runs every frame — no new
-                 detection step needed to locate the token itself)
+tags/ringcode/*.svg generator). Revised from an earlier version (center
+0.00-0.46) after real-world testing showed that was too small to keep a
+mini's actual base/peg clear of the code ring regardless of placement —
+pushed hard toward a bigger center at the cost of a narrower ring:
+    0.00 - 0.58  blank center  (mini mounting keep-out zone)
+    0.62 - 0.82  code ring     (16 slots, 22.5 deg each, marked/unmarked)
+    0.85 - 1.00  solid black ring, now extended to the token's true outer
+                 edge (reclaims what used to be a wasted white margin, and
+                 gives Hough a direct black-vs-table edge instead of a
+                 weaker white-margin-vs-table one). Reuses the EXISTING
+                 Hough circle detection this project already runs every
+                 frame — no new detection step needed to locate the token
+                 itself.
 
 Three robustness properties below were found necessary by direct testing,
 not assumed — each one failed in an earlier version before being added:
@@ -44,7 +51,7 @@ not assumed — each one failed in an earlier version before being added:
 Known remaining limitation (also verified directly, not assumed): a
 CONCENTRIC occluder (centered on the token, e.g. a mini mounted dead center)
 degrades gracefully only up to the point where its radius reaches the
-sampling band's inner edge (~56% of token radius) — past that it blanks
+sampling band's inner edge (~66% of token radius) — past that it blanks
 all 16 slots simultaneously, since every slot's sample band is covered at
 once. This is consistent with the project's established mounting rule
 (keep any occlusion source off-center): an OFF-CENTER occluder — even one
@@ -72,10 +79,11 @@ N_SLOTS = 16
 SLOT_ANGLE_DEG = 360.0 / N_SLOTS
 
 # Sampling band deliberately inset from the printed code ring's true span
-# (0.50-0.80 of token radius) to stay clear of antialiasing/discretization
-# noise at its edges (see module docstring, point 1).
-R_SAMPLE_INNER_FRAC = 0.56
-R_SAMPLE_OUTER_FRAC = 0.74
+# (0.62-0.82 of token radius) to stay clear of antialiasing/discretization
+# noise at its edges (see module docstring, point 1) -- same ~20%-of-band
+# margin on each side as the original 0.50-0.80 design used.
+R_SAMPLE_INNER_FRAC = 0.66
+R_SAMPLE_OUTER_FRAC = 0.78
 
 # Each patch samples a narrower angular slice than the full 22.5-degree slot
 # (the printed wedge itself only fills ~65% of its slot, see the generator),
