@@ -3,12 +3,12 @@
   <defs/>
   <circle cx="500.0" cy="500.0" fill="white" r="500.0"/>
   <circle cx="500.0" cy="500.0" fill="black" r="500.0"/>
-  <circle cx="500.0" cy="500.0" fill="white" r="430.0"/>
-  <circle cx="637.77" cy="832.60" r="40.00" fill="black"/>
-  <circle cx="500.00" cy="860.00" r="40.00" fill="black"/>
-  <circle cx="245.44" cy="754.56" r="40.00" fill="black"/>
-  <circle cx="167.40" cy="637.77" r="40.00" fill="black"/>
-  <circle cx="140.00" cy="500.00" r="40.00" fill="black"/>
-  <circle cx="245.44" cy="245.44" r="40.00" fill="black"/>
-  <circle cx="362.23" cy="167.40" r="40.00" fill="black"/>
+  <circle cx="500.0" cy="500.0" fill="white" r="445.0"/>
+  <circle cx="639.68" cy="837.22" r="50.00" fill="black"/>
+  <circle cx="500.00" cy="865.00" r="50.00" fill="black"/>
+  <circle cx="241.91" cy="758.09" r="50.00" fill="black"/>
+  <circle cx="162.78" cy="639.68" r="50.00" fill="black"/>
+  <circle cx="135.00" cy="500.00" r="50.00" fill="black"/>
+  <circle cx="241.91" cy="241.91" r="50.00" fill="black"/>
+  <circle cx="360.32" cy="162.78" r="50.00" fill="black"/>
   </svg>
