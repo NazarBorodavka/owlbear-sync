@@ -181,6 +181,99 @@ FLAT_MIN_MEAN_FOR_BLANK = 60.0
 # by that sweep.
 RING_SAFE_CUTOFF_FRAC = 0.78
 
+# --- Structural pre-filter (what IS this circle at all?) ---
+# Every check above assumes the Hough circle being decoded is actually a
+# ring-code marker and only asks "which one". That assumption doesn't hold
+# in a cluttered real scene: cv2.HoughCircles finds circular blobs on all
+# kinds of ordinary objects (can lids, bottle caps, patterned fabric), and
+# nothing before this point ever checked whether the content inside one
+# even LOOKS like a marker before trying to read dots out of it. With
+# min_margin pushed down to 1 (needed in practice -- see decode()'s
+# docstring), that's enough bits of chance agreement for essentially
+# arbitrary sampled content to "win" some codeword over the others,
+# producing a confident wrong ID on a completely unrelated object. Found
+# directly from a real camera frame: multiple non-marker objects (a can, a
+# bottle cap) were being confidently identified this way.
+#
+# The fix is a cheap structural check run BEFORE any per-dot search even
+# starts. It CANNOT assume the center is blank/light the way the first cut
+# of this did: the whole reason the center is a large blank zone in the
+# first place is so a miniature's base/peg can sit there -- in normal use
+# it's covered. And it can't assume the cover is even a single uniform
+# color: these minis are PAINTED (multiple colors, washes, texture on the
+# base), not molded single-color plastic -- so the center being internally
+# uniform is the UNCOMMON case, not something to fall back on only rarely.
+# It also can't assume any particular absolute brightness level for any
+# region, since this rig projects imagery onto the play surface and the
+# same marker can sit under noticeably different projected light from one
+# spot to the next.
+#
+# What's actually reliable regardless of any of that: the background
+# immediately OUTSIDE the token's own edge. It isn't covered by anything
+# mounted on the token (that's on top of the token, not beside it), and
+# cv2.HoughCircles finding a circle boundary there at all already implies
+# *some* real contrast exists right at that edge -- this check just
+# verifies it's the specific dark-ring-against-background contrast a
+# marker has, with its own independent thresholds. So the primary
+# reference is a thin band just outside the ring (EXTERIOR_SAMPLE_R_FRAC);
+# the center is kept only as a secondary, bonus check for the cases where
+# it DOES happen to be usable (no mini mounted, e.g. during setup/testing).
+# If neither reference is usable (busy/patterned background right at the
+# edge, AND a painted, non-uniform center) it falls back to the ring alone
+# against a generous absolute ceiling, same as before.
+# A single sample radius, not several -- tried averaging over multiple
+# radii within the band (same idea as CENTER_SAMPLE_R_FRACS) on the theory
+# that it would average out small-size antialiasing noise, but direct
+# testing found it strictly worse: any radius close to the band's outer
+# edge (1.00) loses almost all tolerance for radius OVERestimation (a
+# sample at 0.99*r_wrong overshoots the true ring the moment r_wrong is
+# even slightly too large), since the band itself is only 0.11 wide -- not
+# enough room to average across while also staying clear of both edges
+# under realistic Hough radius error. A single radius at the band's
+# midpoint, biased slightly toward its own center rather than hedging
+# across the whole band, measured better on both radius-error tolerance
+# and small-marker-size tests.
+RING_SAMPLE_R_FRAC = 0.95          # inset from the ring's [0.89, 1.00] band
+EXTERIOR_SAMPLE_R_FRAC = 1.10      # just past the token's own edge
+CENTER_SAMPLE_R_FRACS = (0.20, 0.45)  # two radii inside the [0, 0.60] blank zone
+N_STRUCTURE_SAMPLES_PER_RING = 24
+
+# "Internally uniform" bar for the ring/exterior/center regions -- looser
+# than the per-dot FLAT_STD_MAX since these are bigger, coarser samples
+# (print antialiasing, background texture, a mini's painted detail), not
+# single small windows.
+STRUCTURE_FLAT_STD_MAX = 25.0
+
+# Generous, deliberately uncalibrated ceiling used ONLY when NEITHER the
+# exterior nor the center is usable as a reference (see above) -- same
+# "coarse sanity floor, not a precise threshold" precedent as
+# FLAT_MIN_MEAN_FOR_BLANK elsewhere in this module. Printed black ink
+# should read well under this even under moderately bright/colored
+# projected light; it only exists to catch "there's clearly no dark ring
+# here at all".
+RING_FALLBACK_MAX_MEAN = 170.0
+
+# Otsu's between-class variance (see _otsu_threshold) over a combined
+# ring+reference sample set must clear this -- a real marker's contrast
+# against either reference is stark, so this can be a stricter bar than
+# the per-dot MIN_OTSU_VARIANCE.
+MIN_STRUCTURE_VARIANCE = 40.0
+
+# Ring and whichever reference is being checked must fall cleanly on
+# OPPOSITE sides of the split -- direction doesn't matter (a dark mini
+# base against the ring is as valid as a light one), but at least this
+# fraction of each region's samples must land on its own side, or the
+# split -- however confident-looking overall -- isn't actually separating
+# the two regions the way a real marker would. Swept empirically against
+# both the minimum-size and non-marker-rejection tests: a stricter value
+# cost real markers at small sizes (the thin printed ring band is noisier
+# there, see RING_SAMPLE_R_FRAC) with no measurable gain in false-positive
+# rejection in that same sweep (those fail earlier -- no usable reference
+# at all -- so this threshold barely matters to them). 0.65 is a
+# deliberately held margin above a 0.50 (coin-flip/random) baseline, not
+# the most permissive value tested.
+MIN_STRUCTURE_PURITY = 0.65
+
 # Shared by every _otsu_threshold call -- profiling found np.histogram's own
 # bin-edge setup (recomputed from scratch every call) was a significant
 # fraction of total decode() time at the per-slot-per-phase call volume this
@@ -335,6 +428,96 @@ def read_slots_best_phase(gray, cx, cy, r, n_candidates=N_PHASE_CANDIDATES):
     return best_bits
 
 
+def _confident_contrast(vals_a, vals_b):
+    """Otsu-based, direction-agnostic check for whether two groups of
+    samples genuinely sit on opposite sides of a confident split (used for
+    ring-vs-exterior and ring-vs-center alike). Returns (ok, purity,
+    variance)."""
+    combined = np.concatenate([vals_a, vals_b])
+    thresh, variance = _otsu_threshold(combined)
+    if thresh is None or variance < MIN_STRUCTURE_VARIANCE:
+        return False, 0.0, variance
+    a_below = float(np.mean(vals_a <= thresh))
+    b_below = float(np.mean(vals_b <= thresh))
+    # Best of the two possible directions: a-dark/b-light, or a-light/b-dark.
+    purity = max(min(a_below, 1 - b_below), min(1 - a_below, b_below))
+    return purity >= MIN_STRUCTURE_PURITY, purity, variance
+
+
+def _looks_like_marker(gray, cx, cy, r):
+    """Cheap structural gate, run before any per-dot search: does this
+    circle even have a ring-code marker's basic signature, or is it some
+    other circular object Hough happened to find? See the comment above
+    RING_SAMPLE_R_FRAC for the full reasoning -- in short: the ring must be
+    a uniform band, and it must contrast with EITHER the background just
+    outside the token (primary reference -- available no matter what's
+    mounted on the token) OR the center (secondary, bonus check -- only
+    usable when nothing's covering it, or when what's covering it happens
+    to be uniform). If neither reference is usable, falls back to the ring
+    alone against a generous absolute ceiling.
+
+    Returns (ok, debug_dict).
+    """
+    angles = np.linspace(0, 2 * np.pi, N_STRUCTURE_SAMPLES_PER_RING, endpoint=False)
+
+    h, w = gray.shape[:2]
+    def _sample_at(frac):
+        xs = cx + frac * r * np.cos(angles)
+        ys = cy + frac * r * np.sin(angles)
+        xi = np.clip(np.round(xs).astype(np.int64), 0, w - 1)
+        yi = np.clip(np.round(ys).astype(np.int64), 0, h - 1)
+        return gray[yi, xi]
+
+    ring_vals = _sample_at(RING_SAMPLE_R_FRAC)
+    exterior_vals = _sample_at(EXTERIOR_SAMPLE_R_FRAC)
+    center_vals = np.concatenate([_sample_at(frac) for frac in CENTER_SAMPLE_R_FRACS])
+
+    debug = {"ring_mean": float(ring_vals.mean()), "ring_std": float(ring_vals.std()),
+              "exterior_mean": float(exterior_vals.mean()), "exterior_std": float(exterior_vals.std()),
+              "center_mean": float(center_vals.mean()), "center_std": float(center_vals.std()),
+              "reason": None}
+
+    # No separate ring-flatness pre-check: at small marker sizes or under
+    # real Hough radius error, antialiasing alone can push ring_std above
+    # any threshold strict enough to be useful, which would reject real
+    # markers before the purity check below even runs (found directly --
+    # this exact check used to be here and broke both cases). The purity
+    # check already self-polices ring consistency: a genuinely
+    # inconsistent ring can't agree with *either* side of a split, so a
+    # separate flatness gate on the ring specifically is redundant.
+    exterior_usable = exterior_vals.std() < STRUCTURE_FLAT_STD_MAX
+    center_usable = center_vals.std() < STRUCTURE_FLAT_STD_MAX
+    debug["exterior_usable"] = exterior_usable
+    debug["center_usable"] = center_usable
+
+    if exterior_usable:
+        ok, purity, variance = _confident_contrast(ring_vals, exterior_vals)
+        debug["exterior_purity"] = purity
+        if ok:
+            debug["reference"] = "exterior"
+            return True, debug
+
+    if center_usable:
+        ok, purity, variance = _confident_contrast(ring_vals, center_vals)
+        debug["center_purity"] = purity
+        if ok:
+            debug["reference"] = "center"
+            return True, debug
+
+    if not exterior_usable and not center_usable:
+        # Neither reference is internally consistent enough to trust at
+        # all (busy/patterned background right at the token's edge, AND a
+        # painted, non-uniform center) -- fall back to the ring alone.
+        if ring_vals.mean() > RING_FALLBACK_MAX_MEAN:
+            debug["reason"] = "ring too bright to plausibly be printed ink (no usable reference)"
+            return False, debug
+        debug["reference"] = "ring_only"
+        return True, debug
+
+    debug["reason"] = "no confident contrast against any usable reference"
+    return False, debug
+
+
 # Generated by a combinatorial search (minimum pairwise separation across
 # all relative rotations = 4 bits) -- 10 necklaces, 7-of-16 marks each.
 # Index = ID.
@@ -366,9 +549,22 @@ def decode(gray, cx, cy, r, min_margin=2, return_debug=False):
     match, and only accepts a result if the best (id, rotation) pair beats
     the second-best by at least min_margin matching bits.
 
+    Before any of that: rejects circles that don't even structurally look
+    like a ring-code marker (see _looks_like_marker) -- this runs first
+    specifically so a random circular object never reaches the per-dot
+    search and risks a chance codeword match at all, not just so the
+    eventual margin check catches it.
+
     Returns (id, confidence), or (id, confidence, debug_dict) if
     return_debug=True. Returns (None, 0.0[, debug]) if no confident match.
     """
+    structure_ok, structure_debug = _looks_like_marker(gray, cx, cy, r)
+    if not structure_ok:
+        debug = {"bits": None, "n_known": 0, "best_matches": None,
+                  "second_best": None, "reason": structure_debug["reason"],
+                  "structure": structure_debug}
+        return (None, 0.0, debug) if return_debug else (None, 0.0)
+
     bits = read_slots_best_phase(gray, cx, cy, r)
     known_mask = [b is not None for b in bits]
     n_known = sum(known_mask)

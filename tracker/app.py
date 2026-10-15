@@ -1051,7 +1051,7 @@ def get_video_stream():
         # CCTag candidate matching further down).
         candidate_pairs = []
         for cidx, (cx, cy, cr) in enumerate(detected_circles):
-            for t_id, t_data in get_video_stream.tracked_tokens.items():
+            for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
                 # Use velocity-predicted position for matching so fast-moving tokens
                 # aren't treated as new tokens each frame
                 pred_x = t_data["x"] + t_data.get("vx", 0)
@@ -1210,7 +1210,7 @@ def get_video_stream():
                 get_video_stream._ringcode_attempts = 0
                 get_video_stream._ringcode_successes = 0
                 get_video_stream._ringcode_confidence_sum = 0.0
-            for t_id, t_data in get_video_stream.tracked_tokens.items():
+            for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
                 if t_data.get("missed", 0) > 0:
                     # Not actively Hough-matched this frame — its (x, y) is
                     # only a predicted/ghosted position, not a confirmed
@@ -1242,7 +1242,7 @@ def get_video_stream():
             # check just below (not applied there since that branch doesn't
             # run in this mode).
             claimed = {}
-            for t_id, t_data in get_video_stream.tracked_tokens.items():
+            for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
                 m_id = t_data.get("marker_id")
                 if m_id is None:
                     continue
@@ -1343,7 +1343,7 @@ def get_video_stream():
                       if not (cctag_min_id <= rid <= cctag_max_id) or dm <= 0:
                           continue
 
-                      for t_id, t_data in get_video_stream.tracked_tokens.items():
+                      for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
                           d = np.hypot(t_data["x"] - rx, t_data["y"] - ry)
                           # Accept if CCTag center falls within cctag_match_radius_mult × token radius.
                           # Higher = more forgiving matching for large/far tokens.
@@ -1383,7 +1383,7 @@ def get_video_stream():
                           t_data["marker_id"] = best_rid
 
                   # Tokens not matched this round: decay their votes but keep their ID
-                  for t_id, t_data in get_video_stream.tracked_tokens.items():
+                  for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
                       if t_id not in matched_cctag and "id_votes" in t_data:
                           for k in list(t_data["id_votes"].keys()):
                               t_data["id_votes"][k] *= cctag_id_voting_decay
@@ -1419,7 +1419,7 @@ def get_video_stream():
                   # pick from flapping) means a challenger has to clearly
                   # out-vote the incumbent before ownership actually transfers.
                   claimed = {}
-                  for t_id, t_data in get_video_stream.tracked_tokens.items():
+                  for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
                       m_id = t_data.get("marker_id")
                       if m_id is None:
                           continue
@@ -1466,7 +1466,7 @@ def get_video_stream():
         
         # Dedup marker IDs before sending payload
         best_tokens = {}
-        for t_id, t_data in get_video_stream.tracked_tokens.items():
+        for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
             m_id = t_data.get("marker_id")
             if m_id is not None:
                 if m_id not in best_tokens or t_data["missed"] < best_tokens[m_id]["missed"]:
@@ -1520,7 +1520,7 @@ def get_video_stream():
         # marker-size/angle/lighting problem) tells us which one it actually
         # is next time, instead of guessing blind.
         _now = time.time()
-        for t_id, t_data in get_video_stream.tracked_tokens.items():
+        for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
             if t_data.get("marker_id") is None:
                 if show_overlay:
                     cv2.circle(frame, (int(t_data["x"]), int(t_data["y"])), int(t_data["r"]), (0, 0, 255), 2)
@@ -1559,6 +1559,19 @@ def get_video_stream():
                             dbg = t_data.get("ringcode_debug")
                             if dbg is None:
                                 summary = "no decode attempt recorded yet for this token"
+                            elif dbg['bits'] is None:
+                                # Rejected by the structural pre-filter before
+                                # any per-dot search even ran -- this Hough
+                                # circle doesn't have a ring-code marker's
+                                # basic dark-ring/light-center signature at
+                                # all, so there's no bit pattern to show.
+                                struct = dbg.get("structure", {})
+                                summary = (
+                                    f"rejected before dot decode: {dbg['reason']} "
+                                    f"(ring_mean={struct.get('ring_mean', 0):.0f}, "
+                                    f"center_mean={struct.get('center_mean', 0):.0f}) — "
+                                    f"this Hough circle likely isn't a ring-code marker at all"
+                                )
                             else:
                                 bits_str = ''.join('?' if b is None else str(b) for b in dbg['bits'])
                                 if dbg['reason'] == 'too few known bits':
@@ -1685,7 +1698,7 @@ def get_video_stream():
         if not hasattr(get_video_stream, "_was_missing_tokens"):
             get_video_stream._was_missing_tokens = False
         if any_missed and not get_video_stream._was_missing_tokens:
-            missed_ids = [tid for tid, td in get_video_stream.tracked_tokens.items() if td["missed"] > auto_blank_delay]
+            missed_ids = [tid for tid, td in list(get_video_stream.tracked_tokens.items()) if td["missed"] > auto_blank_delay]
             print(f"[TRACKER] Auto-blank triggered, missing: {missed_ids}", flush=True)
         elif not any_missed and get_video_stream._was_missing_tokens:
             print("[TRACKER] Auto-blank cleared", flush=True)
@@ -2299,7 +2312,7 @@ def update_settings():
     # Purge tokens whose marker_id is now outside the new ID range
     if hasattr(get_video_stream, 'tracked_tokens'):
         to_delete = []
-        for tid, tdata in get_video_stream.tracked_tokens.items():
+        for tid, tdata in list(get_video_stream.tracked_tokens.items()):
             rid = tdata.get('marker_id')
             if rid is not None and (int(rid) < cctag_min_id or int(rid) > cctag_max_id):
                 to_delete.append(tid)
@@ -2330,8 +2343,10 @@ def delete_token():
     token_id = data.get('id')
     if token_id:
         ignored_tokens.add(token_id)
-        if token_id in get_video_stream.tracked_tokens:
-            del get_video_stream.tracked_tokens[token_id]
+        # Single atomic pop rather than a check-then-delete -- the video
+        # thread can remove this same token (ghosting timeout) between the
+        # membership check and the del, which would otherwise raise KeyError.
+        get_video_stream.tracked_tokens.pop(token_id, None)
     return jsonify({"success": True})
 
 @app.route('/api/token/reset', methods=['POST'])
