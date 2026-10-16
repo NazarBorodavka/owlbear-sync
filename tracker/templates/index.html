@@ -884,6 +884,19 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Ghosting Persistence (frames)
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How many frames a token stays tracked with its last known position/ID while its tag is temporarily hidden, e.g. by a hand or another token. 30 frames is roughly 1 second at 30fps. Shared by both identification backends.">i</button>
+                                </span>
+                                <input type="number" id="val_cctag_ghosting_frames" value="30" step="1" min="1"
+                                    max="90" class="val-input"
+                                    oninput="syncSlider(this, 'cctag_ghosting_frames'); updateSettings()">
+                            </div>
+                            <input type="range" id="cctag_ghosting_frames" min="1" max="90" step="1" value="30"
+                                oninput="updateVal('cctag_ghosting_frames')">
+                        </div>
                         <div id="cctag-only-fields">
                         <div class="field">
                             <div class="field-row">
@@ -924,28 +937,6 @@
                             <input type="range" id="cctag_match_radius_mult" min="0.5" max="5.0" step="0.1"
                                 value="2.0" oninput="updateVal('cctag_match_radius_mult')">
                         </div>
-                        </div>
-                        <div id="ringcode-only-fields" style="display: none;">
-                        <p class="section-desc" style="margin-top: 0;">
-                            Ring Code classifies each marker relative to its own measured
-                            black/white split each frame rather than against fixed brightness
-                            values, so it self-adjusts to lighting/exposure changes automatically
-                            — there's no brightness threshold to tune here.
-                        </p>
-                        <div class="field">
-                            <div class="field-row">
-                                <span class="field-label">Decode Confidence Margin (bits)
-                                    <button type="button" class="info-icon" tabindex="0"
-                                        data-tip="How many more matching bits the best candidate ID must have over the second-best before a token is identified. 2 is the tested default. Raise this if IDs are being misread; lower it if tokens take too long to identify when partially occluded.">i</button>
-                                </span>
-                                <input type="number" id="val_ringcode_min_margin" value="2" step="1" min="1"
-                                    max="8" class="val-input"
-                                    oninput="syncSlider(this, 'ringcode_min_margin'); updateSettings()">
-                            </div>
-                            <input type="range" id="ringcode_min_margin" min="1" max="8" step="1" value="2"
-                                oninput="updateVal('ringcode_min_margin')">
-                        </div>
-                        </div>
                         <div class="field">
                             <div class="field-row">
                                 <span class="field-label">ID Switch Confidence Margin
@@ -959,24 +950,59 @@
                             <input type="range" id="cctag_id_switch_margin" min="1.0" max="3.0" step="0.1" value="1.5"
                                 oninput="updateVal('cctag_id_switch_margin')">
                         </div>
+                        </div>
+                        <div id="ringcode-only-fields" style="display: none;">
+                        <p class="section-desc" style="margin-top: 0;">
+                            Ring Code classifies each marker relative to its own measured
+                            black/white split each frame rather than against fixed brightness
+                            values, so it self-adjusts to lighting/exposure changes automatically
+                            — there's no brightness threshold to tune here.
+                        </p>
                         <div class="field">
                             <div class="field-row">
-                                <span class="field-label">Ghosting Persistence (frames)
+                                <span class="field-label">Decode Confidence Margin (bits)
                                     <button type="button" class="info-icon" tabindex="0"
-                                        data-tip="How many frames a token stays tracked with its last known position/ID while its tag is temporarily hidden, e.g. by a hand or another token. 30 frames is roughly 1 second at 30fps.">i</button>
+                                        data-tip="How many more matching bits the best candidate ID must have over the second-best before a SINGLE FRAME is trusted on its own. 2 is the tested default. This only gates the fast path — a frame that misses it still contributes weaker evidence to ID Voting Decay below, so lowering this is rarely necessary anymore; raise it if IDs are being misread outright.">i</button>
                                 </span>
-                                <input type="number" id="val_cctag_ghosting_frames" value="30" step="1" min="1"
-                                    max="90" class="val-input"
-                                    oninput="syncSlider(this, 'cctag_ghosting_frames'); updateSettings()">
+                                <input type="number" id="val_ringcode_min_margin" value="2" step="1" min="1"
+                                    max="8" class="val-input"
+                                    oninput="syncSlider(this, 'ringcode_min_margin'); updateSettings()">
                             </div>
-                            <input type="range" id="cctag_ghosting_frames" min="1" max="90" step="1" value="30"
-                                oninput="updateVal('cctag_ghosting_frames')">
+                            <input type="range" id="ringcode_min_margin" min="1" max="8" step="1" value="2"
+                                oninput="updateVal('ringcode_min_margin')">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">ID Voting Decay
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How much weight each frame's reading keeps going into the next frame. Every frame's best-matching ID contributes evidence (weighted by how clearly it beat the runner-up), even frames that don't individually clear the Decode Confidence Margin above — this lets a token's true ID win out over many frames even when no single frame is fully confident, without weakening single-frame accuracy. Higher values (0.95+) average over more history; lower values react faster but are noisier.">i</button>
+                                </span>
+                                <input type="number" id="val_ringcode_id_voting_decay" value="0.95" step="0.01" min="0.5"
+                                    max="0.99" class="val-input"
+                                    oninput="syncSlider(this, 'ringcode_id_voting_decay'); updateSettings()">
+                            </div>
+                            <input type="range" id="ringcode_id_voting_decay" min="0.5" max="0.99" step="0.01"
+                                value="0.95" oninput="updateVal('ringcode_id_voting_decay')">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">ID Switch Confidence Margin
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How much more accumulated vote weight a new ID must have before it's allowed to replace a token's current ID, or before it can take an ID away from another token. Higher values (1.5-2.0) require a clear, sustained lead before flipping.">i</button>
+                                </span>
+                                <input type="number" id="val_ringcode_id_switch_margin" value="1.5" step="0.1" min="1.0"
+                                    max="3.0" class="val-input"
+                                    oninput="syncSlider(this, 'ringcode_id_switch_margin'); updateSettings()">
+                            </div>
+                            <input type="range" id="ringcode_id_switch_margin" min="1.0" max="3.0" step="0.1" value="1.5"
+                                oninput="updateVal('ringcode_id_switch_margin')">
+                        </div>
                         </div>
                         <div class="field">
                             <div class="field-row">
                                 <span class="field-label">Identification Backend
                                     <button type="button" class="info-icon" tabindex="0"
-                                        data-tip="Chosen at container startup via the TRACKER_ID_BACKEND env var, not switchable here — this just shows which one is actually running. CCTag supports IDs 0-31 and larger markers; Ring Code is a custom 10-ID (0-9) system designed for much smaller/lower-resolution markers.">i</button>
+                                        data-tip="Chosen at container startup via the TRACKER_ID_BACKEND env var, not switchable here — this just shows which one is actually running. CCTag supports IDs 0-31 and larger markers; Ring Code is a custom 6-ID (0-5, a full D&amp;D party) system designed for much smaller/lower-resolution markers.">i</button>
                                 </span>
                             </div>
                             <input type="text" id="cctag_family_display" class="val-input" value="CCTag (3 Crowns)"
@@ -1331,7 +1357,9 @@
                 cctag_match_radius_mult: parseFloat(document.getElementById('cctag_match_radius_mult').value),
                 cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value),
                 cctag_id_switch_margin: parseFloat(document.getElementById('cctag_id_switch_margin').value),
-                ringcode_min_margin: parseInt(document.getElementById('ringcode_min_margin').value)
+                ringcode_min_margin: parseInt(document.getElementById('ringcode_min_margin').value),
+                ringcode_id_voting_decay: parseFloat(document.getElementById('ringcode_id_voting_decay').value),
+                ringcode_id_switch_margin: parseFloat(document.getElementById('ringcode_id_switch_margin').value)
             };
 
             // Sync numeric display inputs
@@ -1405,7 +1433,9 @@
                 cctag_match_radius_mult: parseFloat(document.getElementById('cctag_match_radius_mult').value),
                 cctag_ghosting_frames: parseInt(document.getElementById('cctag_ghosting_frames').value),
                 cctag_id_switch_margin: parseFloat(document.getElementById('cctag_id_switch_margin').value),
-                ringcode_min_margin: parseInt(document.getElementById('ringcode_min_margin').value)
+                ringcode_min_margin: parseInt(document.getElementById('ringcode_min_margin').value),
+                ringcode_id_voting_decay: parseFloat(document.getElementById('ringcode_id_voting_decay').value),
+                ringcode_id_switch_margin: parseFloat(document.getElementById('ringcode_id_switch_margin').value)
             };
             localStorage.setItem('owlbearTrackerConfig', JSON.stringify(config));
         }
@@ -1448,6 +1478,14 @@
                     if (config.ringcode_min_margin !== undefined) {
                         document.getElementById('ringcode_min_margin').value = config.ringcode_min_margin;
                         document.getElementById('val_ringcode_min_margin').value = config.ringcode_min_margin;
+                    }
+                    if (config.ringcode_id_voting_decay !== undefined) {
+                        document.getElementById('ringcode_id_voting_decay').value = config.ringcode_id_voting_decay;
+                        document.getElementById('val_ringcode_id_voting_decay').value = config.ringcode_id_voting_decay;
+                    }
+                    if (config.ringcode_id_switch_margin !== undefined) {
+                        document.getElementById('ringcode_id_switch_margin').value = config.ringcode_id_switch_margin;
+                        document.getElementById('val_ringcode_id_switch_margin').value = config.ringcode_id_switch_margin;
                     }
                     if (config.exposure !== undefined) document.getElementById('exposure').value = config.exposure;
                     if (config.contrast !== undefined) document.getElementById('contrast').value = config.contrast;
@@ -1534,6 +1572,14 @@
                         document.getElementById('ringcode_min_margin').value = cfg.ringcode_min_margin;
                         document.getElementById('val_ringcode_min_margin').value = cfg.ringcode_min_margin;
                     }
+                    if (cfg.ringcode_id_voting_decay !== undefined) {
+                        document.getElementById('ringcode_id_voting_decay').value = cfg.ringcode_id_voting_decay;
+                        document.getElementById('val_ringcode_id_voting_decay').value = cfg.ringcode_id_voting_decay;
+                    }
+                    if (cfg.ringcode_id_switch_margin !== undefined) {
+                        document.getElementById('ringcode_id_switch_margin').value = cfg.ringcode_id_switch_margin;
+                        document.getElementById('val_ringcode_id_switch_margin').value = cfg.ringcode_id_switch_margin;
+                    }
                     // Backend is chosen at container startup (TRACKER_ID_BACKEND env
                     // var), not switchable from here — this just reflects which one is
                     // actually running: show the matching settings sub-panel and hide
@@ -1548,7 +1594,7 @@
                         const familyDisplay = document.getElementById('cctag_family_display');
                         if (familyDisplay) {
                             familyDisplay.value = isRingCode
-                                ? 'Ring Code (16-slot, 10 IDs)'
+                                ? 'Ring Code (16-slot, 6 IDs)'
                                 : 'CCTag (3 Crowns)';
                         }
                     }

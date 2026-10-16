@@ -83,12 +83,12 @@ except Exception as e:
 # env var, same pattern as TRACKER_USE_VAAPI/TRACKER_USE_OPENCL — chosen at
 # startup since it's an experimental alternative being evaluated against
 # CCTag on real hardware, not something to flip mid-session. 'ringcode' is a
-# custom 10-ID marker system (python/ringcode_decoder.py): pure Python/
+# custom 6-ID marker system (python/ringcode_decoder.py): pure Python/
 # OpenCV, no native library, designed for markers at a fraction of the
-# pixel size CCTag needs, at the cost of being capped at exactly 10 distinct
-# IDs (0-9) and needing its own real-world validation — this is exactly
-# that validation pass, run alongside the existing, proven CCTag path
-# rather than replacing it.
+# pixel size CCTag needs, at the cost of being capped at exactly 6 distinct
+# IDs (0-5, a full D&D party) and needing its own real-world validation —
+# this is exactly that validation pass, run alongside the existing, proven
+# CCTag path rather than replacing it.
 ID_BACKEND = os.environ.get('TRACKER_ID_BACKEND', 'cctag').lower()
 if ID_BACKEND not in ('cctag', 'ringcode'):
     print(f"[WARN] Unrecognized TRACKER_ID_BACKEND={ID_BACKEND!r} — defaulting to cctag.", flush=True)
@@ -98,7 +98,7 @@ if ID_BACKEND == 'ringcode':
     try:
         import ringcode_decoder
         RINGCODE_AVAILABLE = True
-        print("[OK] Ring code identification backend active (10 IDs, pure Python, no native dependency).", flush=True)
+        print("[OK] Ring code identification backend active (6 IDs, pure Python, no native dependency).", flush=True)
     except Exception as e:
         print(f"[WARN] TRACKER_ID_BACKEND=ringcode but import failed ({e}) — falling back to CCTag.", flush=True)
         ID_BACKEND = 'cctag'
@@ -489,7 +489,7 @@ def load_config_from_disk():
     global auto_blank, auto_blank_delay
     global cctag_min_id, cctag_max_id, cctag_min_ident_proba, cctag_id_voting_decay
     global cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
-    global ringcode_min_margin
+    global ringcode_min_margin, ringcode_id_voting_decay, ringcode_id_switch_margin
     global token_aliases, manual_blank, camera_url, show_overlay, flip_x, flip_y
     global camera_matrix, dist_coeffs, calibration_model, settings_dirty, undistort_map1, undistort_map2
     global src_pts, corner_idx, homography_matrix
@@ -507,6 +507,8 @@ def load_config_from_disk():
                 cctag_ghosting_frames = int(c.get('cctag_ghosting_frames', 30))
                 cctag_id_switch_margin = float(c.get('cctag_id_switch_margin', 1.5))
                 ringcode_min_margin = int(c.get('ringcode_min_margin', 2))
+                ringcode_id_voting_decay = float(c.get('ringcode_id_voting_decay', 0.95))
+                ringcode_id_switch_margin = float(c.get('ringcode_id_switch_margin', 1.5))
                 camera_url = c.get('camera_url', camera_url)
                 if 'password' in c:
                     USER_DATA["admin"] = c['password']
@@ -591,6 +593,8 @@ def save_config_to_disk():
         'cctag_ghosting_frames': cctag_ghosting_frames,
         'cctag_id_switch_margin': cctag_id_switch_margin,
         'ringcode_min_margin': ringcode_min_margin,
+        'ringcode_id_voting_decay': ringcode_id_voting_decay,
+        'ringcode_id_switch_margin': ringcode_id_switch_margin,
         'token_aliases': token_aliases,
         'camera_url': camera_url,
         'password': USER_DATA.get("admin", "admin"),
@@ -666,8 +670,26 @@ cctag_id_switch_margin = 1.5
 # active each frame, the same way CCTag does) rather than compared against
 # fixed brightness thresholds, so there's nothing to tune there. min_margin
 # mirrors cctag_id_switch_margin's role: how much a decode's best match must
-# beat the second-best before it's trusted.
+# beat the second-best before it's trusted on its own, single-frame reading.
 ringcode_min_margin = 2
+
+# Temporal vote accumulation for ring-code IDs, mirroring CCTag's own
+# id_votes mechanism below -- added because this codebook's minimum
+# pairwise codeword distance (4 bits) only guarantees recovering a single
+# actual bit-flip error from any ONE frame's read (found directly: a token
+# stuck "unidentified" for 80+ seconds was reading mostly-consistent bits
+# that were genuinely a near-tie between its true ID and a neighbor,
+# something no single-frame decode can resolve). Accumulating weak
+# evidence across many independent reads lets a token's true ID pull ahead
+# over time without loosening ringcode_min_margin itself, which would
+# reopen the false-positive risk _looks_like_marker exists to close.
+# Separate from cctag_id_voting_decay/switch_margin since ring code runs
+# inline every video frame (~10fps) rather than on CCTag's slower
+# background-thread cadence, so the right memory window in wall-clock time
+# isn't necessarily the same number -- same starting values as CCTag's
+# defaults, independently tunable from here.
+ringcode_id_voting_decay = 0.95
+ringcode_id_switch_margin = 1.5
 
 manual_blank = False
 
@@ -1224,10 +1246,56 @@ def get_video_stream():
                 t_data["ringcode_debug"] = dbg
                 get_video_stream._ringcode_attempts += 1
                 if rid is not None and (cctag_min_id <= rid <= cctag_max_id):
-                    t_data["marker_id"] = rid
-                    t_data["ringcode_confidence"] = conf
                     get_video_stream._ringcode_successes += 1
                     get_video_stream._ringcode_confidence_sum += conf
+
+                # Temporal vote accumulation -- mirrors CCTag's id_votes
+                # mechanism below exactly, for the same underlying reason:
+                # this codebook's minimum pairwise codeword distance (4
+                # bits) only guarantees recovering ONE actual bit-flip
+                # error from any single frame's read, so a token can sit
+                # genuinely tied between its true ID and a neighbor for
+                # many consecutive frames (confirmed directly against a
+                # real stuck token's logged reads). Accumulating each
+                # frame's own winning margin as vote weight lets that true
+                # ID pull ahead over many independent reads without
+                # loosening ringcode_min_margin itself, which would reopen
+                # the false-positive risk _looks_like_marker exists to
+                # close. Votes decay every frame regardless of this
+                # frame's outcome, same as CCTag's.
+                votes = t_data.setdefault("ringcode_votes", {})
+                for k in list(votes.keys()):
+                    votes[k] *= ringcode_id_voting_decay
+                    if votes[k] < 0.01:
+                        del votes[k]
+                per_id_scores = dbg.get("per_id_scores")
+                if per_id_scores:
+                    # Winner-take-all for this frame, weighted by its OWN
+                    # margin over the runner-up -- a decisive frame
+                    # contributes real weight, a near-tied/ambiguous one
+                    # contributes almost nothing, so noisy or genuinely
+                    # ambiguous frames can't drown out a token's more
+                    # confident reads the way equal-weight voting would
+                    # (confirmed directly: equal-weight voting over a real
+                    # stuck token's logged reads converged on the WRONG
+                    # id, since a close neighbor codeword won outright
+                    # more often than the true one did -- margin-weighting
+                    # at least ensures those wins count for less).
+                    win_id, win_matches, _ = per_id_scores[0]
+                    if cctag_min_id <= win_id <= cctag_max_id:
+                        runner_up_matches = per_id_scores[1][1] if len(per_id_scores) > 1 else 0
+                        weight = max(0, win_matches - runner_up_matches)
+                        if weight > 0:
+                            votes[win_id] = votes.get(win_id, 0) + weight
+
+                current_id = t_data.get("marker_id")
+                if votes:
+                    best_vote_id, best_vote = max(votes.items(), key=lambda kv: kv[1])
+                    if current_id is None or current_id not in votes:
+                        t_data["marker_id"] = best_vote_id
+                    elif best_vote_id != current_id and best_vote > votes.get(current_id, 0) * ringcode_id_switch_margin:
+                        t_data["marker_id"] = best_vote_id
+                t_data["ringcode_confidence"] = conf if rid is not None else t_data.get("ringcode_confidence", 0.0)
                 # Intentionally NOT clearing marker_id to None on a failed or
                 # low-confidence read this frame — same persistence
                 # philosophy as CCTag: as long as the disk is physically
@@ -1235,29 +1303,33 @@ def get_video_stream():
                 # confidently claims it (the collision check right below).
 
             # Resolve cross-token collisions: two Hough tracks both
-            # confidently decoding to the same ring-code ID this frame.
-            # Reuses cctag_id_switch_margin as the same hysteresis knob —
-            # a challenger must clearly out-confidence the incumbent before
-            # ownership transfers, same rationale as the CCTag collision
-            # check just below (not applied there since that branch doesn't
-            # run in this mode).
+            # ending up with votes for the same ring-code ID. Compares
+            # accumulated vote weight for the claimed ID, not a single
+            # frame's confidence -- same reasoning, and the same pattern,
+            # as CCTag's own cross-token collision check just below (not
+            # applied there since that branch doesn't run in this mode): a
+            # momentary spurious circle that happens to win one noisy
+            # frame shouldn't be able to instantly steal an ID a real
+            # token has been building evidence for over many frames.
             claimed = {}
             for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
                 m_id = t_data.get("marker_id")
                 if m_id is None:
                     continue
-                conf = t_data.get("ringcode_confidence", 0)
+                vote_weight = t_data.get("ringcode_votes", {}).get(m_id, 0)
                 missed = t_data.get("missed", 0)
                 if m_id not in claimed:
-                    claimed[m_id] = (t_id, conf, missed)
+                    claimed[m_id] = (t_id, vote_weight, missed)
                 else:
-                    ex_t, ex_c, ex_m = claimed[m_id]
-                    if missed < ex_m or (missed == ex_m and conf > ex_c * cctag_id_switch_margin):
+                    ex_t, ex_v, ex_m = claimed[m_id]
+                    if missed < ex_m or (missed == ex_m and vote_weight > ex_v * ringcode_id_switch_margin):
                         loser = get_video_stream.tracked_tokens[ex_t]
                         loser["marker_id"] = None
-                        claimed[m_id] = (t_id, conf, missed)
-                    elif ex_m < missed or ex_c > conf * cctag_id_switch_margin:
+                        loser.get("ringcode_votes", {}).pop(m_id, None)
+                        claimed[m_id] = (t_id, vote_weight, missed)
+                    elif ex_m < missed or ex_v > vote_weight * ringcode_id_switch_margin:
                         t_data["marker_id"] = None
+                        t_data.get("ringcode_votes", {}).pop(m_id, None)
                     # else: neither side clearly wins -- leave both as-is,
                     # same rationale as the CCTag collision check.
 
@@ -1582,6 +1654,22 @@ def get_video_stream():
                                         f"edge) or the marker is too small/blurry/distant to resolve "
                                         f"individual dots right now"
                                     )
+                                elif dbg['reason'] == 'orientation ambiguous':
+                                    # Enough slots were read, but the dedicated
+                                    # sync word (see SYNC_WORD in
+                                    # ringcode_decoder.py) couldn't confidently
+                                    # resolve which of the 16 possible
+                                    # rotations is correct -- this happens
+                                    # before the ID is even compared, so there
+                                    # is no best_id/margin to report, just how
+                                    # close the top two rotation candidates
+                                    # were.
+                                    summary = (
+                                        f"bits={bits_str} ({dbg['n_known']}/16 known); orientation "
+                                        f"sync score {dbg['sync_best']} vs next-best {dbg['sync_second']} "
+                                        f"(needs margin >= {ringcode_decoder.SYNC_MIN_MARGIN}) — "
+                                        f"can't yet tell which way the marker is rotated"
+                                    )
                                 elif dbg['reason'] == 'margin too small':
                                     summary = (
                                         f"bits={bits_str} ({dbg['n_known']}/16 known); best candidate "
@@ -1596,7 +1684,7 @@ def get_video_stream():
                                     # never reached marker_id — the only way
                                     # that happens is cctag_min_id/max_id
                                     # excluding this ID (ring code only ever
-                                    # produces 0-9, so this means that range
+                                    # produces 0-5, so this means that range
                                     # has been narrowed below the decoded id).
                                     summary = (
                                         f"bits={bits_str} ({dbg['n_known']}/16 known); decoded id="
@@ -2237,6 +2325,8 @@ def get_settings():
         "cctag_id_switch_margin": cctag_id_switch_margin,
         "id_backend": ID_BACKEND,
         "ringcode_min_margin": ringcode_min_margin,
+        "ringcode_id_voting_decay": ringcode_id_voting_decay,
+        "ringcode_id_switch_margin": ringcode_id_switch_margin,
     })
 
 
@@ -2249,7 +2339,7 @@ def update_settings():
     global camera_url, manual_blank, flip_x, flip_y
     global CCTAG_AVAILABLE, cctag_min_id, cctag_max_id, cctag_min_ident_proba
     global cctag_id_voting_decay, cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
-    global ringcode_min_margin
+    global ringcode_min_margin, ringcode_id_voting_decay, ringcode_id_switch_margin
 
     data = request.json
     if 'camera_url' in data: camera_url = data['camera_url']
@@ -2276,6 +2366,12 @@ def update_settings():
         except Exception: pass
     if 'ringcode_min_margin' in data:
         try: ringcode_min_margin = int(data['ringcode_min_margin'])
+        except Exception: pass
+    if 'ringcode_id_voting_decay' in data:
+        try: ringcode_id_voting_decay = float(data['ringcode_id_voting_decay'])
+        except Exception: pass
+    if 'ringcode_id_switch_margin' in data:
+        try: ringcode_id_switch_margin = float(data['ringcode_id_switch_margin'])
         except Exception: pass
     if 'distortion_k1' in data:
         distortion_k1 = float(data['distortion_k1'])

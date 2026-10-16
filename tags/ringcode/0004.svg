@@ -4,11 +4,12 @@
   <circle cx="500.0" cy="500.0" fill="white" r="500.0"/>
   <circle cx="500.0" cy="500.0" fill="black" r="500.0"/>
   <circle cx="500.0" cy="500.0" fill="white" r="445.0"/>
+  <circle cx="639.68" cy="162.78" r="50.00" fill="black"/>
+  <circle cx="758.09" cy="241.91" r="50.00" fill="black"/>
   <circle cx="837.22" cy="360.32" r="50.00" fill="black"/>
-  <circle cx="758.09" cy="758.09" r="50.00" fill="black"/>
-  <circle cx="639.68" cy="837.22" r="50.00" fill="black"/>
+  <circle cx="837.22" cy="639.68" r="50.00" fill="black"/>
+  <circle cx="500.00" cy="865.00" r="50.00" fill="black"/>
   <circle cx="360.32" cy="837.22" r="50.00" fill="black"/>
-  <circle cx="241.91" cy="758.09" r="50.00" fill="black"/>
+  <circle cx="135.00" cy="500.00" r="50.00" fill="black"/>
   <circle cx="241.91" cy="241.91" r="50.00" fill="black"/>
-  <circle cx="360.32" cy="162.78" r="50.00" fill="black"/>
   </svg>
