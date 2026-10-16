@@ -588,10 +588,10 @@ def _looks_like_marker(gray, cx, cy, r):
 # (see app.py's ringcode_votes) is what absorbs occasional single-frame
 # sync misses, the same way it already does for ID-margin misses.
 SYNC_K = 4
-SYNC_WORD = (0, 1, 1, 1)
+_SYNC_WORD_DESIGN = (0, 1, 1, 1)
 SYNC_MIN_MARGIN = 1
 
-ID_CODEWORDS = [
+_ID_CODEWORDS_DESIGN = [
     (0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1),
     (1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 0),
     (1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0),
@@ -600,6 +600,39 @@ ID_CODEWORDS = [
     (1, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1),
 ]
 ID_LEN = N_SLOTS - SYNC_K
+
+# Set to True if the physical printed sheet is mirrored relative to
+# tags/ringcode/*.svg -- found directly from a real deployment: a whole
+# print run came out flipped (easy to do by accident -- printing on the
+# wrong side of film/sticker stock, or a "mirror" option left on in a
+# print driver), and the owner didn't want to reprint. A full left-right
+# mirror of the token reverses the direction dots are read in, which is a
+# DIFFERENT transform than noise or rotation -- it took reading real
+# captured pixel data off several "stuck" markers to tell these apart.
+#
+# The fix only needs reversing SYNC_WORD and each ID_CODEWORDS entry
+# independently (NOT reversing the combined 16-bit pattern as one block,
+# which would scramble which bits land in the sync vs ID region) --
+# derived by choosing the mirror axis to fall exactly on the sync/ID
+# boundary, verified directly against real captures from 3 different
+# physical markers: each decodes to a perfect 12/12 id-bit match (not just
+# a best-fit) once mirrored, with a massive margin over every other
+# candidate, versus the unresolved ties seen before. Since reversal is an
+# isometry, it preserves every pairwise Hamming distance EXACTLY -- the
+# codebook's distance-6 guarantee and SYNC_MIN_MARGIN=1 ceiling both carry
+# over unchanged, verified by re-running the full test suite, not assumed.
+#
+# This is a property of this specific print run, not the software -- if
+# these markers are ever reprinted correctly-oriented from the current
+# tags/ringcode/*.svg files, set this back to False.
+MARKERS_PRINTED_MIRRORED = True
+
+if MARKERS_PRINTED_MIRRORED:
+    SYNC_WORD = tuple(reversed(_SYNC_WORD_DESIGN))
+    ID_CODEWORDS = [tuple(reversed(cw)) for cw in _ID_CODEWORDS_DESIGN]
+else:
+    SYNC_WORD = _SYNC_WORD_DESIGN
+    ID_CODEWORDS = _ID_CODEWORDS_DESIGN
 
 
 def _resolve_orientation(bits):
