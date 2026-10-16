@@ -253,19 +253,44 @@ RING_SAFE_CUTOFF_FRAC = 0.78
 # If neither reference is usable (busy/patterned background right at the
 # edge, AND a painted, non-uniform center) it falls back to the ring alone
 # against a generous absolute ceiling, same as before.
-# A single sample radius, not several -- tried averaging over multiple
-# radii within the band (same idea as CENTER_SAMPLE_R_FRACS) on the theory
-# that it would average out small-size antialiasing noise, but direct
-# testing found it strictly worse: any radius close to the band's outer
-# edge (1.00) loses almost all tolerance for radius OVERestimation (a
-# sample at 0.99*r_wrong overshoots the true ring the moment r_wrong is
-# even slightly too large), since the band itself is only 0.11 wide -- not
-# enough room to average across while also staying clear of both edges
-# under realistic Hough radius error. A single radius at the band's
-# midpoint, biased slightly toward its own center rather than hedging
-# across the whole band, measured better on both radius-error tolerance
-# and small-marker-size tests.
-RING_SAMPLE_R_FRAC = 0.95          # inset from the ring's [0.89, 1.00] band
+# AVERAGING across multiple radii within the band (same idea as
+# CENTER_SAMPLE_R_FRACS) was tried first and found strictly worse: any
+# radius close to the band's outer edge (1.00) loses almost all tolerance
+# for radius OVERestimation (a sample at 0.99*r_wrong overshoots the true
+# ring the moment r_wrong is even slightly too large), and blending that
+# overshot sample in with better-placed ones just dilutes a clean reading
+# with a bad one rather than fixing anything. A single radius at the
+# band's midpoint, biased slightly toward its own center rather than
+# hedging across the whole band, measured better than averaging on both
+# radius-error tolerance and small-marker-size tests -- which is why this
+# used to be one fixed constant (RING_SAMPLE_R_FRAC = 0.95).
+#
+# That single fixed radius was itself found to be the actual bottleneck
+# behind a real "tracked but unidentified" failure on genuine printed-
+# marker footage: a well-lit, perfectly crisp marker, confirmed by hand to
+# decode correctly at its TRUE radius, was being rejected here because
+# Hough's own radius estimate for that specific token was ~10-13% too
+# large -- enough to push the single 0.95r sample past the true ring's
+# outer edge entirely. The rest of this module was deliberately built to
+# tolerate exactly this kind of imprecision (the whole premise of the
+# per-dot WINDOW search above, and RING_SAFE_CUTOFF_FRAC), so a single
+# non-searched sample point here was the one place that regressed all the
+# way back to v3's "trust the computed position outright" failure mode.
+#
+# Fixed the same way v3->v4 fixed that exact failure mode for dots: SEARCH
+# a small set of candidate radii (not average them) and keep whichever one
+# gives the strongest confident contrast -- see RING_SAMPLE_R_FRACS. This
+# is NOT the averaging approach rejected above: each candidate is scored
+# independently against the reference, so a single well-placed candidate
+# still gets full, undiluted contrast even when several others overshoot
+# or undershoot. Verified directly: reproduces a confident PASS (and a
+# correct id=2 decode) on the exact real capture that motivated this,
+# while leaving the existing non-marker false-positive rejection rate and
+# small-marker-size tolerance unchanged (every additional candidate is
+# still gated by the same MIN_STRUCTURE_VARIANCE/MIN_STRUCTURE_PURITY bar
+# a passing single-radius check already had to clear).
+RING_SAMPLE_R_FRAC = 0.95          # nominal candidate, kept for diagnostics/logging
+RING_SAMPLE_R_FRACS = (0.80, 0.83, 0.86, 0.89, 0.92, 0.95, 0.98, 1.01, 1.04)
 EXTERIOR_SAMPLE_R_FRAC = 1.10      # just past the token's own edge
 CENTER_SAMPLE_R_FRACS = (0.20, 0.45)  # two radii inside the [0, 0.60] blank zone
 N_STRUCTURE_SAMPLES_PER_RING = 24
@@ -445,21 +470,6 @@ def read_slots(gray, cx, cy, r, phase_deg=0.0):
     return bits
 
 
-def read_slots_best_phase(gray, cx, cy, r, n_candidates=N_PHASE_CANDIDATES):
-    """Tries several candidate sampling phase offsets spanning one slot
-    width and keeps whichever gives the most confidently-classified (non-
-    unknown) slots. Necessary because the physical disk's rotation is
-    arbitrary and unrelated to this sampling grid."""
-    best_bits, best_known = None, -1
-    for k in range(n_candidates):
-        phase = k * (SLOT_ANGLE_DEG / n_candidates)
-        bits = read_slots(gray, cx, cy, r, phase)
-        n_known = sum(1 for b in bits if b is not None)
-        if n_known > best_known:
-            best_known, best_bits = n_known, bits
-    return best_bits
-
-
 def _confident_contrast(vals_a, vals_b):
     """Otsu-based, direction-agnostic check for whether two groups of
     samples genuinely sit on opposite sides of a confident split (used for
@@ -480,13 +490,15 @@ def _looks_like_marker(gray, cx, cy, r):
     """Cheap structural gate, run before any per-dot search: does this
     circle even have a ring-code marker's basic signature, or is it some
     other circular object Hough happened to find? See the comment above
-    RING_SAMPLE_R_FRAC for the full reasoning -- in short: the ring must be
-    a uniform band, and it must contrast with EITHER the background just
-    outside the token (primary reference -- available no matter what's
-    mounted on the token) OR the center (secondary, bonus check -- only
-    usable when nothing's covering it, or when what's covering it happens
-    to be uniform). If neither reference is usable, falls back to the ring
-    alone against a generous absolute ceiling.
+    RING_SAMPLE_R_FRACS for the full reasoning -- in short: the ring must
+    be a uniform band, and it must contrast with EITHER the background
+    just outside the token (primary reference -- available no matter
+    what's mounted on the token) OR the center (secondary, bonus check --
+    only usable when nothing's covering it, or when what's covering it
+    happens to be uniform). If neither reference is usable, falls back to
+    the ring alone against a generous absolute ceiling. Tries several
+    candidate ring radii against whichever reference is usable rather than
+    trusting Hough's r outright -- see RING_SAMPLE_R_FRACS.
 
     Returns (ok, debug_dict).
     """
@@ -500,11 +512,16 @@ def _looks_like_marker(gray, cx, cy, r):
         yi = np.clip(np.round(ys).astype(np.int64), 0, h - 1)
         return gray[yi, xi]
 
-    ring_vals = _sample_at(RING_SAMPLE_R_FRAC)
     exterior_vals = _sample_at(EXTERIOR_SAMPLE_R_FRAC)
     center_vals = np.concatenate([_sample_at(frac) for frac in CENTER_SAMPLE_R_FRACS])
+    # Every candidate ring radius sampled once up front and reused for
+    # both the exterior and center contrast passes below, rather than
+    # resampling per reference -- each candidate is still only ~24 pixel
+    # lookups, cheap even times RING_SAMPLE_R_FRACS' length.
+    ring_candidates = [(frac, _sample_at(frac)) for frac in RING_SAMPLE_R_FRACS]
+    nominal_vals = dict(ring_candidates)[RING_SAMPLE_R_FRAC]
 
-    debug = {"ring_mean": float(ring_vals.mean()), "ring_std": float(ring_vals.std()),
+    debug = {"ring_mean": float(nominal_vals.mean()), "ring_std": float(nominal_vals.std()),
               "exterior_mean": float(exterior_vals.mean()), "exterior_std": float(exterior_vals.std()),
               "center_mean": float(center_vals.mean()), "center_std": float(center_vals.std()),
               "reason": None}
@@ -522,30 +539,42 @@ def _looks_like_marker(gray, cx, cy, r):
     debug["exterior_usable"] = exterior_usable
     debug["center_usable"] = center_usable
 
+    best_purity = 0.0
+
     if exterior_usable:
-        ok, purity, variance = _confident_contrast(ring_vals, exterior_vals)
-        debug["exterior_purity"] = purity
-        if ok:
-            debug["reference"] = "exterior"
-            return True, debug
+        for ring_frac, ring_vals in ring_candidates:
+            ok, purity, variance = _confident_contrast(ring_vals, exterior_vals)
+            best_purity = max(best_purity, purity)
+            if ok:
+                debug["reference"] = "exterior"
+                debug["exterior_purity"] = purity
+                debug["ring_sample_r_frac"] = ring_frac
+                return True, debug
 
     if center_usable:
-        ok, purity, variance = _confident_contrast(ring_vals, center_vals)
-        debug["center_purity"] = purity
-        if ok:
-            debug["reference"] = "center"
-            return True, debug
+        for ring_frac, ring_vals in ring_candidates:
+            ok, purity, variance = _confident_contrast(ring_vals, center_vals)
+            best_purity = max(best_purity, purity)
+            if ok:
+                debug["reference"] = "center"
+                debug["center_purity"] = purity
+                debug["ring_sample_r_frac"] = ring_frac
+                return True, debug
 
     if not exterior_usable and not center_usable:
         # Neither reference is internally consistent enough to trust at
         # all (busy/patterned background right at the token's edge, AND a
-        # painted, non-uniform center) -- fall back to the ring alone.
-        if ring_vals.mean() > RING_FALLBACK_MAX_MEAN:
+        # painted, non-uniform center) -- fall back to the ring alone,
+        # using whichever candidate radius looks darkest (most plausibly
+        # ink) since there's no reference to search against instead.
+        darkest_mean = min(ring_vals.mean() for _, ring_vals in ring_candidates)
+        if darkest_mean > RING_FALLBACK_MAX_MEAN:
             debug["reason"] = "ring too bright to plausibly be printed ink (no usable reference)"
             return False, debug
         debug["reference"] = "ring_only"
         return True, debug
 
+    debug["best_purity"] = best_purity
     debug["reason"] = "no confident contrast against any usable reference"
     return False, debug
 
@@ -655,7 +684,7 @@ def _resolve_orientation(bits):
     return best_rot, best_score, second_score
 
 
-def decode(gray, cx, cy, r, min_margin=2, return_debug=False):
+def decode(gray, cx, cy, r, min_margin=3, return_debug=False):
     """Identify which of the 6 IDs this token is, tolerant of unknown/
     occluded slots, of arbitrary physical rotation, and of meaningful
     imprecision in Hough's own (cx, cy, r) estimate.
@@ -668,6 +697,31 @@ def decode(gray, cx, cy, r, min_margin=2, return_debug=False):
     bits the best ID candidate needs over the second-best); the
     orientation stage has its own fixed, pre-validated margin
     (SYNC_MIN_MARGIN) since there's little room to tune it usefully.
+
+    Raised from 2 to 3 after root-causing a real failure mode: a mini
+    mounted on the token (dark, irregularly-shaped base/paint, NOT the
+    concentric occluder this module's known-limitations note already
+    covers) can reach past the blank center into the dot ring itself.
+    Tried fixing this with a stricter PER-DOT check first (tighter blob-
+    area bounds, shape/compactness tests, corner- and edge-of-window
+    darkness, even checking the angular gap to the NEXT slot for spillover)
+    -- every one of them failed on real reproduced cases: at this window's
+    necessarily small size (see SEARCH_WINDOW_FRAC), a genuine printed dot
+    and an occluder's edge merely clipping through the same window produce
+    statistically indistinguishable local pixel evidence. No local,
+    per-window signal reliably tells them apart -- confirmed directly
+    against synthetic irregular-mini renders, not assumed. What DOES
+    reliably tell them apart is exactly what min_margin already checks,
+    one level up: an occluder corrupts a handful of slots in a way that's
+    locally confident but not globally coherent with any real codeword,
+    so it tends to win its matched ID by a THIN margin (found empirically:
+    raising min_margin from 2 to 3 took a reproducible wrong-ID case to
+    zero wrong decodes across a 120-trial irregular-occlusion sweep, at
+    the cost of a few of those becoming refusals instead of right answers
+    -- never wrong instead of right). Verified this doesn't cost anything
+    on every other axis already tested here: identical radius-error
+    tolerance (still good to ~15%), identical clean-baseline/rotation/
+    lighting results, identical non-marker false-positive rate.
 
     Before any of that: rejects circles that don't even structurally look
     like a ring-code marker (see _looks_like_marker) -- this runs first
@@ -685,82 +739,142 @@ def decode(gray, cx, cy, r, min_margin=2, return_debug=False):
                   "structure": structure_debug}
         return (None, 0.0, debug) if return_debug else (None, 0.0)
 
-    bits = read_slots_best_phase(gray, cx, cy, r)
-    known_mask = [b is not None for b in bits]
-    n_known = sum(known_mask)
-    if n_known < N_SLOTS // 2:
-        debug = {"bits": bits, "n_known": n_known,
-                  "best_matches": None, "second_best": None, "reason": "too few known bits"}
-        return (None, 0.0, debug) if return_debug else (None, 0.0)
-
-    rot, sync_best, sync_second = _resolve_orientation(bits)
-    # Requires a PERFECT sync read (all SYNC_K bits known and correct), not
-    # merely a margin over the runner-up -- found directly that margin
-    # alone isn't enough here: the true rotation's margin over the best
-    # wrong rotation is always exactly SYNC_MIN_MARGIN even in a clean,
-    # noise-free read (an inherent ceiling of this construction, not a
-    # noise artifact -- see SYNC_WORD above), so margin can't distinguish
-    # a solid lock from a risky one. Under heavy noise, a marginal lock
-    # (e.g. 3-of-4 vs 2-of-4) can occasionally win onto the WRONG
-    # rotation, and reading ID bits at the wrong rotation produces
-    # effectively-random bits that can coincidentally look confident
-    # against some ID codeword -- a stress test combining this with
-    # temporal voting surfaced several such wrong, confident locks. Only
-    # trusting a perfect sync read closes that off: wrong rotations are
-    # verified (see SYNC_WORD) to never reach a perfect match for any of
-    # the 6 real IDs, so this is a hard, not just probabilistic, guard.
+    # Try every candidate sampling phase through the FULL pipeline (sync
+    # lock + ID match) and keep whichever phase actually produces the
+    # strongest result, rather than committing to one phase up front from
+    # a cheap proxy and only then running sync/ID resolution on it.
     #
-    # Tried relaxing this for VOTING purposes only (accept a 3-of-4 lock
-    # as weak voting evidence, reasoning that a wrong rotation is unlikely
-    # to ALSO produce a decisively clear ID match) after real printed-
-    # marker footage showed tokens stuck unidentified for 100+ seconds.
-    # Reverted: checked against that same footage's actual logged reads
-    # and found the relaxation wouldn't have helped them anyway (their
-    # near-miss frames were exact ties, 3-vs-3, not clear 3-vs-2 reads --
-    # the real bottleneck there is ID-stage ties even with PERFECT sync,
-    # a bit-level read-noise problem this gate doesn't touch) while
-    # measurably increasing wrong-answer risk under heavy synthetic noise
-    # (roughly doubled at the most extreme level tested). Not a good
-    # trade for a fix that doesn't address the actual observed failure.
-    if sync_best < SYNC_K or sync_best - sync_second < SYNC_MIN_MARGIN:
-        debug = {"bits": bits, "n_known": n_known, "best_matches": None,
-                  "second_best": None, "reason": "orientation ambiguous",
-                  "sync_best": sync_best, "sync_second": sync_second}
+    # That proxy (now removed -- this used to be a separate
+    # read_slots_best_phase() helper) picked whichever phase had the most
+    # non-None bits, on the theory that "more known" means "better aligned
+    # with the print". That holds under uniform lighting noise (what it
+    # was tuned against), but not under LOCALIZED occlusion -- a mini's
+    # painted base reaching into the dot ring. Different phases shift
+    # which per-dot windows land on/off the occluder, and nothing stopped
+    # a phase that merely happens to dodge that occluder's exact footprint
+    # -- without actually being the phase genuinely aligned with the
+    # print -- from reporting MORE confidently-classified bits than the
+    # correctly-aligned phase does (which correctly reports the occluded
+    # dots as ambiguous, not wrong). Committing to that phase for the rest
+    # of decoding means every slot, not just the occluded ones, gets
+    # sampled a few degrees off from where the print actually is: a
+    # coherent, structured misread across many slots AT ONCE, not
+    # independent per-bit noise. That matters because it's exactly the
+    # kind of correlated multi-bit error this codebook's margin check
+    # can't defend against -- the distance-6 floor (see ID_CODEWORDS
+    # below) only guarantees catching errors that look like independent
+    # noise; a handful of slots all shifted together in the same
+    # direction is a different, much more dangerous failure mode, and is
+    # the most likely real mechanism behind IDs being reported as
+    # swapping identities under occlusion (a mini mounted on the token)
+    # rather than simply failing to resolve.
+    #
+    # Scoring every phase through the real pipeline instead costs nothing
+    # extra worth noting: the expensive part (per-dot window search, 16
+    # slots x up to 16 phases) already ran unconditionally either way;
+    # _resolve_orientation and the ID match are both pure-Python
+    # arithmetic over 16 bits, negligible next to the per-dot numpy work.
+    best_key, best_candidate = None, None
+    for k in range(N_PHASE_CANDIDATES):
+        phase = k * (SLOT_ANGLE_DEG / N_PHASE_CANDIDATES)
+        bits = read_slots(gray, cx, cy, r, phase)
+        n_known = sum(1 for b in bits if b is not None)
+
+        if n_known < N_SLOTS // 2:
+            key = (0, n_known, 0)
+            candidate = {"bits": bits, "n_known": n_known, "best_matches": None,
+                          "second_best": None, "reason": "too few known bits"}
+            if best_key is None or key > best_key:
+                best_key, best_candidate = key, candidate
+            continue
+
+        rot, sync_best, sync_second = _resolve_orientation(bits)
+        # Requires a PERFECT sync read (all SYNC_K bits known and
+        # correct), not merely a margin over the runner-up -- found
+        # directly that margin alone isn't enough here: the true
+        # rotation's margin over the best wrong rotation is always
+        # exactly SYNC_MIN_MARGIN even in a clean, noise-free read (an
+        # inherent ceiling of this construction, not a noise artifact --
+        # see SYNC_WORD above), so margin can't distinguish a solid lock
+        # from a risky one. Under heavy noise, a marginal lock (e.g.
+        # 3-of-4 vs 2-of-4) can occasionally win onto the WRONG rotation,
+        # and reading ID bits at the wrong rotation produces
+        # effectively-random bits that can coincidentally look confident
+        # against some ID codeword -- a stress test combining this with
+        # temporal voting surfaced several such wrong, confident locks.
+        # Only trusting a perfect sync read closes that off: wrong
+        # rotations are verified (see SYNC_WORD) to never reach a perfect
+        # match for any of the 6 real IDs, so this is a hard, not just
+        # probabilistic, guard.
+        #
+        # Tried relaxing this for VOTING purposes only (accept a 3-of-4
+        # lock as weak voting evidence, reasoning that a wrong rotation is
+        # unlikely to ALSO produce a decisively clear ID match) after real
+        # printed-marker footage showed tokens stuck unidentified for
+        # 100+ seconds. Reverted: checked against that same footage's
+        # actual logged reads and found the relaxation wouldn't have
+        # helped them anyway (their near-miss frames were exact ties,
+        # 3-vs-3, not clear 3-vs-2 reads -- the real bottleneck there is
+        # ID-stage ties even with PERFECT sync, a bit-level read-noise
+        # problem this gate doesn't touch) while measurably increasing
+        # wrong-answer risk under heavy synthetic noise (roughly doubled
+        # at the most extreme level tested). Not a good trade for a fix
+        # that doesn't address the actual observed failure.
+        if sync_best < SYNC_K or sync_best - sync_second < SYNC_MIN_MARGIN:
+            key = (1, sync_best - sync_second, n_known)
+            candidate = {"bits": bits, "n_known": n_known, "best_matches": None,
+                          "second_best": None, "reason": "orientation ambiguous",
+                          "sync_best": sync_best, "sync_second": sync_second}
+            if best_key is None or key > best_key:
+                best_key, best_candidate = key, candidate
+            continue
+
+        rotated = bits[rot:] + bits[:rot]
+        id_bits = rotated[SYNC_K:]
+        id_known_mask = [b is not None for b in id_bits]
+        id_n_known = sum(id_known_mask)
+
+        scores = []  # (matches, id_idx)
+        for id_idx, codeword in enumerate(ID_CODEWORDS):
+            matches = sum(
+                1 for i in range(ID_LEN)
+                if id_known_mask[i] and id_bits[i] == codeword[i]
+            )
+            scores.append((matches, id_idx))
+        scores.sort(key=lambda s: -s[0])
+        best_matches, best_id = scores[0]
+        second_best = scores[1][0] if len(scores) > 1 else 0
+
+        # Per-ID scores at this one resolved rotation, exposed on every
+        # attempt (not just failures) so a caller can accumulate evidence
+        # across frames (temporal voting) even from frames that don't
+        # individually clear min_margin -- same interface/rationale as
+        # before. "rot" is included only for debugging/logging; voting
+        # itself doesn't use it.
+        per_id_scores = [(id_idx, m, rot) for m, id_idx in scores]
+        candidate = {"bits": bits, "n_known": n_known, "best_matches": best_matches,
+                      "second_best": second_best, "best_id": best_id, "reason": None,
+                      "per_id_scores": per_id_scores, "resolved_rotation": rot,
+                      "sync_best": sync_best, "sync_second": sync_second,
+                      "id_n_known": id_n_known}
+        # Tier 2 (a real sync lock + ID comparison) always outranks tiers
+        # 0-1 above (tuple comparison: first element wins outright).
+        # Within tier 2, the ID margin itself -- the most direct evidence
+        # that this phase's bits actually match a real codeword -- is the
+        # primary ranking signal; raw known-bit count is only a tiebreak
+        # between two phases with equally strong margins.
+        key = (2, best_matches - second_best, n_known)
+        if best_key is None or key > best_key:
+            best_key, best_candidate = key, candidate
+
+    debug = best_candidate
+    if debug["reason"] is not None:
         return (None, 0.0, debug) if return_debug else (None, 0.0)
 
-    rotated = bits[rot:] + bits[:rot]
-    id_bits = rotated[SYNC_K:]
-    id_known_mask = [b is not None for b in id_bits]
-    id_n_known = sum(id_known_mask)
-
-    scores = []  # (matches, id_idx)
-    for id_idx, codeword in enumerate(ID_CODEWORDS):
-        matches = sum(
-            1 for i in range(ID_LEN)
-            if id_known_mask[i] and id_bits[i] == codeword[i]
-        )
-        scores.append((matches, id_idx))
-    scores.sort(key=lambda s: -s[0])
-    best_matches, best_id = scores[0]
-    second_best = scores[1][0] if len(scores) > 1 else 0
-
-    # Per-ID scores at this one resolved rotation, exposed on every
-    # attempt (not just failures) so a caller can accumulate evidence
-    # across frames (temporal voting) even from frames that don't
-    # individually clear min_margin -- same interface/rationale as before,
-    # just simpler now since there's no rotation search left to collapse
-    # on the ID side. "rot" is included only for debugging/logging; voting
-    # itself doesn't use it.
-    per_id_scores = [(id_idx, m, rot) for m, id_idx in scores]
-
-    debug = {"bits": bits, "n_known": n_known, "best_matches": best_matches,
-              "second_best": second_best, "best_id": best_id, "reason": None,
-              "per_id_scores": per_id_scores, "resolved_rotation": rot,
-              "sync_best": sync_best, "sync_second": sync_second}
-
-    if best_matches - second_best < min_margin:
+    if debug["best_matches"] - debug["second_best"] < min_margin:
         debug["reason"] = "margin too small"
         return (None, 0.0, debug) if return_debug else (None, 0.0)
 
-    confidence = best_matches / id_n_known if id_n_known else 0.0
-    return (best_id, confidence, debug) if return_debug else (best_id, confidence)
+    id_n_known = debug.pop("id_n_known")
+    confidence = debug["best_matches"] / id_n_known if id_n_known else 0.0
+    return (debug["best_id"], confidence, debug) if return_debug else (debug["best_id"], confidence)

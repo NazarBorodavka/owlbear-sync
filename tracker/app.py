@@ -513,7 +513,7 @@ def load_config_from_disk():
                 cctag_match_radius_mult = float(c.get('cctag_match_radius_mult', 2.0))
                 cctag_ghosting_frames = int(c.get('cctag_ghosting_frames', 30))
                 cctag_id_switch_margin = float(c.get('cctag_id_switch_margin', 1.5))
-                ringcode_min_margin = int(c.get('ringcode_min_margin', 2))
+                ringcode_min_margin = int(c.get('ringcode_min_margin', 3))
                 ringcode_id_voting_decay = float(c.get('ringcode_id_voting_decay', 0.95))
                 ringcode_id_switch_margin = float(c.get('ringcode_id_switch_margin', 1.5))
                 camera_url = c.get('camera_url', camera_url)
@@ -687,18 +687,27 @@ cctag_id_switch_margin = 1.5
 # fixed brightness thresholds, so there's nothing to tune there. min_margin
 # mirrors cctag_id_switch_margin's role: how much a decode's best match must
 # beat the second-best before it's trusted on its own, single-frame reading.
-ringcode_min_margin = 2
+# Raised from 2 to 3 (matching ringcode_decoder.decode()'s own default --
+# see its docstring for the full root-cause writeup) after a mini mounted
+# on a token was found to reach past the blank center into the dot ring
+# itself and get misread as a false, confidently-wrong dot in a way no
+# per-dot pixel check could reliably catch; margin=3 eliminated every
+# wrong-ID case in a 120-trial reproduction of that failure (at the cost
+# of a few becoming refusals instead of right answers) with zero measured
+# cost to clean-marker, rotation, lighting, or radius-error tolerance.
+ringcode_min_margin = 3
 
 # Temporal vote accumulation for ring-code IDs, mirroring CCTag's own
 # id_votes mechanism below -- added because this codebook's minimum
-# pairwise codeword distance (4 bits) only guarantees recovering a single
-# actual bit-flip error from any ONE frame's read (found directly: a token
-# stuck "unidentified" for 80+ seconds was reading mostly-consistent bits
-# that were genuinely a near-tie between its true ID and a neighbor,
-# something no single-frame decode can resolve). Accumulating weak
-# evidence across many independent reads lets a token's true ID pull ahead
-# over time without loosening ringcode_min_margin itself, which would
-# reopen the false-positive risk _looks_like_marker exists to close.
+# pairwise codeword distance (6 bits, see ID_CODEWORDS in
+# ringcode_decoder.py) only guarantees recovering 2 actual bit-flip errors
+# from any ONE frame's read (found directly: a token stuck "unidentified"
+# for 80+ seconds was reading mostly-consistent bits that were genuinely a
+# near-tie between its true ID and a neighbor, something no single-frame
+# decode can resolve). Accumulating weak evidence across many independent
+# reads lets a token's true ID pull ahead over time without loosening
+# ringcode_min_margin itself, which would reopen the false-positive risk
+# _looks_like_marker exists to close.
 # Separate from cctag_id_voting_decay/switch_margin since ring code runs
 # inline every video frame (~10fps) rather than on CCTag's slower
 # background-thread cadence, so the right memory window in wall-clock time
@@ -1763,18 +1772,60 @@ def get_video_stream():
                                     )
                                 else:
                                     # dbg['reason'] is None -> decode() itself
-                                    # succeeded confidently, but the result
-                                    # never reached marker_id — the only way
-                                    # that happens is cctag_min_id/max_id
-                                    # excluding this ID (ring code only ever
-                                    # produces 0-5, so this means that range
-                                    # has been narrowed below the decoded id).
-                                    summary = (
-                                        f"bits={bits_str} ({dbg['n_known']}/16 known); decoded id="
-                                        f"{dbg['best_id']} with margin {dbg['best_matches']-dbg['second_best']} "
-                                        f"(confident), but it's outside the configured "
-                                        f"cctag_min_id/max_id range [{cctag_min_id}-{cctag_max_id}]"
+                                    # succeeded confidently THIS frame, but
+                                    # t_data['marker_id'] is still None (that's
+                                    # the only way this branch of the "tracked
+                                    # but unidentified" diagnostic runs at
+                                    # all). Originally this was blamed
+                                    # entirely on cctag_min_id/max_id
+                                    # excluding the decoded id -- wrong, found
+                                    # directly from real logs showing e.g.
+                                    # "decoded id=3 ... confident ... outside
+                                    # range [0-5]", where 3 plainly IS inside
+                                    # [0, 5]. The real cause in that case (and
+                                    # likely the more common one) is the
+                                    # cross-token collision check a few dozen
+                                    # lines up: another currently-tracked
+                                    # token already holds this exact id with
+                                    # stronger accumulated vote weight, which
+                                    # evicts THIS token's claim even on a
+                                    # frame where its own read was fully
+                                    # confident. Distinguishing the two here
+                                    # (by checking whether some other tracked
+                                    # token currently holds this id) rather
+                                    # than always citing the range turns this
+                                    # from a misleading message into the
+                                    # actual explanation.
+                                    rival_t_id = next(
+                                        (other_id for other_id, other_data
+                                         in get_video_stream.tracked_tokens.items()
+                                         if other_id != t_id and other_data.get("marker_id") == dbg['best_id']),
+                                        None,
                                     )
+                                    if not (cctag_min_id <= dbg['best_id'] <= cctag_max_id):
+                                        summary = (
+                                            f"bits={bits_str} ({dbg['n_known']}/16 known); decoded id="
+                                            f"{dbg['best_id']} with margin {dbg['best_matches']-dbg['second_best']} "
+                                            f"(confident), but it's outside the configured "
+                                            f"cctag_min_id/max_id range [{cctag_min_id}-{cctag_max_id}]"
+                                        )
+                                    elif rival_t_id is not None:
+                                        summary = (
+                                            f"bits={bits_str} ({dbg['n_known']}/16 known); decoded id="
+                                            f"{dbg['best_id']} with margin {dbg['best_matches']-dbg['second_best']} "
+                                            f"(confident) — but token {rival_t_id} currently holds id="
+                                            f"{dbg['best_id']} with a stronger vote and won the cross-token "
+                                            f"collision check (see ringcode_id_switch_margin); this token's "
+                                            f"own read is correct, it just hasn't out-voted {rival_t_id} yet"
+                                        )
+                                    else:
+                                        summary = (
+                                            f"bits={bits_str} ({dbg['n_known']}/16 known); decoded id="
+                                            f"{dbg['best_id']} with margin {dbg['best_matches']-dbg['second_best']} "
+                                            f"(confident), but marker_id wasn't set this frame for a reason "
+                                            f"not covered by the range check or the collision check — "
+                                            f"possible gap in the voting logic worth investigating"
+                                        )
                             _save_debug_capture(
                                 gray, t_data['x'], t_data['y'], t_data['r'], t_id,
                                 dbg['reason'] if dbg and dbg.get('reason') else 'unidentified',
