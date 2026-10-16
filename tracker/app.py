@@ -482,6 +482,13 @@ is_running = False
 CONFIG_FILE = os.environ.get('TRACKER_CONFIG_FILE', '/app/config.json')
 LEGACY_CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
 
+# Diagnostic pixel captures (see _save_debug_capture / /debug/captures
+# below) -- doesn't need a bind mount like CONFIG_FILE above, since this is
+# a short-session "grab the exact frame a token is struggling on" tool,
+# not something meant to survive a container restart.
+DEBUG_CAPTURE_DIR = os.path.join(os.path.dirname(__file__), 'debug_captures')
+DEBUG_CAPTURE_MAX_FILES = 40
+
 
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
@@ -647,6 +654,15 @@ hough_min_radius = 30
 hough_max_radius = 40
 hough_deadzone = 3.0
 
+# How many of the most recent raw per-frame Hough readings to median-filter
+# together before the deadzone/smoothing logic sees them (see the matching
+# loop below). 5 frames is ~0.5s of history at 10fps -- enough to reject a
+# single noisy outlier frame without adding noticeable lag to genuine
+# movement. Not exposed as a dashboard setting: unlike the other Hough
+# knobs this doesn't trade off against detection sensitivity, so there's
+# little reason to tune it per-rig.
+HOUGH_MEDIAN_WINDOW = 5
+
 auto_blank = False # Toggle for anti-reflection mode
 auto_blank_delay = 10 # Frames to wait before auto-blanking
 flip_x = False
@@ -743,6 +759,47 @@ calib_imgpoints = []
 chessboard_size = (9, 6)
 
 load_config_from_disk()
+
+
+def _save_debug_capture(gray, cx, cy, r, token_id, reason):
+    """Save a full-resolution crop of exactly what the identification
+    backend sees around a struggling token -- the raw pixel data the
+    decoder actually reads, not a human-viewed screenshot, which can look
+    fine to the eye while still differing from what the algorithm reads
+    (compression artifacts, real exposure/focus, sub-pixel detail a
+    screenshot's own scaling/compression can soften). Triggered from the
+    same "tracked but unidentified" diagnostic that already prints a log
+    line for this, so the saved filename and that log line can be matched
+    up by timestamp and position.
+
+    Capped to the DEBUG_CAPTURE_MAX_FILES most recent captures -- this is
+    a short investigative-session tool, not permanent logging, and an
+    unbounded capture directory would eventually fill the container's
+    disk.
+    """
+    try:
+        os.makedirs(DEBUG_CAPTURE_DIR, exist_ok=True)
+        margin = max(r * 1.6, 40)
+        h, w = gray.shape[:2]
+        x0, x1 = max(0, int(cx - margin)), min(w, int(cx + margin))
+        y0, y1 = max(0, int(cy - margin)), min(h, int(cy + margin))
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            return
+        crop = gray[y0:y1, x0:x1]
+        safe_reason = "".join(c if c.isalnum() else "_" for c in reason)[:40]
+        fname = f"{time.strftime('%Y%m%d_%H%M%S')}_{token_id}_r{int(r)}_{safe_reason}.png"
+        cv2.imwrite(os.path.join(DEBUG_CAPTURE_DIR, fname), crop)
+
+        # Prune to the most recent N captures, oldest first.
+        existing = [os.path.join(DEBUG_CAPTURE_DIR, f) for f in os.listdir(DEBUG_CAPTURE_DIR)]
+        existing.sort(key=os.path.getmtime)
+        for stale in existing[:-DEBUG_CAPTURE_MAX_FILES]:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+    except Exception as e:
+        print(f"[WARN] debug capture failed: {e}", flush=True)
 
 
 def get_video_stream():
@@ -1126,6 +1183,32 @@ def get_video_stream():
                 # right before this match? Checked before "missed" gets reset
                 # below — used to cap the reattachment snap further down.
                 was_ghosting = token.get("missed", 0) > 0
+
+                # Median-filter the raw per-frame Hough reading over a short
+                # rolling history before it reaches the deadzone/smoothing
+                # logic below. Found directly against real footage: a single
+                # noisy frame's (cx, cy, r) can exceed hough_deadzone from
+                # measurement jitter alone (not real movement) -- the
+                # smoothing ramp below floors at 40% even for a tiny
+                # excursion, so that one noisy frame still produces a
+                # visible partial snap, which is what a perfectly still
+                # physical disk "shifting/floating" looks like. A median
+                # over the last few raw readings rejects a one-frame outlier
+                # before the deadzone logic ever sees it, without touching
+                # Hough's own detection parameters (dp/param1/param2/etc) at
+                # all -- those stay exactly as tuned.
+                if was_ghosting:
+                    # Stale history from before the gap could anchor the
+                    # filter to a position the token may have left during
+                    # the gap -- start fresh on reacquisition instead, same
+                    # philosophy as the snap-cap below.
+                    token["raw_history"] = collections.deque(maxlen=HOUGH_MEDIAN_WINDOW)
+                history = token.setdefault("raw_history", collections.deque(maxlen=HOUGH_MEDIAN_WINDOW))
+                history.append((cx, cy, cr))
+                cx = float(np.median([h[0] for h in history]))
+                cy = float(np.median([h[1] for h in history]))
+                cr = float(np.median([h[2] for h in history]))
+
                 # Dynamic smoothing with deadzone: lock perfectly if stationary, snap if moved
                 dist_moved = np.hypot(token["x"] - cx, token["y"] - cy)
 
@@ -1692,6 +1775,10 @@ def get_video_stream():
                                         f"(confident), but it's outside the configured "
                                         f"cctag_min_id/max_id range [{cctag_min_id}-{cctag_max_id}]"
                                     )
+                            _save_debug_capture(
+                                gray, t_data['x'], t_data['y'], t_data['r'], t_id,
+                                dbg['reason'] if dbg and dbg.get('reason') else 'unidentified',
+                            )
                             print(
                                 f"[RingCode] {t_id} tracked but unidentified for {duration:.1f}s "
                                 f"(pos=({t_data['x']:.0f},{t_data['y']:.0f}), r={t_data['r']:.0f}px) — "
@@ -1746,6 +1833,9 @@ def get_video_stream():
                                     f"id {'IS' if in_range else 'is NOT'} within cctag_min_id/max_id "
                                     f"[{cctag_min_id}-{cctag_max_id}]), decision_margin={closest.get('decision_margin', 0):.4g}"
                                 )
+                            _save_debug_capture(
+                                gray, t_data['x'], t_data['y'], t_data['r'], t_id, 'cctag_unidentified',
+                            )
                             print(
                                 f"[CCTag] {t_id} tracked but unidentified for {duration:.1f}s "
                                 f"(pos=({t_data['x']:.0f},{t_data['y']:.0f}), r={t_data['r']:.0f}px) — "
@@ -2452,6 +2542,39 @@ def reset_tokens():
     ignored_tokens = set()
     token_aliases = {}
     return jsonify({"success": True})
+
+@app.route('/debug/captures')
+@auth.login_required
+def list_debug_captures():
+    """Browsable index of saved diagnostic pixel crops (see
+    _save_debug_capture) -- the ground-truth frame data behind a "tracked
+    but unidentified" log line, for pulling up and inspecting offline (or
+    sharing) instead of guessing from a human-viewed screenshot. Requires
+    login since this exposes raw camera imagery, unlike /extension/ below.
+    """
+    try:
+        files = sorted(os.listdir(DEBUG_CAPTURE_DIR)) if os.path.isdir(DEBUG_CAPTURE_DIR) else []
+    except OSError:
+        files = []
+    files.reverse()  # newest first
+    rows = "".join(
+        f'<li style="margin-bottom:8px"><a href="/debug/captures/{f}" target="_blank">{f}</a><br>'
+        f'<img src="/debug/captures/{f}" style="max-height:160px;image-rendering:pixelated;border:1px solid #888;"></li>'
+        for f in files
+    )
+    body = rows or "<li>No captures yet -- one is saved automatically whenever a tracked token stays unidentified for a few seconds.</li>"
+    return (
+        "<html><body style='background:#222;color:#eee;font-family:sans-serif'>"
+        f"<h3>Debug captures ({len(files)}, newest first, max {DEBUG_CAPTURE_MAX_FILES} kept)</h3>"
+        f"<ul style='list-style:none;padding:0'>{body}</ul></body></html>"
+    )
+
+
+@app.route('/debug/captures/<path:filename>')
+@auth.login_required
+def serve_debug_capture(filename):
+    return send_from_directory(DEBUG_CAPTURE_DIR, filename)
+
 
 @app.route('/extension/<path:filename>', methods=['GET', 'OPTIONS'])
 def serve_extension(filename):

@@ -650,6 +650,19 @@ def decode(gray, cx, cy, r, min_margin=2, return_debug=False):
     # trusting a perfect sync read closes that off: wrong rotations are
     # verified (see SYNC_WORD) to never reach a perfect match for any of
     # the 6 real IDs, so this is a hard, not just probabilistic, guard.
+    #
+    # Tried relaxing this for VOTING purposes only (accept a 3-of-4 lock
+    # as weak voting evidence, reasoning that a wrong rotation is unlikely
+    # to ALSO produce a decisively clear ID match) after real printed-
+    # marker footage showed tokens stuck unidentified for 100+ seconds.
+    # Reverted: checked against that same footage's actual logged reads
+    # and found the relaxation wouldn't have helped them anyway (their
+    # near-miss frames were exact ties, 3-vs-3, not clear 3-vs-2 reads --
+    # the real bottleneck there is ID-stage ties even with PERFECT sync,
+    # a bit-level read-noise problem this gate doesn't touch) while
+    # measurably increasing wrong-answer risk under heavy synthetic noise
+    # (roughly doubled at the most extreme level tested). Not a good
+    # trade for a fix that doesn't address the actual observed failure.
     if sync_best < SYNC_K or sync_best - sync_second < SYNC_MIN_MARGIN:
         debug = {"bits": bits, "n_known": n_known, "best_matches": None,
                   "second_best": None, "reason": "orientation ambiguous",

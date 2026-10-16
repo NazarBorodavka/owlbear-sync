@@ -22,6 +22,10 @@ tracker/config.json
 .env
 *.env
 
+# Diagnostic pixel captures (see app.py's _save_debug_capture) -- raw
+# camera imagery generated at runtime, never meant to be committed.
+tracker/debug_captures/
+
 # CCTag build artifacts (built inside Docker, not needed in repo)
 CCTag-develop/build/
 python/*.so
