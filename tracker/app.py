@@ -493,7 +493,7 @@ DEBUG_CAPTURE_MAX_FILES = 40
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
-    global hough_catchup_mult, hough_dup_suppress_mult
+    global hough_catchup_mult, hough_dup_suppress_mult, hough_merge_mult, hough_outlier_reject_mult
     global auto_blank, auto_blank_delay
     global cctag_min_id, cctag_max_id, cctag_min_ident_proba, cctag_id_voting_decay
     global cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
@@ -537,6 +537,8 @@ def load_config_from_disk():
                 hough_deadzone = float(c.get('hough_deadzone', 3.0))
                 hough_catchup_mult = float(c.get('hough_catchup_mult', 2.0))
                 hough_dup_suppress_mult = float(c.get('hough_dup_suppress_mult', 0.5))
+                hough_merge_mult = float(c.get('hough_merge_mult', 0.9))
+                hough_outlier_reject_mult = float(c.get('hough_outlier_reject_mult', 0.25))
                 auto_blank = c.get('auto_blank', False)
                 auto_blank_delay = int(c.get('auto_blank_delay', 10))
                 show_overlay = c.get('show_overlay', True)
@@ -592,6 +594,8 @@ def save_config_to_disk():
         'hough_deadzone': hough_deadzone,
         'hough_catchup_mult': hough_catchup_mult,
         'hough_dup_suppress_mult': hough_dup_suppress_mult,
+        'hough_merge_mult': hough_merge_mult,
+        'hough_outlier_reject_mult': hough_outlier_reject_mult,
         'auto_blank': auto_blank,
         'auto_blank_delay': auto_blank_delay,
         'show_overlay': show_overlay,
@@ -676,18 +680,51 @@ hough_catchup_mult = 2.0
 # discarded, rather than spawning a brand new "Unknown" track. Deliberately
 # conservative (under half a radius) -- genuine duplicate circle fits of
 # one object are typically only a few pixels apart; two real, distinct
-# tokens are essentially never placed closer than this on purpose. See the
-# token-creation branch in get_video_stream() for the full reasoning (the
-# "red ghost disk trail" this exists to fix).
+# tokens are essentially never placed closer than this on purpose. A
+# secondary, cheap safety net now that _merge_close_circles() (see below)
+# handles the much more common real case upstream, before matching.
 hough_dup_suppress_mult = 0.5
 
-# How many of the most recent raw per-frame Hough readings to median-filter
-# together before the deadzone/smoothing logic sees them (see the matching
-# loop below). 5 frames is ~0.5s of history at 10fps -- enough to reject a
-# single noisy outlier frame without adding noticeable lag to genuine
-# movement. Not exposed as a dashboard setting: unlike the other Hough
-# knobs this doesn't trade off against detection sensitivity, so there's
-# little reason to tune it per-rig.
+# How close (as a multiple of the larger circle's own radius) TWO raw
+# detected circles must be to each other, BEFORE any token matching runs
+# at all, to be merged into one representative circle at their centroid.
+# More generous than hough_dup_suppress_mult on purpose -- see
+# _merge_close_circles()'s docstring for the real failure this targets
+# (a fast disk's own motion blur getting fit as two separate circles,
+# confirmed directly via simulation to break token matching far worse
+# than a single stray duplicate: the track's necessarily-stale predicted
+# position ends up closer to the trailing blur artifact than to the real
+# leading edge, so it latches onto the WRONG one every frame, and the true
+# position then looks like a brand new circle on every single frame for
+# the whole duration of the movement -- a continuous stream of phantom
+# "Unknown" tracks, not just an occasional one).
+hough_merge_mult = 0.9
+
+# How far (as a multiple of the circle's own radius, with a deadzone-based
+# floor) a new raw Hough reading can deviate from the trend already
+# established by recent readings before it's rejected as a one-frame
+# measurement glitch rather than trusted -- see _fit_motion() and its call
+# site in get_video_stream() for the full reasoning (this replaced a flat
+# median filter, which rejected outliers fine but introduced a lag that
+# GREW without bound under sustained real movement).
+hough_outlier_reject_mult = 0.25
+
+# How many consecutive frames a reading can be rejected as an outlier
+# before being force-accepted anyway. Without this, a genuine sustained
+# acceleration (a real flick of the wrist) looks indistinguishable from
+# persistent noise and the filter gets stuck rejecting forever, which is
+# worse than the lag it exists to fix. Not exposed as a setting -- it's an
+# internal escape valve, not a real tracking/detection trade-off like the
+# multipliers above.
+MAX_CONSECUTIVE_HOUGH_REJECTS = 2
+
+# How many of the most recent raw per-frame Hough readings _fit_motion()
+# fits its trend line over (see that function, and its call site in the
+# matching loop below). 5 frames is ~0.5s of history at 10fps -- enough to
+# average out single-frame noise without the fit lagging noticeably behind
+# genuine, smoothly-changing motion. Not exposed as a dashboard setting:
+# unlike the multipliers above this doesn't trade off against detection
+# sensitivity, so there's little reason to tune it per-rig.
 HOUGH_MEDIAN_WINDOW = 5
 
 auto_blank = False # Toggle for anti-reflection mode
@@ -797,6 +834,100 @@ chessboard_size = (9, 6)
 load_config_from_disk()
 
 
+def _merge_close_circles(detected_circles, merge_mult):
+    """Collapses any cluster of mutually-close raw detected circles (within
+    merge_mult * the larger member's radius, chained transitively) into
+    ONE representative circle at the cluster's centroid -- run once on
+    detected_circles, before any token matching happens at all.
+
+    Exists for a specific, confirmed real failure mode: a fast-moving
+    disk's own motion blur can get fit by Hough as TWO separate circles --
+    one near the blur's leading edge, one near its trailing edge -- rather
+    than one clean circle. That's a materially worse problem than an
+    ordinary stray duplicate (see hough_dup_suppress_mult): verified
+    directly via simulation that the existing token's own necessarily-
+    stale predicted position usually ends up CLOSER to the trailing blur
+    artifact than to the real leading-edge detection, so matching latches
+    onto the wrong (lagging) one every single frame. The true position
+    then looks like a brand new circle on every frame for the whole
+    duration of the movement -- not an occasional glitch, a continuous
+    stream of phantom "Unknown" tracks spawned and abandoned frame after
+    frame, which is what "a trail of red ghost circles that keep moving
+    with the disk" actually is.
+
+    Merging before matching sidesteps deciding which detection is "real"
+    entirely: the centroid of a leading+trailing pair is confirmed (by the
+    same simulation) to be a stable, bounded-offset position estimate for
+    the disk's true location -- not a growing or runaway one -- and
+    guarantees there's only ever one circle per physical object for the
+    existing single-detection-per-token matching logic below to work
+    with, which is what it already assumes.
+    """
+    n = len(detected_circles)
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(n):
+        xi, yi, ri = detected_circles[i]
+        for j in range(i + 1, n):
+            xj, yj, rj = detected_circles[j]
+            if np.hypot(xi - xj, yi - yj) < max(ri, rj) * merge_mult:
+                union(i, j)
+
+    clusters = {}
+    for i in range(n):
+        clusters.setdefault(find(i), []).append(detected_circles[i])
+
+    return [
+        (float(np.mean([c[0] for c in members])),
+         float(np.mean([c[1] for c in members])),
+         float(np.mean([c[2] for c in members])))
+        for members in clusters.values()
+    ]
+
+
+def _fit_motion(history, at_idx):
+    """Least-squares linear fit of a short (x, y, r) position history
+    (a list of (cx, cy, cr) tuples, oldest first) against sample index,
+    evaluated at at_idx. Returns ((x, vx), (y, vy), (r, vr)) -- the
+    fitted value and slope (per-sample rate of change) for each
+    dimension. Falls back to the single latest sample with zero slope
+    when there's not enough history yet (fewer than 2 points) to fit a
+    line at all.
+
+    Used in place of a flat median filter for smoothing per-frame Hough
+    jitter -- see this function's call site in get_video_stream() for the
+    full reasoning (the median had zero lag for a genuinely STATIONARY
+    token, which is what it was built and tested for, but introduces a
+    lag that GROWS WITHOUT BOUND under sustained real movement, since the
+    median of a steadily-advancing sequence settles near the window's
+    MIDPOINT, not its current value). A linear fit has no such steady-
+    state lag under constant or smoothly-changing velocity, since it
+    tracks the trend directly instead of a flat central value -- verified
+    directly via simulation, not assumed.
+    """
+    idxs = np.arange(len(history), dtype=np.float64)
+    out = []
+    for dim in range(3):
+        vals = np.array([h[dim] for h in history], dtype=np.float64)
+        if len(history) < 2:
+            out.append((float(vals[-1]), 0.0))
+        else:
+            slope, intercept = np.polyfit(idxs, vals, 1)
+            out.append((float(slope * at_idx + intercept), float(slope)))
+    return out
+
+
 def _save_debug_capture(gray, cx, cy, r, token_id, reason):
     """Save a full-resolution crop of exactly what the identification
     backend sees around a struggling token -- the raw pixel data the
@@ -845,7 +976,7 @@ def get_video_stream():
     global raw_frame_for_stream, undistorted_frame_for_stream
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
-    global hough_catchup_mult, hough_dup_suppress_mult
+    global hough_catchup_mult, hough_dup_suppress_mult, hough_merge_mult, hough_outlier_reject_mult
     global CCTAG_AVAILABLE, cctag_detector
     global src_pts, corner_idx, homography_matrix, auto_blank, auto_blank_delay, manual_blank
     global corner_mask, corner_mask_dirty
@@ -1145,9 +1276,23 @@ def get_video_stream():
                         break
                 if not is_inner:
                     detected_circles.append((x, y, r))
-                    # Draw the circle in faint yellow
+                    # Draw the circle in faint yellow -- the RAW detection,
+                    # before the motion-blur merge pass just below; seeing
+                    # both the raw yellow circles and the merged/tracked
+                    # ones is useful for diagnosing exactly this kind of
+                    # split-detection issue.
                     if show_overlay:
                         cv2.circle(frame, (x, y), r, (0, 255, 255), 2)
+
+        # Collapse any cluster of mutually-close raw circles (most notably
+        # a fast disk's own motion blur fit as two separate circles) into
+        # one representative circle before matching ever sees them -- see
+        # _merge_close_circles()'s docstring for why this has to happen
+        # here, upstream of matching, rather than as a downstream
+        # duplicate check (hough_dup_suppress_mult, used further below,
+        # stays as a secondary safety net for the rarer case this merge
+        # pass doesn't already cover).
+        detected_circles = _merge_close_circles(detected_circles, hough_merge_mult)
 
         # --- FAST TRACKER: Coordinate tracking via Hough Circles ---
         if not hasattr(get_video_stream, "tracked_tokens"):
@@ -1245,30 +1390,83 @@ def get_video_stream():
                 # below — used to cap the reattachment snap further down.
                 was_ghosting = token.get("missed", 0) > 0
 
-                # Median-filter the raw per-frame Hough reading over a short
-                # rolling history before it reaches the deadzone/smoothing
-                # logic below. Found directly against real footage: a single
-                # noisy frame's (cx, cy, r) can exceed hough_deadzone from
-                # measurement jitter alone (not real movement) -- the
-                # smoothing ramp below floors at 40% even for a tiny
-                # excursion, so that one noisy frame still produces a
-                # visible partial snap, which is what a perfectly still
-                # physical disk "shifting/floating" looks like. A median
-                # over the last few raw readings rejects a one-frame outlier
-                # before the deadzone logic ever sees it, without touching
-                # Hough's own detection parameters (dp/param1/param2/etc) at
-                # all -- those stay exactly as tuned.
                 if was_ghosting:
                     # Stale history from before the gap could anchor the
-                    # filter to a position the token may have left during
+                    # fit to a trajectory the token may have left during
                     # the gap -- start fresh on reacquisition instead, same
                     # philosophy as the snap-cap below.
-                    token["raw_history"] = collections.deque(maxlen=HOUGH_MEDIAN_WINDOW)
-                history = token.setdefault("raw_history", collections.deque(maxlen=HOUGH_MEDIAN_WINDOW))
-                history.append((cx, cy, cr))
-                cx = float(np.median([h[0] for h in history]))
-                cy = float(np.median([h[1] for h in history]))
-                cr = float(np.median([h[2] for h in history]))
+                    token["raw_history"] = []
+                    token["reject_streak"] = 0
+                history = token.setdefault("raw_history", [])
+                reject_streak = token.get("reject_streak", 0)
+
+                # Outlier-robust, lag-free motion filter -- replaced what
+                # used to be a flat median over the last HOUGH_MEDIAN_WINDOW
+                # raw readings. The median was added to reject a single
+                # noisy Hough frame on an otherwise-STATIONARY disk (a real
+                # one-frame (cx, cy, r) spike was enough to exceed
+                # hough_deadzone from measurement jitter alone, producing a
+                # visible partial snap even though the disk never moved),
+                # and it did that job fine. But found directly via
+                # simulation that it has a serious, unrelated problem under
+                # real MOVEMENT: the median of a steadily-advancing
+                # sequence doesn't track the current value, it settles near
+                # the window's MIDPOINT -- a lag of roughly half the window
+                # size, in frames, times the token's speed. That lag GROWS
+                # WITHOUT BOUND the longer the window stays full during
+                # sustained motion (confirmed: 100+px at a realistic swipe
+                # speed), which is exactly what "the green circle visibly
+                # trails behind the real disk" and "loses its match to
+                # whatever's now closer to the stale smoothed position"
+                # look like in practice.
+                #
+                # A least-squares linear fit over the same window has zero
+                # steady-state lag under constant or smoothly-changing
+                # velocity (it tracks the TREND, not a flat central value),
+                # but on its own has the opposite problem: a single bad
+                # reading pulls the whole fitted line with no robustness at
+                # all. Combined fix: reject a new reading that's wildly
+                # inconsistent with the fit from readings already in the
+                # window (that's what used to be the median's job) --
+                # unless that would mean rejecting MAX_CONSECUTIVE_HOUGH_REJECTS
+                # readings in a row, in which case force-accept it anyway.
+                # Without that escape valve, a genuine sustained
+                # acceleration (a real flick of the wrist) looks
+                # indistinguishable from persistent noise and the filter
+                # gets stuck rejecting forever -- worse than the lag it
+                # replaces. Verified directly via simulation against all
+                # three cases this needs to handle: zero lag under constant
+                # velocity, a single injected outlier frame cleanly
+                # rejected and ignored, and a steep multi-frame
+                # acceleration ramp recovering within a couple frames
+                # instead of diverging or freezing permanently.
+                accepted = True
+                if len(history) >= 3 and reject_streak < MAX_CONSECUTIVE_HOUGH_REJECTS:
+                    (expected_x, _), (expected_y, _), _ = _fit_motion(history, len(history))
+                    deviation = np.hypot(cx - expected_x, cy - expected_y)
+                    outlier_threshold = max(hough_deadzone * 4.0, cr * hough_outlier_reject_mult)
+                    if deviation > outlier_threshold:
+                        accepted = False
+
+                if accepted:
+                    history.append((cx, cy, cr))
+                    if len(history) > HOUGH_MEDIAN_WINDOW:
+                        del history[0]
+                    token["reject_streak"] = 0
+                    (cx, fit_vx), (cy, fit_vy), (cr, _) = _fit_motion(history, len(history) - 1)
+                else:
+                    token["reject_streak"] = reject_streak + 1
+                    # Fall back to the trend's own prediction for this
+                    # frame's position rather than the untrusted raw
+                    # reading -- and preserve the token's existing
+                    # velocity rather than zeroing it. There's no new
+                    # reliable information this frame, but the token may
+                    # well still be genuinely moving fast; zeroing velocity
+                    # here would shrink next frame's speed-scaled catch-up
+                    # matching radius right when a real fast move still in
+                    # progress needs it most.
+                    (cx, _), (cy, _), (cr, _) = _fit_motion(history, len(history))
+                    fit_vx, fit_vy = token.get("vx", 0.0), token.get("vy", 0.0)
 
                 # Dynamic smoothing with deadzone: lock perfectly if stationary, snap if moved
                 dist_moved = np.hypot(token["x"] - cx, token["y"] - cy)
@@ -1276,8 +1474,6 @@ def get_video_stream():
                 if dist_moved < hough_deadzone:
                     # Deadzone: completely ignore tiny jitter
                     alpha = 0.0
-                    token["vx"] = token.get("vx", 0) * 0.5
-                    token["vy"] = token.get("vy", 0) * 0.5
                 else:
                     # Movement: snap smoothly. The full-snap distance used to
                     # be a flat 8px, which was only ever tuned against a much
@@ -1308,13 +1504,20 @@ def get_video_stream():
                         # continuously-tracked motion at all — this only
                         # applies to the first frame back from a gap.
                         alpha = min(alpha, 0.5)
-                    token["vx"] = token.get("vx", 0) * 0.5 + (cx - token["x"]) * 0.5
-                    token["vy"] = token.get("vy", 0) * 0.5 + (cy - token["y"]) * 0.5
-                    # Recorded undamped, purely from this frame's real
-                    # displacement — used as the reattachment radius's speed
-                    # estimate above so it doesn't erode with each ghost
-                    # frame the way the live (friction-damped) vx/vy does.
-                    token["last_seen_speed"] = np.hypot(token["vx"], token["vy"])
+
+                # vx/vy now come directly from the fitted trend (see above)
+                # rather than a separate single-step exponential blend of
+                # the raw delta -- same lag-elimination reasoning applies
+                # to velocity as to position, since the old blend had the
+                # same kind of convergence lag under real acceleration.
+                token["vx"] = fit_vx
+                token["vy"] = fit_vy
+                # Recorded here (not damped further) -- used as the
+                # reattachment radius's speed estimate while ghosting, and
+                # as this frame's catch-up matching radius input above, so
+                # it doesn't erode just because this one frame's reading
+                # happened to be rejected as an outlier.
+                token["last_seen_speed"] = np.hypot(fit_vx, fit_vy)
 
                 token["x"] = token["x"] * (1 - alpha) + cx * alpha
                 token["y"] = token["y"] * (1 - alpha) + cy * alpha
@@ -2549,6 +2752,8 @@ def get_settings():
         "hough_deadzone": hough_deadzone,
         "hough_catchup_mult": hough_catchup_mult,
         "hough_dup_suppress_mult": hough_dup_suppress_mult,
+        "hough_merge_mult": hough_merge_mult,
+        "hough_outlier_reject_mult": hough_outlier_reject_mult,
         "cctag_min_id": cctag_min_id, "cctag_max_id": cctag_max_id,
         "cctag_min_ident_proba": cctag_min_ident_proba,
         "cctag_id_voting_decay": cctag_id_voting_decay,
@@ -2567,7 +2772,7 @@ def get_settings():
 def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
-    global hough_catchup_mult, hough_dup_suppress_mult
+    global hough_catchup_mult, hough_dup_suppress_mult, hough_merge_mult, hough_outlier_reject_mult
     global auto_blank, auto_blank_delay, token_aliases
     global camera_url, manual_blank, flip_x, flip_y
     global CCTAG_AVAILABLE, cctag_min_id, cctag_max_id, cctag_min_ident_proba
@@ -2639,6 +2844,8 @@ def update_settings():
     if 'hough_deadzone' in data: hough_deadzone = float(data['hough_deadzone'])
     if 'hough_catchup_mult' in data: hough_catchup_mult = float(data['hough_catchup_mult'])
     if 'hough_dup_suppress_mult' in data: hough_dup_suppress_mult = float(data['hough_dup_suppress_mult'])
+    if 'hough_merge_mult' in data: hough_merge_mult = float(data['hough_merge_mult'])
+    if 'hough_outlier_reject_mult' in data: hough_outlier_reject_mult = float(data['hough_outlier_reject_mult'])
 
     # Purge tokens whose marker_id is now outside the new ID range
     if hasattr(get_video_stream, 'tracked_tokens'):

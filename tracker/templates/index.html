@@ -863,9 +863,35 @@
                         </div>
                         <div class="field">
                             <div class="field-row">
+                                <span class="field-label">Motion-Blur Merge
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How close (as a fraction of a token's radius) two detected circles must be before they're merged into one BEFORE tracking even starts. Fixes a fast-moving disk's own motion blur getting read as two separate circles, which otherwise causes 'ghost' red circles trailing the real one and the real token losing its ID. Raise this if a fast token still leaves a ghost trail; lower it if two tokens placed close together sometimes merge into one.">i</button>
+                                </span>
+                                <input type="number" id="val_hough_merge_mult" value="0.9" step="0.05" min="0.1"
+                                    max="1.5" class="val-input"
+                                    oninput="syncSlider(this, 'hough_merge_mult'); updateSettings()">
+                            </div>
+                            <input type="range" id="hough_merge_mult" min="0.1" max="1.5" step="0.05" value="0.9"
+                                oninput="updateVal('hough_merge_mult')">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Reading Outlier Rejection
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How far (as a fraction of a token's radius) a single frame's position reading can deviate from its recent trend before it's ignored as a one-frame glitch. Protects a moving token's smoothed position/velocity from a single bad reading without adding lag. Lower this to reject noise more aggressively; raise it if fast direction changes get mistaken for noise and briefly stall tracking.">i</button>
+                                </span>
+                                <input type="number" id="val_hough_outlier_reject_mult" value="0.25" step="0.05" min="0.05"
+                                    max="1.0" class="val-input"
+                                    oninput="syncSlider(this, 'hough_outlier_reject_mult'); updateSettings()">
+                            </div>
+                            <input type="range" id="hough_outlier_reject_mult" min="0.05" max="1.0" step="0.05" value="0.25"
+                                oninput="updateVal('hough_outlier_reject_mult')">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
                                 <span class="field-label">Duplicate Detection Suppression
                                     <button type="button" class="info-icon" tabindex="0"
-                                        data-tip="How close (as a fraction of a token's radius) two detected circles must be before the second is treated as a duplicate reading of the same physical disk rather than a new token. Fixes 'ghost' red circles trailing a moving token. Lower this if two tokens placed close together sometimes merge into one.">i</button>
+                                        data-tip="A secondary safety net: how close (as a fraction of a token's radius) an unmatched circle must be to one just matched this frame before it's discarded instead of becoming a new 'Unknown' token. Most duplicate detections are now caught earlier by Motion-Blur Merge above; this only catches what that misses.">i</button>
                                 </span>
                                 <input type="number" id="val_hough_dup_suppress_mult" value="0.5" step="0.05" min="0.1"
                                     max="1.0" class="val-input"
@@ -1375,6 +1401,8 @@
                 hough_max_radius: parseInt(document.getElementById('hough_max_radius').value),
                 hough_deadzone: parseFloat(document.getElementById('hough_deadzone').value),
                 hough_catchup_mult: parseFloat(document.getElementById('hough_catchup_mult').value),
+                hough_merge_mult: parseFloat(document.getElementById('hough_merge_mult').value),
+                hough_outlier_reject_mult: parseFloat(document.getElementById('hough_outlier_reject_mult').value),
                 hough_dup_suppress_mult: parseFloat(document.getElementById('hough_dup_suppress_mult').value),
                 hough_param1: parseFloat(document.getElementById('hough_param1').value),
                 hough_param2: parseFloat(document.getElementById('hough_param2').value),
@@ -1416,6 +1444,8 @@
             document.getElementById('hough_max_radius').value = "40";
             document.getElementById('hough_deadzone').value = "3.0";
             document.getElementById('hough_catchup_mult').value = "2.0";
+            document.getElementById('hough_merge_mult').value = "0.9";
+            document.getElementById('hough_outlier_reject_mult').value = "0.25";
             document.getElementById('hough_dup_suppress_mult').value = "0.5";
             document.getElementById('hough_param1').value = "40";
             document.getElementById('hough_param2').value = "45";
@@ -1455,6 +1485,8 @@
                 hough_max_radius: document.getElementById('hough_max_radius').value,
                 hough_deadzone: document.getElementById('hough_deadzone').value,
                 hough_catchup_mult: parseFloat(document.getElementById('hough_catchup_mult').value),
+                hough_merge_mult: parseFloat(document.getElementById('hough_merge_mult').value),
+                hough_outlier_reject_mult: parseFloat(document.getElementById('hough_outlier_reject_mult').value),
                 hough_dup_suppress_mult: parseFloat(document.getElementById('hough_dup_suppress_mult').value),
                 hough_param1: document.getElementById('hough_param1').value,
                 hough_param2: document.getElementById('hough_param2').value,
@@ -1540,6 +1572,14 @@
                     if (config.hough_catchup_mult !== undefined) {
                         document.getElementById('hough_catchup_mult').value = config.hough_catchup_mult;
                         document.getElementById('val_hough_catchup_mult').value = config.hough_catchup_mult;
+                    }
+                    if (config.hough_merge_mult !== undefined) {
+                        document.getElementById('hough_merge_mult').value = config.hough_merge_mult;
+                        document.getElementById('val_hough_merge_mult').value = config.hough_merge_mult;
+                    }
+                    if (config.hough_outlier_reject_mult !== undefined) {
+                        document.getElementById('hough_outlier_reject_mult').value = config.hough_outlier_reject_mult;
+                        document.getElementById('val_hough_outlier_reject_mult').value = config.hough_outlier_reject_mult;
                     }
                     if (config.hough_dup_suppress_mult !== undefined) {
                         document.getElementById('hough_dup_suppress_mult').value = config.hough_dup_suppress_mult;
@@ -1655,6 +1695,14 @@
                     if (cfg.hough_catchup_mult !== undefined) {
                         document.getElementById('hough_catchup_mult').value = cfg.hough_catchup_mult;
                         document.getElementById('val_hough_catchup_mult').value = cfg.hough_catchup_mult;
+                    }
+                    if (cfg.hough_merge_mult !== undefined) {
+                        document.getElementById('hough_merge_mult').value = cfg.hough_merge_mult;
+                        document.getElementById('val_hough_merge_mult').value = cfg.hough_merge_mult;
+                    }
+                    if (cfg.hough_outlier_reject_mult !== undefined) {
+                        document.getElementById('hough_outlier_reject_mult').value = cfg.hough_outlier_reject_mult;
+                        document.getElementById('val_hough_outlier_reject_mult').value = cfg.hough_outlier_reject_mult;
                     }
                     if (cfg.hough_dup_suppress_mult !== undefined) {
                         document.getElementById('hough_dup_suppress_mult').value = cfg.hough_dup_suppress_mult;
