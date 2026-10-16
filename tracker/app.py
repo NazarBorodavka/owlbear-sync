@@ -493,6 +493,7 @@ DEBUG_CAPTURE_MAX_FILES = 40
 def load_config_from_disk():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
+    global hough_catchup_mult, hough_dup_suppress_mult
     global auto_blank, auto_blank_delay
     global cctag_min_id, cctag_max_id, cctag_min_ident_proba, cctag_id_voting_decay
     global cctag_match_radius_mult, cctag_ghosting_frames, cctag_id_switch_margin
@@ -534,6 +535,8 @@ def load_config_from_disk():
                 hough_min_radius = c.get('hough_min_radius', 30)
                 hough_max_radius = c.get('hough_max_radius', 40)
                 hough_deadzone = float(c.get('hough_deadzone', 3.0))
+                hough_catchup_mult = float(c.get('hough_catchup_mult', 2.0))
+                hough_dup_suppress_mult = float(c.get('hough_dup_suppress_mult', 0.5))
                 auto_blank = c.get('auto_blank', False)
                 auto_blank_delay = int(c.get('auto_blank_delay', 10))
                 show_overlay = c.get('show_overlay', True)
@@ -587,6 +590,8 @@ def save_config_to_disk():
         'hough_param1': hough_param1, 'hough_param2': hough_param2,
         'hough_min_radius': hough_min_radius, 'hough_max_radius': hough_max_radius,
         'hough_deadzone': hough_deadzone,
+        'hough_catchup_mult': hough_catchup_mult,
+        'hough_dup_suppress_mult': hough_dup_suppress_mult,
         'auto_blank': auto_blank,
         'auto_blank_delay': auto_blank_delay,
         'show_overlay': show_overlay,
@@ -653,6 +658,28 @@ hough_param2 = 30
 hough_min_radius = 30
 hough_max_radius = 40
 hough_deadzone = 3.0
+
+# How aggressively the per-frame token<->circle matching widens its search
+# net based on the token's own recent speed -- shared by both the ghosting
+# case (reclaiming a token that dropped out of Hough detection entirely for
+# a frame or two) and the non-ghosting case (a token detected every frame
+# but moving fast enough that velocity-predicted position alone isn't a
+# tight enough net). See the matching loop in get_video_stream() for the
+# full reasoning on each case; one shared multiplier since both are
+# ultimately "how much slack to give a moving token", not independently
+# motivated values.
+hough_catchup_mult = 2.0
+
+# How close (as a multiple of the larger circle's own radius) an unmatched
+# Hough circle must be to one that WAS matched this same frame before it's
+# treated as a near-duplicate detection of the same physical disk and
+# discarded, rather than spawning a brand new "Unknown" track. Deliberately
+# conservative (under half a radius) -- genuine duplicate circle fits of
+# one object are typically only a few pixels apart; two real, distinct
+# tokens are essentially never placed closer than this on purpose. See the
+# token-creation branch in get_video_stream() for the full reasoning (the
+# "red ghost disk trail" this exists to fix).
+hough_dup_suppress_mult = 0.5
 
 # How many of the most recent raw per-frame Hough readings to median-filter
 # together before the deadzone/smoothing logic sees them (see the matching
@@ -818,6 +845,7 @@ def get_video_stream():
     global raw_frame_for_stream, undistorted_frame_for_stream
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
+    global hough_catchup_mult, hough_dup_suppress_mult
     global CCTAG_AVAILABLE, cctag_detector
     global src_pts, corner_idx, homography_matrix, auto_blank, auto_blank_delay, manual_blank
     global corner_mask, corner_mask_dirty
@@ -1147,15 +1175,10 @@ def get_video_stream():
                 dist = np.hypot(cx - pred_x, cy - pred_y)
                 missed = t_data.get("missed", 0)
                 if missed > 0:
-                    # Only widen the catchment while genuinely ghosting (has
-                    # missed at least one real detection). A token that's
-                    # being detected every single frame doesn't need extra
-                    # slack just because it happens to be moving fast right
-                    # now — giving it one anyway is what let a fast token
-                    # sweep up a stationary token's circle while merely
-                    # passing near it. The widening exists purely to reclaim
-                    # a token that actually dropped out of Hough detection
-                    # for a frame or two (motion blur), which would otherwise
+                    # Widen the catchment while genuinely ghosting (has
+                    # missed at least one real detection) — reclaims a token
+                    # that actually dropped out of Hough detection for a
+                    # frame or two (motion blur), which would otherwise
                     # reappear outside a fixed radius and get treated as
                     # brand new. Capped so two genuinely separate tokens
                     # can't merge just because one of them is fast.
@@ -1168,9 +1191,30 @@ def get_video_stream():
                     # right when it needs it most, undermining the whole
                     # point of this widening.
                     speed = t_data.get("last_seen_speed", np.hypot(t_data.get("vx", 0), t_data.get("vy", 0)))
-                    search_radius = min(max(cr * 1.5, 60, speed * (missed + 1) * 2.0), 500)
+                    search_radius = min(max(cr * 1.5, 60, speed * (missed + 1) * hough_catchup_mult), 500)
                 else:
-                    search_radius = max(cr * 1.5, 60)  # Search radius scales with token size
+                    # Even while being detected every single frame (not
+                    # ghosting), a sustained fast drag can legitimately
+                    # outrun a flat cr*1.5 catchment -- found directly as
+                    # the real cause behind "fast movement needs
+                    # re-identifying": the match above already uses
+                    # velocity-PREDICTED position (pred_x/pred_y), so this
+                    # radius only has to cover the gap between that
+                    # constant-velocity prediction and this frame's actual
+                    # position (acceleration, direction change, or simply a
+                    # lower achieved fps under load giving the disk more
+                    # real-world distance to cover between frames than a
+                    # single velocity sample predicts) -- not the raw
+                    # per-frame travel distance itself. Losing this match
+                    # doesn't just cost a frame of position smoothness: it
+                    # forces the token onto a brand new track with no
+                    # marker_id, discarding identity that would otherwise
+                    # have kept riding along on the existing track (see
+                    # "Intentionally NOT clearing marker_id..." below) --
+                    # i.e. exactly the unwanted "needs to reidentify"
+                    # symptom, not a cosmetic tracking hiccup.
+                    speed = np.hypot(t_data.get("vx", 0), t_data.get("vy", 0))
+                    search_radius = max(cr * 1.5, 60, speed * hough_catchup_mult)
                 if dist < search_radius:
                     candidate_pairs.append((dist, cidx, t_id))
 
@@ -1182,6 +1226,14 @@ def get_video_stream():
                 continue
             matched_circles[cidx] = t_id
             matched_tokens.add(t_id)
+
+        # Seeds the duplicate check below with every circle that WAS matched
+        # to an existing token this frame -- see that check's own comment
+        # for why. Grown as new (non-duplicate) tokens get created further
+        # down too, so a second, third, etc. leftover duplicate circle in
+        # the same frame gets caught against those as well, not just
+        # against already-tracked tokens.
+        accepted_circle_positions = [detected_circles[c] for c in matched_circles]
 
         for cidx, (cx, cy, cr) in enumerate(detected_circles):
             best_id = matched_circles.get(cidx)
@@ -1272,6 +1324,42 @@ def get_video_stream():
                     token["r"] = token["r"] * 0.85 + cr * 0.15
                 token["missed"] = 0
             else:
+                # Before spawning a brand new track: is this circle actually
+                # a near-duplicate detection of one that WAS matched to an
+                # existing token this very frame (or of another new token
+                # just created a few iterations ago in this same loop)? Hough
+                # circle fitting isn't perfectly stable frame to frame —
+                # antialiasing, exposure, or motion blur can occasionally
+                # produce two close but distinct circle fits for the same
+                # physical disk. Previously every unmatched circle became a
+                # new "Unknown" (red, no marker_id) track unconditionally,
+                # which is exactly what a spurious duplicate fit does too —
+                # found directly as the cause of "red ghost disks" trailing
+                # a token as it moves: the phantom track then lingers,
+                # predicted forward by its own (zero) velocity, for up to
+                # cctag_ghosting_frames missed frames before disappearing.
+                # It can also steal the REAL detection away from the
+                # existing, already-identified token on a later frame if the
+                # phantom happens to be the closer match that frame —
+                # forcing the real track to start ghosting and eventually
+                # die, which is the other reported symptom ("moving faster
+                # needs to reidentify"). Both trace back to this same gap.
+                #
+                # Distance threshold scales with the larger of the two
+                # circles' own radii rather than a flat pixel value, same
+                # reasoning as the match-radius formula above. Deliberately
+                # conservative (well under a full radius apart) so two
+                # genuinely distinct tokens placed close together don't get
+                # merged into one — true duplicate fits of the same object
+                # are typically only a few pixels apart, nowhere near a full
+                # radius.
+                is_duplicate = any(
+                    np.hypot(cx - ax, cy - ay) < max(cr, ar) * hough_dup_suppress_mult
+                    for (ax, ay, ar) in accepted_circle_positions
+                )
+                if is_duplicate:
+                    continue
+
                 new_id = f"Token_{get_video_stream.token_counter}"
                 get_video_stream.token_counter += 1
                 get_video_stream.tracked_tokens[new_id] = {
@@ -1279,6 +1367,7 @@ def get_video_stream():
                     "vx": 0.0, "vy": 0.0
                 }
                 matched_tokens.add(new_id)
+                accepted_circle_positions.append((cx, cy, cr))
 
         # Increment missed frames and delete old tokens.
         # While ghosting: use velocity to predict where the token drifted to.
@@ -2458,6 +2547,8 @@ def get_settings():
         "hough_param1": hough_param1, "hough_param2": hough_param2,
         "hough_min_radius": hough_min_radius, "hough_max_radius": hough_max_radius,
         "hough_deadzone": hough_deadzone,
+        "hough_catchup_mult": hough_catchup_mult,
+        "hough_dup_suppress_mult": hough_dup_suppress_mult,
         "cctag_min_id": cctag_min_id, "cctag_max_id": cctag_max_id,
         "cctag_min_ident_proba": cctag_min_ident_proba,
         "cctag_id_voting_decay": cctag_id_voting_decay,
@@ -2476,6 +2567,7 @@ def get_settings():
 def update_settings():
     global distortion_k1, zoom_level, offset_x, offset_y, rotation, brightness, contrast, exposure, show_overlay
     global hough_dp, hough_min_dist, hough_param1, hough_param2, hough_min_radius, hough_max_radius, hough_deadzone
+    global hough_catchup_mult, hough_dup_suppress_mult
     global auto_blank, auto_blank_delay, token_aliases
     global camera_url, manual_blank, flip_x, flip_y
     global CCTAG_AVAILABLE, cctag_min_id, cctag_max_id, cctag_min_ident_proba
@@ -2545,6 +2637,8 @@ def update_settings():
     if 'hough_min_radius' in data: hough_min_radius = int(data['hough_min_radius'])
     if 'hough_max_radius' in data: hough_max_radius = int(data['hough_max_radius'])
     if 'hough_deadzone' in data: hough_deadzone = float(data['hough_deadzone'])
+    if 'hough_catchup_mult' in data: hough_catchup_mult = float(data['hough_catchup_mult'])
+    if 'hough_dup_suppress_mult' in data: hough_dup_suppress_mult = float(data['hough_dup_suppress_mult'])
 
     # Purge tokens whose marker_id is now outside the new ID range
     if hasattr(get_video_stream, 'tracked_tokens'):

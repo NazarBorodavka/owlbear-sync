@@ -848,6 +848,32 @@
                             <input type="range" id="hough_deadzone" min="0" max="20" step="0.5" value="3.0"
                                 oninput="updateVal('hough_deadzone')">
                         </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Fast-Move Catch-Up
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How much extra search radius a moving token gets, scaled by its own recent speed — covers the gap between predicted and actual position so a fast or dragged token doesn't get treated as a brand new (unidentified) token mid-move. Raise this if fast movement makes tokens lose their assigned ID; lower it if two tokens passing near each other sometimes swap.">i</button>
+                                </span>
+                                <input type="number" id="val_hough_catchup_mult" value="2.0" step="0.1" min="0.5"
+                                    max="6.0" class="val-input"
+                                    oninput="syncSlider(this, 'hough_catchup_mult'); updateSettings()">
+                            </div>
+                            <input type="range" id="hough_catchup_mult" min="0.5" max="6.0" step="0.1" value="2.0"
+                                oninput="updateVal('hough_catchup_mult')">
+                        </div>
+                        <div class="field">
+                            <div class="field-row">
+                                <span class="field-label">Duplicate Detection Suppression
+                                    <button type="button" class="info-icon" tabindex="0"
+                                        data-tip="How close (as a fraction of a token's radius) two detected circles must be before the second is treated as a duplicate reading of the same physical disk rather than a new token. Fixes 'ghost' red circles trailing a moving token. Lower this if two tokens placed close together sometimes merge into one.">i</button>
+                                </span>
+                                <input type="number" id="val_hough_dup_suppress_mult" value="0.5" step="0.05" min="0.1"
+                                    max="1.0" class="val-input"
+                                    oninput="syncSlider(this, 'hough_dup_suppress_mult'); updateSettings()">
+                            </div>
+                            <input type="range" id="hough_dup_suppress_mult" min="0.1" max="1.0" step="0.05" value="0.5"
+                                oninput="updateVal('hough_dup_suppress_mult')">
+                        </div>
                         <button class="secondary" onclick="resetDiskSettings()" style="margin-top: 10px;">Reset to
                             Defaults</button>
                     </div>
@@ -1348,6 +1374,8 @@
                 hough_min_radius: parseInt(document.getElementById('hough_min_radius').value),
                 hough_max_radius: parseInt(document.getElementById('hough_max_radius').value),
                 hough_deadzone: parseFloat(document.getElementById('hough_deadzone').value),
+                hough_catchup_mult: parseFloat(document.getElementById('hough_catchup_mult').value),
+                hough_dup_suppress_mult: parseFloat(document.getElementById('hough_dup_suppress_mult').value),
                 hough_param1: parseFloat(document.getElementById('hough_param1').value),
                 hough_param2: parseFloat(document.getElementById('hough_param2').value),
                 cctag_min_id: parseInt(document.getElementById('cctag_min_id').value),
@@ -1387,6 +1415,8 @@
             document.getElementById('hough_min_radius').value = "30";
             document.getElementById('hough_max_radius').value = "40";
             document.getElementById('hough_deadzone').value = "3.0";
+            document.getElementById('hough_catchup_mult').value = "2.0";
+            document.getElementById('hough_dup_suppress_mult').value = "0.5";
             document.getElementById('hough_param1').value = "40";
             document.getElementById('hough_param2').value = "45";
             updateSettings();
@@ -1424,6 +1454,8 @@
                 hough_min_radius: document.getElementById('hough_min_radius').value,
                 hough_max_radius: document.getElementById('hough_max_radius').value,
                 hough_deadzone: document.getElementById('hough_deadzone').value,
+                hough_catchup_mult: parseFloat(document.getElementById('hough_catchup_mult').value),
+                hough_dup_suppress_mult: parseFloat(document.getElementById('hough_dup_suppress_mult').value),
                 hough_param1: document.getElementById('hough_param1').value,
                 hough_param2: document.getElementById('hough_param2').value,
                 cctag_min_id: document.getElementById('cctag_min_id').value,
@@ -1504,6 +1536,14 @@
                     if (config.hough_deadzone !== undefined) {
                         document.getElementById('hough_deadzone').value = config.hough_deadzone;
                         document.getElementById('val_hough_deadzone').value = config.hough_deadzone;
+                    }
+                    if (config.hough_catchup_mult !== undefined) {
+                        document.getElementById('hough_catchup_mult').value = config.hough_catchup_mult;
+                        document.getElementById('val_hough_catchup_mult').value = config.hough_catchup_mult;
+                    }
+                    if (config.hough_dup_suppress_mult !== undefined) {
+                        document.getElementById('hough_dup_suppress_mult').value = config.hough_dup_suppress_mult;
+                        document.getElementById('val_hough_dup_suppress_mult').value = config.hough_dup_suppress_mult;
                     }
                     if (config.hough_param1 !== undefined) document.getElementById('hough_param1').value = config.hough_param1;
                     if (config.hough_param2 !== undefined) document.getElementById('hough_param2').value = config.hough_param2;
@@ -1611,6 +1651,14 @@
                     if (cfg.hough_deadzone !== undefined) {
                         document.getElementById('hough_deadzone').value = cfg.hough_deadzone;
                         document.getElementById('val_hough_deadzone').value = cfg.hough_deadzone;
+                    }
+                    if (cfg.hough_catchup_mult !== undefined) {
+                        document.getElementById('hough_catchup_mult').value = cfg.hough_catchup_mult;
+                        document.getElementById('val_hough_catchup_mult').value = cfg.hough_catchup_mult;
+                    }
+                    if (cfg.hough_dup_suppress_mult !== undefined) {
+                        document.getElementById('hough_dup_suppress_mult').value = cfg.hough_dup_suppress_mult;
+                        document.getElementById('val_hough_dup_suppress_mult').value = cfg.hough_dup_suppress_mult;
                     }
                     if (cfg.distortion_k1 !== undefined) document.getElementById('distortion_k1').value = cfg.distortion_k1;
                     if (cfg.zoom !== undefined) document.getElementById('zoom').value = cfg.zoom;
