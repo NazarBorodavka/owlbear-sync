@@ -32,7 +32,7 @@ services:
       # whatever resolution the camera captures. 'ringcode' is a custom,
       # pure-Python/OpenCV system (no native library) capped at exactly 6
       # IDs (0-5, a full D&D party) but tested working down to roughly
-      # 9-18px radius — useful if your camera distance/zoom can't give
+      # 20-150px+ radius — useful if your camera distance/zoom can't give
       # CCTag enough pixels per marker and you only need a handful of
       # distinct tokens. Falls back to
       # cctag automatically if ringcode fails to load for any reason. Only

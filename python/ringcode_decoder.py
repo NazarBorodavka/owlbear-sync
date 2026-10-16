@@ -120,15 +120,33 @@ DOT_RING_R_FRAC = 0.73
 DOT_RADIUS_FRAC = 0.10
 
 # Search window half-size around each dot's COMPUTED position, as a
-# fraction of the token radius r. Scaled up from v4's original 0.11 in the
-# same proportion as DOT_RADIUS_FRAC grew (0.10/0.08), to keep the same
-# dot-to-window area ratio (and therefore the same MIN/MAX_BLOB_AREA_FRAC
-# margins) as the original, smaller-dot design. Tried going bigger during
-# development on the assumption it would buy more radius-error tolerance
-# too -- direct testing found the opposite: a bigger window picks up more
-# ambiguous/contaminating content than it gains in reach, so this stays at
-# the proportional value rather than the larger one that was tried.
-SEARCH_WINDOW_FRAC = 0.1375
+# fraction of the token radius r.
+#
+# This used to be 0.1375 (scaled up from v4's 0.11 in proportion to
+# DOT_RADIUS_FRAC growing from 0.08 to 0.10) -- found, from real printed-
+# marker captures (not synthetic testing), to be a genuine bug: at 0.1375,
+# the straight-line margin between two ADJACENT dots' search windows is
+# only ~3.5% of their center-to-center spacing -- under 1px at the actual
+# deployed marker sizes (r=63-70px). Confirmed directly: a synthetic
+# render at that exact radius decoded perfectly at zero error, but as
+# little as 2-3px of Hough center offset -- well within normal measurement
+# noise, nowhere near an extreme case -- was enough to make a real dot
+# get attributed to the WRONG adjacent slot, confidently (not an erasure,
+# a wrong-but-plausible-looking bit), which is exactly the "16/16 known,
+# but ties between two IDs that differ by one adjacent-slot swap" failure
+# found in real logs.
+#
+# 0.10 was found by direct sweep (not the first value tried -- 0.1375 was
+# the original, inherited value, not re-validated against this specific
+# margin until this bug was found): smaller windows free up real margin
+# between neighbors, and once MAX_BLOB_AREA_FRAC below is scaled to match
+# (a smaller window makes a FIXED-size dot occupy more of it, which the
+# old 0.55 ceiling wasn't sized for), tested to raise Hough radius-error
+# tolerance from ~4% back to its originally-intended ~14-16% AND eliminate
+# every wrong-but-confident read across a dense sweep of center-offset
+# jitter at the real deployed size (0 wrong out of 132+ trials, vs several
+# at 0.1375) -- strictly better on every axis tested, not a trade-off.
+SEARCH_WINDOW_FRAC = 0.10
 
 N_PHASE_CANDIDATES = 16
 
@@ -138,7 +156,15 @@ N_PHASE_CANDIDATES = 16
 # severe occlusion, or no real bimodal content here at all) rather than
 # showing an isolated dot.
 MIN_BLOB_AREA_FRAC = 0.03
-MAX_BLOB_AREA_FRAC = 0.55
+# Raised alongside SEARCH_WINDOW_FRAC's reduction above: a smaller window
+# makes the SAME physical dot occupy a bigger fraction of it (nominally
+# (pi/4)*(DOT_RADIUS_FRAC/SEARCH_WINDOW_FRAC)^2 ~= 0.79 at the current
+# values), so the old 0.55 ceiling -- sized for the previous, larger
+# window -- would reject genuine dots outright, not just contamination.
+# 0.9 leaves real area to work with for true occlusion/shadow cases (which
+# tend to swallow the ENTIRE window, area_frac close to 1.0) while no
+# longer clipping legitimate dots.
+MAX_BLOB_AREA_FRAC = 0.9
 
 # A found blob's centroid must land within this fraction of the window's
 # half-size from the window's own center (i.e. from the dot's computed
