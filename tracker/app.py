@@ -98,6 +98,19 @@ if ID_BACKEND == 'ringcode':
     try:
         import ringcode_decoder
         RINGCODE_AVAILABLE = True
+        # Runs ringcode_decoder.decode() for every tracked token in a
+        # background thread, same pattern as cctag_executor above and for
+        # the same reason -- this used to run inline on the main loop on
+        # the assumption it was "cheap enough" (a handful of small sample
+        # patches), which real hardware logs disproved directly: ~13-25ms
+        # PER TOKEN, enough at typical token counts (5-6) to roughly halve
+        # the main loop's actual frame rate below the camera's own capture
+        # rate. Pure Python/numpy with no shared native state (unlike
+        # CCTag, which needs max_workers=1 specifically because its native
+        # structures aren't thread-safe) -- 1 worker here is just about
+        # keeping this simple and matching CCTag's one-batch-in-flight-at-
+        # a-time pattern, not a thread-safety requirement.
+        ringcode_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         print("[OK] Ring code identification backend active (6 IDs, pure Python, no native dependency).", flush=True)
     except Exception as e:
         print(f"[WARN] TRACKER_ID_BACKEND=ringcode but import failed ({e}) — falling back to CCTag.", flush=True)
@@ -928,6 +941,51 @@ def _fit_motion(history, at_idx):
     return out
 
 
+def _identify_ringcode_tokens(frame_gray, token_snapshot):
+    """Runs ringcode_decoder.decode() for every (t_id, x, y, r) in
+    token_snapshot against frame_gray -- submitted to ringcode_executor to
+    run in a background thread, mirroring CCTag's own
+    _detect_full_frame()/cctag_executor pattern just below, for the same
+    reason: found directly against real hardware logs that ringcode
+    decode() costs roughly 13-25ms PER TOKEN, not the "cheap enough to run
+    inline" cost originally assumed -- at 5-6 tracked tokens that alone
+    was enough to drag the whole main loop (Hough position tracking
+    included, which is fast and otherwise has no reason to run slower
+    than the camera's own capture rate) down to roughly half the camera's
+    actual frame rate. Running it in the background decouples position
+    tracking's frame rate from identification's.
+
+    token_snapshot is a plain list captured by the caller at submission
+    time, not a live view of tracked_tokens -- by the time this actually
+    runs, the main thread has likely already moved those positions
+    forward several frames. That's an accepted, bounded staleness (same
+    category already tolerated for Hough radius/position error elsewhere
+    in this module): decode() either still finds the marker close enough
+    to its slightly-stale snapshot position, or refuses safely, same as a
+    stale guess from any other cause. Reads ringcode_min_margin as a live
+    global at call time (same as CCTag reads cctag_min_ident_proba) -- a
+    settings change mid-flight only affects the next batch, same
+    tolerance already accepted there.
+
+    Returns {t_id: (rid, conf, dbg)} for the caller to apply back onto
+    the (by-then-current) tracked_tokens on the main thread. Never
+    touches tracked_tokens or any other shared mutable state directly.
+    """
+    results = {}
+    for t_id, x, y, r in token_snapshot:
+        try:
+            rid, conf, dbg = ringcode_decoder.decode(
+                frame_gray, x, y, r,
+                min_margin=ringcode_min_margin,
+                return_debug=True,
+            )
+        except Exception as e:
+            print(f"[RingCode] decode error for {t_id}: {e}", flush=True)
+            continue
+        results[t_id] = (rid, conf, dbg)
+    return results
+
+
 def _save_debug_capture(gray, cx, cy, r, token_id, reason):
     """Save a full-resolution crop of exactly what the identification
     backend sees around a struggling token -- the raw pixel data the
@@ -1603,11 +1661,18 @@ def get_video_stream():
         _t_cctag_start = time.time()
 
         if ID_BACKEND == 'ringcode':
-            # --- RING CODE: direct per-token decode, no background thread ---
-            # Cheap enough (a handful of small sample patches + ~160 lookup
-            # comparisons per token) to run inline on the main loop every
-            # frame, unlike CCTag's ~300ms+ full-frame search — no
-            # executor/future bookkeeping needed at all.
+            # --- RING CODE: async per-token decode, mirrors CCTag's
+            # background-thread pattern just below (see
+            # _identify_ringcode_tokens and ringcode_executor's own
+            # comments for the full why) -- this used to run inline on the
+            # main loop on the assumption it was "cheap enough", which
+            # real hardware logs disproved directly: ~13-25ms per token,
+            # which at typical token counts was enough to roughly halve
+            # the main loop's real frame rate below the camera's own
+            # capture rate (measured: ~5.3fps processing against a steady
+            # 10fps capture). Hough position tracking above this block is
+            # fast and has no reason to be throttled by identification, so
+            # decoupling them lets it run at the camera's full rate.
             if not hasattr(get_video_stream, "_ringcode_attempts"):
                 # Aggregate decode success-rate stats, folded into the same
                 # 10s [Perf] report as everything else below — a per-event
@@ -1616,106 +1681,161 @@ def get_video_stream():
                 get_video_stream._ringcode_attempts = 0
                 get_video_stream._ringcode_successes = 0
                 get_video_stream._ringcode_confidence_sum = 0.0
-            for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
-                if t_data.get("missed", 0) > 0:
-                    # Not actively Hough-matched this frame — its (x, y) is
-                    # only a predicted/ghosted position, not a confirmed
-                    # disk location, so sampling there isn't meaningful.
-                    continue
-                rid, conf, dbg = ringcode_decoder.decode(
-                    gray, t_data["x"], t_data["y"], t_data["r"],
-                    min_margin=ringcode_min_margin,
-                    return_debug=True,
-                )
-                t_data["ringcode_debug"] = dbg
-                get_video_stream._ringcode_attempts += 1
-                if rid is not None and (cctag_min_id <= rid <= cctag_max_id):
-                    get_video_stream._ringcode_successes += 1
-                    get_video_stream._ringcode_confidence_sum += conf
+                # Wall-clock duration of each completed background batch --
+                # now that decoding runs off the main thread, the [Perf]
+                # log's own cctag=Xms bucket only measures submit/collect
+                # bookkeeping (see its own comment), the same blind spot
+                # CCTag's async detection already has. Tracked separately
+                # here so there's still visibility into the actual per-
+                # batch decode cost this whole change was meant to get off
+                # the main loop, not just a loss of visibility into it.
+                get_video_stream._ringcode_batch_time_sum = 0.0
+                get_video_stream._ringcode_batch_count = 0
 
-                # Temporal vote accumulation -- mirrors CCTag's id_votes
-                # mechanism below exactly, for the same underlying reason:
-                # this codebook's minimum pairwise codeword distance (4
-                # bits) only guarantees recovering ONE actual bit-flip
-                # error from any single frame's read, so a token can sit
-                # genuinely tied between its true ID and a neighbor for
-                # many consecutive frames (confirmed directly against a
-                # real stuck token's logged reads). Accumulating each
-                # frame's own winning margin as vote weight lets that true
-                # ID pull ahead over many independent reads without
-                # loosening ringcode_min_margin itself, which would reopen
-                # the false-positive risk _looks_like_marker exists to
-                # close. Votes decay every frame regardless of this
-                # frame's outcome, same as CCTag's.
-                votes = t_data.setdefault("ringcode_votes", {})
-                for k in list(votes.keys()):
-                    votes[k] *= ringcode_id_voting_decay
-                    if votes[k] < 0.01:
-                        del votes[k]
-                per_id_scores = dbg.get("per_id_scores")
-                if per_id_scores:
-                    # Winner-take-all for this frame, weighted by its OWN
-                    # margin over the runner-up -- a decisive frame
-                    # contributes real weight, a near-tied/ambiguous one
-                    # contributes almost nothing, so noisy or genuinely
-                    # ambiguous frames can't drown out a token's more
-                    # confident reads the way equal-weight voting would
-                    # (confirmed directly: equal-weight voting over a real
-                    # stuck token's logged reads converged on the WRONG
-                    # id, since a close neighbor codeword won outright
-                    # more often than the true one did -- margin-weighting
-                    # at least ensures those wins count for less).
-                    win_id, win_matches, _ = per_id_scores[0]
-                    if cctag_min_id <= win_id <= cctag_max_id:
-                        runner_up_matches = per_id_scores[1][1] if len(per_id_scores) > 1 else 0
-                        weight = max(0, win_matches - runner_up_matches)
-                        if weight > 0:
-                            votes[win_id] = votes.get(win_id, 0) + weight
+            # Collect results from the last completed background batch.
+            if hasattr(get_video_stream, "ringcode_future") and get_video_stream.ringcode_future is not None:
+                if get_video_stream.ringcode_future.done():
+                    if hasattr(get_video_stream, "ringcode_batch_start"):
+                        get_video_stream._ringcode_batch_time_sum += time.time() - get_video_stream.ringcode_batch_start
+                        get_video_stream._ringcode_batch_count += 1
+                    try:
+                        results = get_video_stream.ringcode_future.result()
+                    except Exception:
+                        results = {}
 
-                current_id = t_data.get("marker_id")
-                if votes:
-                    best_vote_id, best_vote = max(votes.items(), key=lambda kv: kv[1])
-                    if current_id is None or current_id not in votes:
-                        t_data["marker_id"] = best_vote_id
-                    elif best_vote_id != current_id and best_vote > votes.get(current_id, 0) * ringcode_id_switch_margin:
-                        t_data["marker_id"] = best_vote_id
-                t_data["ringcode_confidence"] = conf if rid is not None else t_data.get("ringcode_confidence", 0.0)
-                # Intentionally NOT clearing marker_id to None on a failed or
-                # low-confidence read this frame — same persistence
-                # philosophy as CCTag: as long as the disk is physically
-                # tracked, it keeps its last known ID until something else
-                # confidently claims it (the collision check right below).
+                    for t_id, (rid, conf, dbg) in results.items():
+                        t_data = get_video_stream.tracked_tokens.get(t_id)
+                        if t_data is None:
+                            # Track was deleted (ghosting timed out) while
+                            # this batch was in flight -- its result is
+                            # moot now.
+                            continue
 
-            # Resolve cross-token collisions: two Hough tracks both
-            # ending up with votes for the same ring-code ID. Compares
-            # accumulated vote weight for the claimed ID, not a single
-            # frame's confidence -- same reasoning, and the same pattern,
-            # as CCTag's own cross-token collision check just below (not
-            # applied there since that branch doesn't run in this mode): a
-            # momentary spurious circle that happens to win one noisy
-            # frame shouldn't be able to instantly steal an ID a real
-            # token has been building evidence for over many frames.
-            claimed = {}
-            for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
-                m_id = t_data.get("marker_id")
-                if m_id is None:
-                    continue
-                vote_weight = t_data.get("ringcode_votes", {}).get(m_id, 0)
-                missed = t_data.get("missed", 0)
-                if m_id not in claimed:
-                    claimed[m_id] = (t_id, vote_weight, missed)
-                else:
-                    ex_t, ex_v, ex_m = claimed[m_id]
-                    if missed < ex_m or (missed == ex_m and vote_weight > ex_v * ringcode_id_switch_margin):
-                        loser = get_video_stream.tracked_tokens[ex_t]
-                        loser["marker_id"] = None
-                        loser.get("ringcode_votes", {}).pop(m_id, None)
-                        claimed[m_id] = (t_id, vote_weight, missed)
-                    elif ex_m < missed or ex_v > vote_weight * ringcode_id_switch_margin:
-                        t_data["marker_id"] = None
-                        t_data.get("ringcode_votes", {}).pop(m_id, None)
-                    # else: neither side clearly wins -- leave both as-is,
-                    # same rationale as the CCTag collision check.
+                        t_data["ringcode_debug"] = dbg
+                        get_video_stream._ringcode_attempts += 1
+                        if rid is not None and (cctag_min_id <= rid <= cctag_max_id):
+                            get_video_stream._ringcode_successes += 1
+                            get_video_stream._ringcode_confidence_sum += conf
+
+                        # Temporal vote accumulation -- mirrors CCTag's
+                        # id_votes mechanism below exactly, for the same
+                        # underlying reason: this codebook's minimum
+                        # pairwise codeword distance (6 bits, see
+                        # ID_CODEWORDS in ringcode_decoder.py) only
+                        # guarantees recovering 2 actual bit-flip errors
+                        # from any single frame's read, so a token can sit
+                        # genuinely tied between its true ID and a
+                        # neighbor for many consecutive frames (confirmed
+                        # directly against a real stuck token's logged
+                        # reads). Accumulating each batch's own winning
+                        # margin as vote weight lets that true ID pull
+                        # ahead over many independent reads without
+                        # loosening ringcode_min_margin itself, which
+                        # would reopen the false-positive risk
+                        # _looks_like_marker exists to close. Votes decay
+                        # once per completed batch (not once per main-loop
+                        # frame anymore -- there's nothing new to decay
+                        # against on a frame where no new results landed).
+                        votes = t_data.setdefault("ringcode_votes", {})
+                        for k in list(votes.keys()):
+                            votes[k] *= ringcode_id_voting_decay
+                            if votes[k] < 0.01:
+                                del votes[k]
+                        per_id_scores = dbg.get("per_id_scores")
+                        if per_id_scores:
+                            # Winner-take-all for this batch, weighted by
+                            # its OWN margin over the runner-up -- a
+                            # decisive read contributes real weight, a
+                            # near-tied/ambiguous one contributes almost
+                            # nothing, so noisy or genuinely ambiguous
+                            # reads can't drown out a token's more
+                            # confident reads the way equal-weight voting
+                            # would (confirmed directly: equal-weight
+                            # voting over a real stuck token's logged reads
+                            # converged on the WRONG id, since a close
+                            # neighbor codeword won outright more often
+                            # than the true one did -- margin-weighting at
+                            # least ensures those wins count for less).
+                            win_id, win_matches, _ = per_id_scores[0]
+                            if cctag_min_id <= win_id <= cctag_max_id:
+                                runner_up_matches = per_id_scores[1][1] if len(per_id_scores) > 1 else 0
+                                weight = max(0, win_matches - runner_up_matches)
+                                if weight > 0:
+                                    votes[win_id] = votes.get(win_id, 0) + weight
+
+                        current_id = t_data.get("marker_id")
+                        if votes:
+                            best_vote_id, best_vote = max(votes.items(), key=lambda kv: kv[1])
+                            if current_id is None or current_id not in votes:
+                                t_data["marker_id"] = best_vote_id
+                            elif best_vote_id != current_id and best_vote > votes.get(current_id, 0) * ringcode_id_switch_margin:
+                                t_data["marker_id"] = best_vote_id
+                        t_data["ringcode_confidence"] = conf if rid is not None else t_data.get("ringcode_confidence", 0.0)
+                        # Intentionally NOT clearing marker_id to None on a
+                        # failed or low-confidence read -- same persistence
+                        # philosophy as CCTag: as long as the disk is
+                        # physically tracked (Hough position tracking above
+                        # runs every frame regardless of identification),
+                        # it keeps its last known ID until something else
+                        # confidently claims it (the collision check right
+                        # below) -- this is also exactly what keeps a
+                        # token's identity intact through the handful of
+                        # frames a background batch takes to complete.
+
+                    # Resolve cross-token collisions: two Hough tracks both
+                    # ending up with votes for the same ring-code ID.
+                    # Compares accumulated vote weight for the claimed ID,
+                    # not a single read's confidence -- same reasoning,
+                    # and the same pattern, as CCTag's own cross-token
+                    # collision check just below: a momentary spurious
+                    # circle that happens to win one noisy read shouldn't
+                    # be able to instantly steal an ID a real token has
+                    # been building evidence for over many reads. Run once
+                    # per completed batch, same as the accumulation above.
+                    claimed = {}
+                    for t_id, t_data in list(get_video_stream.tracked_tokens.items()):
+                        m_id = t_data.get("marker_id")
+                        if m_id is None:
+                            continue
+                        vote_weight = t_data.get("ringcode_votes", {}).get(m_id, 0)
+                        missed = t_data.get("missed", 0)
+                        if m_id not in claimed:
+                            claimed[m_id] = (t_id, vote_weight, missed)
+                        else:
+                            ex_t, ex_v, ex_m = claimed[m_id]
+                            if missed < ex_m or (missed == ex_m and vote_weight > ex_v * ringcode_id_switch_margin):
+                                loser = get_video_stream.tracked_tokens[ex_t]
+                                loser["marker_id"] = None
+                                loser.get("ringcode_votes", {}).pop(m_id, None)
+                                claimed[m_id] = (t_id, vote_weight, missed)
+                            elif ex_m < missed or ex_v > vote_weight * ringcode_id_switch_margin:
+                                t_data["marker_id"] = None
+                                t_data.get("ringcode_votes", {}).pop(m_id, None)
+                            # else: neither side clearly wins -- leave both
+                            # as-is, same rationale as the CCTag collision
+                            # check.
+
+                    get_video_stream.ringcode_future = None
+
+            # Submit a new batch if nothing is currently running. Snapshot
+            # (t_id, x, y, r) now rather than handing the background
+            # thread a live reference to tracked_tokens -- the main thread
+            # keeps mutating those positions every frame while this batch
+            # is in flight, and decode() needs a single, consistent
+            # (x, y, r) to search around, not one that could change out
+            # from under it mid-call.
+            if not getattr(get_video_stream, "ringcode_future", None):
+                token_snapshot = [
+                    (t_id, t_data["x"], t_data["y"], t_data["r"])
+                    for t_id, t_data in get_video_stream.tracked_tokens.items()
+                    if t_data.get("missed", 0) == 0
+                ]
+                if token_snapshot:
+                    gray_copy = gray.copy()  # Must copy; camera thread overwrites gray continuously
+                    get_video_stream.ringcode_batch_start = time.time()
+                    get_video_stream.ringcode_future = ringcode_executor.submit(
+                        _identify_ringcode_tokens, gray_copy, token_snapshot
+                    )
 
         elif ID_BACKEND == 'cctag':
           # --- SLOW RECOGNIZER: Full-Frame CCTag ---
@@ -2293,15 +2413,24 @@ def get_video_stream():
                     get_video_stream._ringcode_confidence_sum / _successes
                     if _successes else 0.0
                 )
+                _batch_count = get_video_stream._ringcode_batch_count
+                _avg_batch_ms = (
+                    get_video_stream._ringcode_batch_time_sum / _batch_count * 1000
+                    if _batch_count else 0.0
+                )
                 print(
                     f"[RingCode] decode success rate over last {_perf_elapsed:.0f}s: "
                     f"{_successes}/{_attempts} ({100.0 * _successes / _attempts:.0f}%) "
-                    f"attempts confident, avg confidence {_avg_conf:.2f} on successes",
+                    f"attempts confident, avg confidence {_avg_conf:.2f} on successes | "
+                    f"{_batch_count} background batches, avg {_avg_batch_ms:.0f}ms/batch "
+                    f"({_avg_batch_ms / max(1, _attempts / max(1, _batch_count)):.1f}ms/token)",
                     flush=True,
                 )
                 get_video_stream._ringcode_attempts = 0
                 get_video_stream._ringcode_successes = 0
                 get_video_stream._ringcode_confidence_sum = 0.0
+                get_video_stream._ringcode_batch_time_sum = 0.0
+                get_video_stream._ringcode_batch_count = 0
             get_video_stream._phase_frames = 0
             get_video_stream._phase_last_report = time.time()
             for _k in get_video_stream._phase_times:
